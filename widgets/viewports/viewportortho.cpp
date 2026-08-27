@@ -23,6 +23,9 @@
 #include "viewportortho.h"
 
 #include "dataset.h"
+#include "segmentation/undostack.h"
+#include "segmentation/segmentation.h"
+#include "annotation/annotation.h"
 #include "stateInfo.h"
 #include "viewer.h"
 
@@ -90,7 +93,17 @@ void ViewportOrtho::mouseMoveEvent(QMouseEvent *event) {
 
 void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     Segmentation::singleton().brush.setView(static_cast<brush_t::view_t>(viewportType), v1, v2, n);
+    // One scope for the whole drag: a stroke is dozens of stamps, and undoing them one at
+    // a time would be useless.
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
+        paintUndoScope = std::make_unique<UndoScope>(Segmentation::singleton().brush.isInverse() ? tr("Erase") : tr("Brush stroke"));
+    }
     ViewportBase::mousePressEvent(event);
+}
+
+void ViewportOrtho::mouseReleaseEvent(QMouseEvent *event) {
+    ViewportBase::mouseReleaseEvent(event);
+    paintUndoScope.reset();// closes the stroke, committing it as one undo entry
 }
 
 void ViewportOrtho::resetTexture(const std::size_t layerCount) {

@@ -27,6 +27,7 @@
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/undostack.h"
 #include "annotation/annotation.h"
 #include "loader.h"
 #include "stateInfo.h"
@@ -111,6 +112,7 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
     }
     const auto depth = depthOf(seed);
 
+    const UndoScope undoScope(QObject::tr("Adopt slice"));
     if (relabelFrom && *relabelFrom != soid && *relabelFrom != Segmentation::singleton().getBackgroundId()) {
         // voxel-level steal: rewrite that object's voxels in this plane only
         auto box = residentBoxAround(seed);
@@ -226,6 +228,7 @@ bool ShapeInterpolation::absorbRegion(const Coordinate & first, const Coordinate
 }
 
 bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
+    const UndoScope undoScope(QObject::tr("Bake interpolated slice"));
     if (!started || hasSliceAt(depth)) {
         return false;// already a real key slice
     }
@@ -507,6 +510,7 @@ ShapeInterpolation::WriteResult ShapeInterpolation::eraseSlices(QWidget * const 
  * (loader.cpp), so deferring the marking to the end would throw away everything the walk
  * had scrolled past. */
 ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeChain, const std::uint64_t value, const QString & title, QWidget * const parent) {
+    const UndoScope undoScope(title);
     WriteResult result;
     if (!started || slices.empty()) {
         result.message = QObject::tr("Nothing to write.");

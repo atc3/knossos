@@ -27,6 +27,7 @@
 #include "loader.h"
 #include "segmentation/labelonlyloading.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/undostack.h"
 #include "stateInfo.h"
 #include "viewer.h"
 
@@ -63,6 +64,10 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
         report.message = QObject::tr("Fill: the seed is outside the movement area.");
         return report;
     }
+
+    // the whole fill, including any load-and-continue rounds, is one undo step — which is
+    // the entire point: a fill that escapes through a gap is exactly what you need to undo
+    const UndoScope undoScope(request.threeDimensional ? QObject::tr("3D fill") : QObject::tr("2D fill"));
 
     FloodFillOptions options;
     options.threeDimensional = request.threeDimensional;

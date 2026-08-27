@@ -62,6 +62,7 @@ Q_OBJECT
     friend class CategoryModel;
     friend class SegmentationView;
     friend class SegmentationProxy;
+    friend class UndoStack;// snapshots and restores the object graph wholesale
 
     class Object;
     class SubObject {
@@ -69,6 +70,7 @@ Q_OBJECT
         friend void verticalSplittingPlane(const Coordinate & seed);
         friend class SegmentationObjectModel;
         friend class Segmentation;
+        friend class UndoStack;// saves and restores the id watermark
         static inline uint64_t highestId{0};
         std::vector<uint64_t> objects;
         std::size_t selectedObjectsCount = 0;
@@ -102,6 +104,7 @@ Q_OBJECT
         friend class SegmentationView;
         friend class SegmentationProxy;
         friend class Segmentation;
+        friend class UndoStack;// saves and restores the id watermarks
 
         static inline std::uint64_t highestId{0};
         static inline std::uint64_t highestIndex{std::numeric_limits<std::uint64_t>::max()};
@@ -134,6 +137,10 @@ Q_OBJECT
     uint64_t backgroundId = 0;
     // highest subobject id known to exist in the data, including parts never loaded
     std::uint64_t maxId = 0;
+    /* Bumped whenever the object graph changes. Undo uses it to skip serialising the
+     * mergelist for operations that only moved voxels — which is most of them, and the
+     * mergelist is megabytes of text on a large annotation. */
+    std::uint64_t graphRevision = 0;
     uint64_t hovered_subobject_id = 0;
     // Selection via subobjects touches all objects containing the subobject.
     uint64_t touched_subobject_id = 0;

@@ -44,3 +44,16 @@ left, which an earlier version stretched away.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/vplayout_test viewportlayout_test.cpp && /tmp/vplayout_test
 ```
+
+## undohistory_test
+
+Exercises `widgets/historytimeline.h`, the arithmetic behind the History window and the
+undo budget: that a row in the history list maps to the right number of undo/redo steps
+(with and without redoable states above the current one), that clicking a row lands on
+that row, and that budget eviction respects both the entry-count and total-size caps while
+never dropping the last remaining entry. This caught a sign error in the redo mapping that
+would have jumped to the wrong state whenever more than one redo was available.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/undohistory_test undohistory_test.cpp && /tmp/undohistory_test
+```

@@ -68,6 +68,8 @@
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
 		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>Off: paint only into unlabelled voxels, leaving other objects intact</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
+		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>
+		<tr><td><span class="sh">Ctrl + Shift + Z</span></td><td>Redo</td></tr>
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
 		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>
 		<tr><td><span class="sh">Hold space</span></td><td>Reveal raw data temporarily</td></tr>

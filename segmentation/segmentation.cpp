@@ -21,6 +21,7 @@
  */
 
 #include "segmentation.h"
+#include "undostack.h"
 
 #include "annotation/annotation.h"
 #include "annotation/file_io.h"
@@ -97,6 +98,14 @@ Segmentation & Segmentation::singleton() {
 
 Segmentation::Segmentation() {
     loadOverlayLutFromFile();
+    // every signal that means "the object graph is not what it was"
+    for (const auto signal : {&Segmentation::appendedRow, &Segmentation::removedRow, &Segmentation::resetData,
+                              &Segmentation::resetSelection, &Segmentation::categoriesChanged}) {
+        QObject::connect(this, signal, this, [this](){ ++graphRevision; });
+    }
+    QObject::connect(this, &Segmentation::changedRow, this, [this](int){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; });
 }
 
 bool Segmentation::hasSegData() const {
@@ -104,6 +113,10 @@ bool Segmentation::hasSegData() const {
 }
 
 void Segmentation::clear() {
+    // This throws away every overlay edit wholesale, which no cube snapshot can put back —
+    // so the history is meaningless afterwards and saying so beats offering an undo that
+    // would silently restore nothing.
+    UndoStack::singleton().clear();
     //dispatch to loader thread, original cubes are reloaded automatically
     QTimer::singleShot(0, Loader::Controller::singleton().worker.get(), &Loader::Worker::snappyCacheClear);
     mergelistClear();

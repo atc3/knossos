@@ -218,6 +218,7 @@ int main(int argc, char * argv[]) { boost::leaf::try_handle_all([argc, &argv]() 
     Splash splash(qApp->primaryScreen()->devicePixelRatio() == 1.0 ? ":/resources/splash.png" : ":/resources/splash@2x.png");
 #endif
     qRegisterMetaType<std::string>();
+    qRegisterMetaType<Loader::Worker::SnappySet>("Loader::Worker::SnappySet");
     qRegisterMetaType<Coordinate>();
     qRegisterMetaType<CoordOfCube>();
     qRegisterMetaType<Dataset>("Dataset");

@@ -34,6 +34,7 @@
 #include "segmentation/cubeloader.h"
 #include "segmentation/floodfill.h"
 #include "segmentation/shapeinterpolation.h"
+#include "segmentation/undostack.h"
 #include "skeleton/swc.h"
 #include "skeleton/node.h"
 #include "skeleton/skeleton_dfs.h"
@@ -141,6 +142,8 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     QObject::connect(&widgetContainer.snapshotWidget, &SnapshotWidget::snapshotRequest, [this](const SnapshotOptions & o) { viewport(o.vp)->takeSnapshot(o); });
 
     QObject::connect(&Annotation::singleton(), &Annotation::autoSaveSignal, [this](){ save(); });
+    // a different annotation is a different history
+    QObject::connect(&Annotation::singleton(), &Annotation::clearedAnnotation, [](){ UndoStack::singleton().clear(); });
 
     createToolbars();
     createMenus();
@@ -436,6 +439,7 @@ void MainWindow::createToolbars() {
     defaultToolbar.addSeparator();
     createToolToggleButton(widgetContainer.layerDialogWidget, ":/resources/icons/layers.png", "Layers");
     createToolToggleButton(widgetContainer.annotationWidget, ":/resources/icons/annotation.png", "Annotation");
+    createToolToggleButton(widgetContainer.historyWidget, ":/resources/icons/annotation.png", "History");
     createToolToggleButton(widgetContainer.zoomWidget, ":/resources/icons/zoom.png", "Zoom");
     shapeInterpolationButton = createToolToggleButton(widgetContainer.shapeInterpolationWidget, ":/resources/icons/annotation.png", "Shape Interpolation");
     createToolToggleButton(widgetContainer.snapshotWidget, ":/resources/icons/snapshot.png", "Snapshot");
@@ -758,6 +762,20 @@ void MainWindow::createMenus() {
         []() { Segmentation::singleton().brush.setRadius(Segmentation::singleton().brush.getRadius() + 0.5 * Dataset::current().scales[0].x); }, Qt::SHIFT + Qt::Key_Plus);
     shrinkBrushAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Decrease Brush Size (Shift + Scroll)"), &Segmentation::singleton(),
         []() { Segmentation::singleton().brush.setRadius(Segmentation::singleton().brush.getRadius() - 0.5 * Dataset::current().scales[0].x); }, Qt::SHIFT + Qt::Key_Minus);
+
+    actionMenu.addSeparator();
+    undoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Undo segmentation edit"), this, [this]() {
+        UndoStack::singleton().undo(this);
+    }, QKeySequence::Undo);
+    redoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Redo segmentation edit"), this, [this]() {
+        UndoStack::singleton().redo(this);
+    }, QKeySequence::Redo);
+    QObject::connect(&UndoStack::singleton(), &UndoStack::changed, this, [this]() {
+        undoAction->setEnabled(UndoStack::singleton().canUndo());
+        redoAction->setEnabled(UndoStack::singleton().canRedo());
+    });
+    undoAction->setEnabled(false);
+    redoAction->setEnabled(false);
 
     actionMenu.addSeparator();
     // flood fill. Paintera uses F / Shift+F, but F steps a slice in KNOSSOS, so this sits

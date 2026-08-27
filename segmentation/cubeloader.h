@@ -72,6 +72,11 @@ std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & glo
  * than by the movement area, which may be the whole dataset. */
 std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos);
 
+// Raw pointer to a resident overlay cube, or nullptr — for snapshotting a cube whole.
+void * residentCubePointer(std::size_t layerId, const CoordOfCube &);
+// Uncompressed size of one overlay cube, in bytes.
+std::size_t overlayCubeBytes(std::size_t layerId);
+
 // Replaces every occurrence of `from` with `to` in a region, returning how many voxels
 // changed. A voxel-level relabel, leaving the object graph alone.
 std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordinate & globalLast, std::uint64_t from, std::uint64_t to, bool markChanged = true);

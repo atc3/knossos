@@ -25,6 +25,7 @@
 #include "annotation/annotation.h"
 #include "loader.h"
 #include "segmentation.h"
+#include "undostack.h"
 #include "segmentationsplit.h"
 #include "stateInfo.h"
 
@@ -73,6 +74,7 @@ bool writeVoxel(const Coordinate & pos, const uint64_t value, bool isMarkChanged
     if (Annotation::singleton().outsideMovementArea(pos) || !cubeIt.first) {
         return false;
     }
+    UndoStack::singleton().recordCube(Segmentation::singleton().layerId, pos.cube(Dataset::current().cubeShape, Dataset::current().scaleFactor), cubeIt.second);
     const auto inCube = pos.insideCube(Dataset::current().cubeShape, Dataset::current().scaleFactor);
     getCubeRef<std::uint64_t>(cubeIt.second)[inCube.z][inCube.y][inCube.x] = value;
     if (isMarkChanged) {
@@ -190,6 +192,8 @@ CubeCoordSet processRegion(const Coordinate & globalFirst, const Coordinate &  g
         const auto globalCubeBegin = Dataset::current().cube2global(cubeCoord);
         auto rawcube = getRawCube(globalCubeBegin);
         if (rawcube.first) {
+            // snapshot before the first write lands in this cube (no-op outside a scope)
+            UndoStack::singleton().recordCube(Segmentation::singleton().layerId, cubeCoord, rawcube.second);
             auto cubeRef = getCubeRef(rawcube.second);
             const auto globalCubeEnd = globalCubeBegin + Dataset::current().scaleFactor.componentMul(cubeShape);
             const auto localStart = globalFirst.capped(globalCubeBegin, globalCubeEnd).insideCube(cubeShape, Dataset::current().scaleFactor);
@@ -231,6 +235,7 @@ void collectFromMovementArea() {
 }
 
 void assignNewIdInMovementArea(const std::uint64_t newId) {
+    const UndoScope undoScope(QObject::tr("Assign new id"));
     const auto cubeChangeSet = processRegion(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax, [newId](uint64_t & voxel, Coordinate){
         if (Segmentation::singleton().isSubObjectIdSelected(voxel)) {
             voxel = newId;
@@ -376,6 +381,15 @@ std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordin
     return changed;
 }
 
+void * residentCubePointer(const std::size_t layerId, const CoordOfCube & cubeCoord) {
+    QMutexLocker locker(&state->protectCube2Pointer);
+    return cubeQuery(state->cube2Pointer, layerId, Dataset::datasets[layerId].magIndex, cubeCoord);
+}
+
+std::size_t overlayCubeBytes(const std::size_t layerId) {
+    return OBJID_BYTES * static_cast<std::size_t>(Dataset::datasets[layerId].cubeShape.prod());
+}
+
 std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos) {
     const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
     const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
@@ -427,6 +441,8 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
             cachedCoord = cubeCoord;
             cachedCube = getRawCube(pos, layerId).second;
             cacheValid = true;
+            // a fill is the one operation whose cube set is only known as it runs
+            UndoStack::singleton().recordCube(layerId, cubeCoord, cachedCube);
         }
         return cachedCube;
     };

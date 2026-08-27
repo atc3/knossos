@@ -65,6 +65,9 @@ class ViewportOrtho : public ViewportBase {
     class nodeListElement *draggedNode = nullptr;
 
     virtual void mousePressEvent(QMouseEvent *event) override;
+    virtual void mouseReleaseEvent(QMouseEvent *event) override;
+    // spans a whole drag, so one stroke is one undo step rather than one per stamp
+    std::unique_ptr<class UndoScope> paintUndoScope;
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;
