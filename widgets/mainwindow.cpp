@@ -406,9 +406,6 @@ void MainWindow::createToolbars() {
     subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
     paintTargetButton = new QToolButton(this);
     paintTargetButton->setPopupMode(QToolButton::InstantPopup);
-    paintTargetButton->setIcon(QIcon(":/resources/icons/painttarget.png"));
-    // keeps the current choice readable at a glance, unlike the icon-only buttons
-    paintTargetButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     paintTargetButton->setToolTip(tr("<b>What the brush may write over.</b><br/>Erasing is unaffected by any of these."));
     paintTargetMenu = new QMenu(paintTargetButton);
     paintTargetButton->setMenu(paintTargetMenu);
@@ -2106,19 +2103,24 @@ bool MainWindow::confirmLeavingShapeInterpolation() {
 
 void MainWindow::rebuildPaintTargetMenu() {
     using Target = Segmentation::PaintTarget;
-    struct Option { Target target; QString label; QString hint; };
-    const std::array<Option, 3> options{{
-        {Target::Anything, tr("overwrite"), tr("Replace whatever is under the brush.")},
-        {Target::OnlyBackground, tr("no overwrite"), tr("Paint only into unlabelled voxels; other objects are left intact.")},
+    struct Named { Target target; QString label; QString hint; QString icon; };
+    // the icon differs per mode, so which one is active is still visible on an icon-only
+    // button: the brush covering the label, stopping at it, or stopping a voxel short
+    const std::array<Named, 3> options{{
+        {Target::Anything, tr("overwrite"), tr("Replace whatever is under the brush."),
+         QStringLiteral(":/resources/icons/painttarget-overwrite.png")},
+        {Target::OnlyBackground, tr("no overwrite"), tr("Paint only into unlabelled voxels; other objects are left intact."),
+         QStringLiteral(":/resources/icons/painttarget-nooverwrite.png")},
         {Target::BackgroundWithGap, tr("no overwrite + 1 voxel boundary"),
          tr("As above, and refuse any voxel touching another label — including diagonally. "
-            "Every object keeps a one-voxel background boundary.")},
+            "Every object keeps a one-voxel background boundary."),
+         QStringLiteral(":/resources/icons/painttarget-gap.png")},
     }};
 
     paintTargetMenu->clear();
     const auto current = Segmentation::singleton().paintTarget;
     for (const auto & option : options) {
-        auto * action = paintTargetMenu->addAction(option.label, [this, target = option.target](){
+        auto * action = paintTargetMenu->addAction(QIcon(option.icon), option.label, [this, target = option.target](){
             Segmentation::singleton().paintTarget = target;
             rebuildPaintTargetMenu();
         });
@@ -2126,7 +2128,9 @@ void MainWindow::rebuildPaintTargetMenu() {
         action->setChecked(option.target == current);
         action->setToolTip(option.hint);
         if (option.target == current) {
-            paintTargetButton->setText(option.label);
+            paintTargetButton->setIcon(QIcon(option.icon));
+            paintTargetButton->setToolTip(tr("<b>What the brush may write over: %1.</b><br/>%2<br/>Erasing is unaffected.")
+                                              .arg(option.label).arg(option.hint));
         }
     }
 }
