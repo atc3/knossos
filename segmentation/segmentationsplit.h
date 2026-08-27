@@ -98,6 +98,9 @@ signals:
     void shapeChanged(const shape_t);
 };
 
+// Superseded by floodFill() in cubeloader.h and currently unused: this one is bounded by
+// the visible region rather than by cube residency, so it spills into unloaded blocks
+// where the writes are silently dropped. Kept for reference.
 void subobjectBucketFill(const Coordinate & seed, const uint64_t fillsoid, const brush_t & brush, const Coordinate & areaMin, const Coordinate & areaMax);
 void connectedComponent(const Coordinate & seed);
 void verticalSplittingPlane(const Coordinate & seed);

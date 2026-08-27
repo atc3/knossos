@@ -33,6 +33,8 @@
 #include "segmentation/cubeloader.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/segmentationsplit.h"
+#include "segmentation/floodfill.h"
+#include "segmentation/shapeinterpolation.h"
 #include "skeleton/skeletonizer.h"
 #include "skeleton/tree.h"
 #include "stateInfo.h"
@@ -42,6 +44,9 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <QStatusBar>
+
+#include <optional>
 
 #include <boost/optional.hpp>
 
@@ -109,10 +114,77 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
             }
             if (seg.selectedObjectsCount() > 0) {
                 uint64_t soid = seg.subobjectIdOfFirstSelectedObject(coord);
-                writeVoxels(coord, soid, seg.brush.value());
+                auto brush = seg.brush.value();
+                const bool shapeInterpolation = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+                if (shapeInterpolation) {
+                    brush.mode = brush_t::mode_t::two_dim;// key slices are strictly planar
+                    // Touching a previewed slice bakes it first, so the stroke edits a real
+                    // outline instead of being the only thing on an otherwise empty slice.
+                    // Must happen before the stroke, or an erase would be undone by the bake.
+                    auto & si = ShapeInterpolation::singleton();
+                    if (si.active() && si.normalAxisViewport() == static_cast<int>(vp.viewportType)) {
+                        QString note;
+                        if (si.materializeAt(axisGet(coord, si.normalAxis()), note)) {
+                            state->viewer->mainWindow.statusBar()->showMessage(note, 5000);
+                        }
+                    }
+                }
+                writeVoxels(coord, soid, brush);
+                if (shapeInterpolation) {
+                    QString reason;
+                    if (!ShapeInterpolation::singleton().absorbStamp(coord, brush, soid, reason)) {
+                        state->viewer->mainWindow.statusBar()->showMessage(reason, 5000);
+                    }
+                }
             }
         }
     }
+}
+
+/* 2D/3D flood fill, seeded at `coord`.
+ *
+ * Replaces the old middle-click bucket fill, which was bounded by whatever happened to be
+ * on screen and which spilled into unloaded blocks — where every write was silently
+ * dropped. This one stops at the edge of the loaded blocks and says so. */
+void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const bool threeDimensional) {
+    auto & seg = Segmentation::singleton();
+    if (Annotation::singleton().magLock && Dataset::datasets[seg.layerId].magIndex != Annotation::singleton().magLock.value()) {
+        return;
+    }
+    if (vp.viewportType != VIEWPORT_XY && vp.viewportType != VIEWPORT_XZ && vp.viewportType != VIEWPORT_ZY) {
+        // a 2D fill needs an axis-aligned plane to stay in; the arbitrary viewport has none
+        state->viewer->mainWindow.statusBar()->showMessage(QObject::tr("Fill: use one of the xy/xz/zy viewports."), 5000);
+        return;
+    }
+    if (seg.createPaintObject && seg.selectedObjectsCount() == 0) {
+        seg.createAndSelectObject(coord);
+    }
+    if (seg.selectedObjectsCount() == 0) {
+        return;
+    }
+
+    FloodFillRequest request;
+    request.seed = coord;
+    request.fillsoid = seg.brush.isInverse() ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+    request.threeDimensional = threeDimensional;
+    request.view = static_cast<brush_t::view_t>(vp.viewportType);
+    request.mayLoadCubes = Segmentation::singleton().floodFillMayLoadCubes;
+
+    const auto report = state->viewer->suspend([&]{ return runFloodFill(request, &state->viewer->mainWindow); });
+    auto message = report.message;
+
+    if (report.didSomething && Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+        auto & si = ShapeInterpolation::singleton();
+        QString reason;
+        const auto depth = si.active() ? axisGet(coord, si.normalAxis()) : 0;
+        if (!si.active()) {
+            message += " " + QObject::tr("Paint a stroke first — a fill alone doesn’t start a chain.");
+        } else if (!si.absorbRegion(report.filledMin, report.filledMax, depth, request.fillsoid, reason)) {
+            message += " " + reason;
+        }
+    }
+    state->viewer->mainWindow.statusBar()->showMessage(message, 8000);
+    state->viewer->run();
 }
 
 void ViewportOrtho::handleMouseHover(const QMouseEvent *event) {
@@ -314,11 +386,40 @@ void Viewport3D::handleMouseMotionLeftHold(const QMouseEvent *event) {
     ViewportBase::handleMouseMotionLeftHold(event);
 }
 
+/* Shift + left is a second paint gesture alongside right drag, for anyone whose hand
+ * expects Paintera's left-button painting. It always paints and never erases: Shift is
+ * KNOSSOS's erase modifier, so the brush's inverse flag is overridden for these strokes.
+ * Erasing stays on Shift + right drag. */
+bool ViewportOrtho::shiftLeftPaint(const QMouseEvent *event) {
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)
+            || !event->modifiers().testFlag(Qt::ShiftModifier)
+            || event->modifiers().testFlag(Qt::ControlModifier)
+            || event->modifiers().testFlag(Qt::AltModifier)) {
+        return false;
+    }
+    auto & brush = Segmentation::singleton().brush;
+    const auto wasInverse = brush.isInverse();
+    brush.setInverse(false);
+    segmentation_brush_work(event, *this);
+    brush.setInverse(wasInverse);
+    return true;
+}
+
 void ViewportOrtho::handleMouseMotionLeftHold(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        return;
+    }
     if (event->modifiers() == Qt::NoModifier) {
         state->viewer->userMove(handleMovement(event->pos()), USERMOVE_HORIZONTAL, n);
     }
     ViewportBase::handleMouseMotionLeftHold(event);
+}
+
+void ViewportOrtho::handleMouseButtonLeft(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        return;
+    }
+    ViewportBase::handleMouseButtonLeft(event);
 }
 
 void Viewport3D::handleMouseMotionRightHold(const QMouseEvent *event) {
@@ -389,6 +490,11 @@ void ViewportBase::handleMouseReleaseLeft(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        state->viewer->userMoveClear();
+        ViewportBase::handleMouseReleaseLeft(event);
+        return;
+    }
     auto & segmentation = Segmentation::singleton();
     const auto clickPos = getCoordinateFromOrthogonalClick(event->pos(), *this);
     if (!Annotation::singleton().outsideMovementArea(clickPos) && Annotation::singleton().annotationMode.testFlag(AnnotationMode::ObjectSelection)) { // in task mode the object should not be switched
@@ -432,34 +538,10 @@ void ViewportOrtho::handleMouseReleaseMiddle(const QMouseEvent *event) {
     Coordinate clickedCoordinate = getCoordinateFromOrthogonalClick(event->pos(), *this);
     if (!Annotation::singleton().outsideMovementArea(clickedCoordinate)) {
         EmitOnCtorDtor eocd(&SignalRelay::Signal_EventModel_handleMouseReleaseMiddle, state->signalRelay, clickedCoordinate, viewportType, event);
-        auto & seg = Segmentation::singleton();
-        if ((Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_Paint) || Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) && seg.selectedObjectsCount() == 1) {
-            auto brush_copy = seg.brush.value();
-            uint64_t soid = brush_copy.inverse ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(clickedCoordinate);
-            brush_copy.shape = brush_t::shape_t::angular;
-            brush_copy.radius = displayedIsoPx;//set brush to fill visible area
-
-            const auto displayedMag1Px = displayedIsoPx / Dataset::current().scales[0].x;
-            auto areaMin = state->viewerState->currentPosition - displayedMag1Px;
-            auto areaMax = state->viewerState->currentPosition + displayedMag1Px;
-
-            areaMin = areaMin.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
-            areaMax = areaMax.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax) + 1;
-
-            if (false) {
-            if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint) && Dataset::datasets[Segmentation::singleton().layerId].boundary.z > 1) {
-                const bool isAdjacent = (seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate), clickedCoordinate))
-                                        + seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate + n), clickedCoordinate + n))
-                                        + seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate - n), clickedCoordinate - n))) > 1;
-                if (!brush_copy.inverse && brush_copy.mode == brush_t::mode_t::two_dim && isAdjacent) {
-                    auto brush_copy2 = brush_copy;
-                    brush_copy2.inverse = true;
-                    subobjectBucketFill(clickedCoordinate, seg.getBackgroundId(), brush_copy2, areaMin, areaMax);
-
-                    brush_copy.mode = brush_t::mode_t::adjacent;
-                }
-            }}
-            subobjectBucketFill(clickedCoordinate, soid, brush_copy, areaMin, areaMax);
+        const auto & mode = Annotation::singleton().annotationMode;
+        if (mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint)) {
+            // Shift picks the 3D fill; plain middle click is the 2D one
+            segmentation_flood_fill(clickedCoordinate, *this, event->modifiers().testFlag(Qt::ShiftModifier));
         }
     }
     //finish node drag
@@ -597,7 +679,52 @@ void ViewportBase::handleKeyPress(const QKeyEvent *event) {
     }
 }
 
+/* While a shape-interpolation chain is running, the arrow keys jump between painted key
+ * slices instead of panning in-plane, matching Paintera's bindings. D/F/E/R and the mouse
+ * wheel keep stepping through slices freely, so nothing is actually lost. */
+bool ViewportOrtho::handleShapeInterpolationKey(const QKeyEvent *event) {
+    auto & si = ShapeInterpolation::singleton();
+    if (!si.active() || static_cast<int>(viewportType) != si.normalAxisViewport()) {
+        return false;
+    }
+    const auto shift = event->modifiers().testFlag(Qt::ShiftModifier);
+    const auto depth = axisGet(state->viewerState->currentPosition, si.normalAxis());
+    std::optional<int> target;
+    switch (event->key()) {
+    case Qt::Key_Left:
+        target = shift ? si.firstDepth() : si.prevDepth(depth);
+        break;
+    case Qt::Key_Right:
+        target = shift ? si.lastDepth() : si.nextDepth(depth);
+        break;
+    case Qt::Key_Delete:
+    case Qt::Key_Backspace:
+        if (si.removeSliceAt(depth)) {
+            state->viewer->mainWindow.statusBar()->showMessage(tr("Removed the key slice at %1. Its painted voxels are still there — erase them if you don’t want them.").arg(depth), 5000);
+            state->viewer->run();
+        }
+        return true;
+    case Qt::Key_Escape:
+        si.reset();
+        state->viewer->mainWindow.statusBar()->showMessage(tr("Shape interpolation: chain ended. Painted slices are kept."), 5000);
+        state->viewer->run();
+        return true;
+    default:
+        return false;
+    }
+    if (target) {
+        auto pos = state->viewerState->currentPosition;
+        axisSet(pos, si.normalAxis(), *target);
+        state->viewer->setPosition(pos, USERMOVE_DRILL, n);
+    }
+    return true;// arrows mean slice navigation in this mode, even at the ends of the chain
+}
+
 void ViewportOrtho::handleKeyPress(const QKeyEvent *event) {
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            && !event->isAutoRepeat() && handleShapeInterpolationKey(event)) {
+        return;
+    }
     //events
     //↓          #   #   #   #   #   #   #   # ↑  ↓          #  #  #…
     //^ os delay ^       ^---^ os key repeat
@@ -615,6 +742,12 @@ void ViewportOrtho::handleKeyPress(const QKeyEvent *event) {
     const bool keyDown = event->key() == Qt::Key_Down;
     const auto singleVoxelKey = keyD || keyF || keyLeft || keyRight || keyUp || keyDown;
     const bool keyE = event->key() == Qt::Key_E;
+    // Ctrl/Cmd/Alt combinations belong to shortcuts, not to slice stepping — otherwise a
+    // binding like Ctrl+F silently moves a slice as well as (or instead of) firing
+    if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::AltModifier) || event->modifiers().testFlag(Qt::MetaModifier)) {
+        ViewportBase::handleKeyPress(event);
+        return;
+    }
     if (!event->isAutoRepeat()) {
         const int shiftMultiplier = event->modifiers().testFlag(Qt::ShiftModifier) ? 10 : 1;
         const auto direction = (n * -1).dot(state->viewerState->tracingDirection) >= 0 ? 1 : -1;// reverse n into the frame

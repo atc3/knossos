@@ -176,6 +176,10 @@ public:
     uint8_t alpha;
     brush_subject brush;
     bool createPaintObject{true};
+    // Off by default: letting a fill pull the loader along moves the view, evicts what
+    // the user was looking at, and on a connected region can walk a very long way.
+    // 2D fills only — a 3D fill is always confined to the resident blocks.
+    bool floodFillMayLoadCubes{false};
     // for mode in which edges are online highlighted for objects when selected and being hovered over by mouse
     bool hoverVersion{false};
     uint64_t mouseFocusedObjectId{0};

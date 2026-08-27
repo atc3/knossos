@@ -116,6 +116,7 @@ class MainWindow : public QMainWindow {
                                                  {AnnotationMode::Mode_Paint, tr("Segmentation Paint")},
                                                  {AnnotationMode::Mode_OverPaint, tr("Segmentation Overpaint")},
                                                  {AnnotationMode::Mode_CellSegmentation, tr("Segmentation Cell Painting")},
+                                                 {AnnotationMode::Mode_ShapeInterpolation, tr("Segmentation Shape Interpolation")},
                                                  {AnnotationMode::Mode_Selection, tr("Review")},
                                                };
     WorkModeModel workModeModel;
@@ -144,6 +145,18 @@ class MainWindow : public QMainWindow {
     QAction *modeSwitchSeparator{nullptr};
     QAction *setMergeModeAction{nullptr};
     QAction *setPaintModeAction{nullptr};
+    // flood fill
+    QAction *fill2dAction{};
+    QAction *fill3dAction{};
+    QAction *fillMayLoadAction{};
+    // shape interpolation
+    QAction *shapeInterpolationAcceptAction{};
+    QAction *shapeInterpolationPreviewAction{};
+    QAction *shapeInterpolationAlignAction{};
+    QAction *shapeInterpolationDiscardAction{};
+    QAction *shapeInterpolationToggleModeAction{};
+    QAction *jumpToActiveNodeAction{};// held so its `S` shortcut can yield in paint modes
+    class QToolButton *shapeInterpolationButton{};
     // cell mode
     QAction *cytoAction{};
     QAction *plusNucAction{};
@@ -183,6 +196,7 @@ class MainWindow : public QMainWindow {
     QLabel cubePositionLabel;
     QLabel hoverLabel;
     QLabel GUIModeLabel{""};
+    QLabel shapeInterpolationLabel;// persistent chain state: plane, key slices, span
     QLabel nodeLockingLabel;
     QLabel segmentStateLabel;
     QLabel synapseStateLabel;
@@ -274,6 +288,7 @@ public slots:
 
     /* edit skeleton menu*/
     void setWorkMode(AnnotationMode workMode);
+    void updateShapeInterpolationLabel();
     void clearSkeletonSlot();
 
     /* preferences menu */

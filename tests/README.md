@@ -1,0 +1,33 @@
+# tests
+
+KNOSSOS has no test harness, and CMake does not compile anything in this directory
+(`CMakeLists.txt` globs `annotation/ mesh/ scriptengine/ segmentation/ slicer/ skeleton/
+tinyply/ widgets/` only). These are standalone programs for the parts that are pure
+computation and worth pinning down.
+
+## distancetransform_test
+
+Exercises `segmentation/distancetransform.h`, the signed Euclidean distance transform and
+distance-field blend behind shape interpolation. Checks the sign convention, that
+anisotropic voxel spacing is measured in nanometres rather than pixels, that interpolating
+between two discs tracks the expected radius, that the key slices reproduce exactly at
+t=0 and t=1, and that centroid alignment keeps a laterally drifting shape from pinching or
+vanishing.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/dt_test distancetransform_test.cpp && /tmp/dt_test
+```
+
+Exits non-zero on failure.
+
+## sislice_test
+
+Exercises `segmentation/sislice.h`, the 2D key-slice mask. Mostly index arithmetic: global
+coordinate ↔ mask index round-trips at magnification 1 and 4, that growing the bounding box
+downward shifts the origin so painted voxels keep reading back at the same global
+coordinate, that the origin stays on the magnification lattice, erase accounting, and
+`shrinkToFit`.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/sislice_test sislice_test.cpp && /tmp/sislice_test
+```

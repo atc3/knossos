@@ -33,6 +33,7 @@
 #include <boost/multi_array.hpp>
 
 #include <cstdint>
+#include <limits>
 
 std::pair<bool, void *> getRawCube(const Coordinate & pos, const std::size_t layerIdx = Segmentation::singleton().layerId) {
     QMutexLocker locker(&state->protectCube2Pointer);
@@ -308,4 +309,160 @@ void listFill(const Coordinate & centerPos, const brush_t & brush, const uint64_
         }
     });
     coordCubesMarkChanged(cubeChangeSet);
+}
+
+CubeCoordSet readRegion(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelVisitor & visit) {
+    return processRegion(globalFirst, globalLast, [&visit](uint64_t & voxel, Coordinate globalPos){
+        visit(voxel, globalPos);
+    });
+}
+
+CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t & brush, const VoxelVisitor & visit) {
+    const auto region = getRegion(centerPos, brush);
+    return readRegion(region.first, region.second, visit);
+}
+
+CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged) {
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value](uint64_t & voxel, Coordinate globalPos){
+        if (inside(globalPos)) {
+            voxel = value;
+        }
+    });
+    if (markChanged) {
+        coordCubesMarkChanged(cubeChangeSet);
+    }
+    return cubeChangeSet;
+}
+
+std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast) {
+    const auto cubeBegin = Dataset::current().global2cube(globalFirst);
+    const auto cubeEnd = Dataset::current().global2cube(globalLast) + 1;
+    CubeCoordSet resident, missing;
+    for (int z = cubeBegin.z; z < cubeEnd.z; ++z)
+    for (int y = cubeBegin.y; y < cubeEnd.y; ++y)
+    for (int x = cubeBegin.x; x < cubeEnd.x; ++x) {
+        const auto cubeCoord = CoordOfCube(x, y, z);
+        (getRawCube(Dataset::current().cube2global(cubeCoord)).first ? resident : missing).emplace(cubeCoord);
+    }
+    return {resident, missing};
+}
+
+FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, const std::uint64_t targetSoid, const std::uint64_t fillsoid,
+                              const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
+    FloodFillResult result;
+    if (targetSoid == fillsoid) {
+        result.seedAlreadyFilled = true;
+        return result;
+    }
+    const auto layerId = Segmentation::singleton().layerId;
+    const auto & dataset = Dataset::datasets[layerId];
+    const auto scaleFactor = dataset.scaleFactor;// float, for insideCube()
+    // integer voxel step for the walk; scaleFactor is 2^magIndex, so this is exact
+    const Coordinate step{std::max(1, static_cast<int>(scaleFactor.x)), std::max(1, static_cast<int>(scaleFactor.y)), std::max(1, static_cast<int>(scaleFactor.z))};
+    const auto cubeShape = dataset.cubeShape;
+
+    // Flood fills have strong spatial locality, so caching the cube the last voxel landed
+    // in turns one mutex acquisition per voxel into one per cube. Safe only because the
+    // caller suspends the loader for the duration — nothing can evict underneath us.
+    CoordOfCube cachedCoord{std::numeric_limits<int>::min(), 0, 0};
+    void * cachedCube{nullptr};
+    bool cacheValid{false};
+    const auto cubeAt = [&](const Coordinate & pos) -> void * {
+        const auto cubeCoord = dataset.global2cube(pos);
+        if (!cacheValid || !(cubeCoord == cachedCoord)) {
+            cachedCoord = cubeCoord;
+            cachedCube = getRawCube(pos, layerId).second;
+            cacheValid = true;
+        }
+        return cachedCube;
+    };
+    const auto voxelAt = [&](void * const cube, const Coordinate & pos) -> std::uint64_t & {
+        const auto inCube = pos.insideCube(cubeShape, scaleFactor);
+        return getCubeRef<std::uint64_t>(cube, layerId)[inCube.z][inCube.y][inCube.x];
+    };
+
+    std::vector<Coordinate> work;
+    const auto claim = [&](const Coordinate & pos){
+        auto * cube = cubeAt(pos);
+        if (cube == nullptr) {
+            // A cube that is not in memory is a wall, not background. Without this check
+            // readVoxel() would report background here and the fill would spill onwards,
+            // writing nothing — silently leaving a hole.
+            ++result.blockedAtBoundary;
+            result.pendingCubes.insert(cachedCoord);
+            result.deferred.insert(pos);// a set: the same frontier voxel is reached from several sides
+            return;
+        }
+        auto & voxel = voxelAt(cube, pos);
+        if (voxel != targetSoid) {
+            return;
+        }
+        voxel = fillsoid;
+        if (result.voxelsFilled == 0) {
+            result.filledMin = result.filledMax = pos;
+        } else {
+            result.filledMin = {std::min(result.filledMin.x, pos.x), std::min(result.filledMin.y, pos.y), std::min(result.filledMin.z, pos.z)};
+            result.filledMax = {std::max(result.filledMax.x, pos.x), std::max(result.filledMax.y, pos.y), std::max(result.filledMax.z, pos.z)};
+        }
+        ++result.voxelsFilled;
+        result.cubes.insert(cachedCoord);
+        work.push_back(pos);
+    };
+
+    for (const auto & seed : seeds) {
+        if (seed.x < areaMin.x || seed.y < areaMin.y || seed.z < areaMin.z
+                || seed.x > areaMax.x || seed.y > areaMax.y || seed.z > areaMax.z) {
+            continue;
+        }
+        claim(seed);
+    }
+    if (work.empty() && result.voxelsFilled == 0 && result.blockedAtBoundary == 0) {
+        result.seedNotLoaded = seeds.size() == 1 && cubeAt(*std::begin(seeds)) == nullptr;
+        coordCubesMarkChanged(result.cubes);
+        return result;
+    }
+
+    while (!work.empty()) {
+        if (result.voxelsFilled >= options.maxVoxels) {
+            result.hitCap = true;
+            break;
+        }
+        const auto pos = work.back();
+        work.pop_back();
+
+        const auto visit = [&](const Coordinate & next){
+            if (next.x < areaMin.x || next.y < areaMin.y || next.z < areaMin.z
+                    || next.x > areaMax.x || next.y > areaMax.y || next.z > areaMax.z) {
+                return;
+            }
+            claim(next);
+        };
+        // in 2D only the two axes spanned by the viewport plane are walked
+        if (options.threeDimensional || options.view != brush_t::view_t::zy) {
+            visit({pos.x + step.x, pos.y, pos.z});
+            visit({pos.x - step.x, pos.y, pos.z});
+        }
+        if (options.threeDimensional || options.view != brush_t::view_t::xz) {
+            visit({pos.x, pos.y + step.y, pos.z});
+            visit({pos.x, pos.y - step.y, pos.z});
+        }
+        if (options.threeDimensional || options.view != brush_t::view_t::xy) {
+            visit({pos.x, pos.y, pos.z + step.z});
+            visit({pos.x, pos.y, pos.z - step.z});
+        }
+    }
+
+    coordCubesMarkChanged(result.cubes);
+    return result;
+}
+
+FloodFillResult floodFill(const Coordinate & seed, const std::uint64_t fillsoid,
+                          const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
+    const auto seedCube = getRawCube(seed, Segmentation::singleton().layerId);
+    if (!seedCube.first) {
+        FloodFillResult result;
+        result.seedNotLoaded = true;
+        return result;
+    }
+    return floodFillFrom({seed}, readVoxel(seed), fillsoid, options, areaMin, areaMax);
 }

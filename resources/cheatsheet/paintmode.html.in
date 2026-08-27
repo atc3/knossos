@@ -21,10 +21,13 @@
 				<th align="left">Shortcut</th><th align="left">Action</th>
 			</tr>
 		</thead>
-		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>Bucket fill</td></tr>
-		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click on selection"/> on selection</span></td><td>bounded by adjacent frame fills</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>2D fill (stops at the edge of the loaded blocks)</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>3D fill (always confined to the loaded blocks)</td></tr>
+		<tr><td><span class="sh">G</span></td><td>2D fill at the crosshair</td></tr>
+		<tr><td><span class="sh">Shift + G</span></td><td>3D fill at the crosshair</td></tr>
 		<tr><td><span class="sh">Shift +  <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> scroll</span></td><td>Change brush size</td></tr>
 		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Draw</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Draw (alternative to right click; always paints, never erases)</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Erase</td></tr>
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
 		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>

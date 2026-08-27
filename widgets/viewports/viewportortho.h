@@ -28,7 +28,14 @@
 #include "viewportbase.h"
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
+#include <vector>
 #include <unordered_set>
+
+class ViewportOrtho;
+// 2D/3D flood fill seeded at `coord`, bounded by the blocks currently in memory.
+void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, bool threeDimensional);
 
 class ViewportOrtho : public ViewportBase {
     Q_OBJECT
@@ -45,6 +52,13 @@ class ViewportOrtho : public ViewportBase {
     void renderSegPlaneIntersection(const segmentListElement & segment);
     virtual void renderNode(const nodeListElement & node, const RenderOptions & options = RenderOptions()) override;
     void renderBrush(const Coordinate coord);
+    void renderShapeInterpolationPreview();
+    // preview texture, created lazily because it needs a current GL context
+    std::unique_ptr<QOpenGLTexture> interpolationPreviewTex;
+    std::uint64_t interpolationPreviewKey{~0ull};
+    std::uint64_t interpolationPreviewGen{0};
+    int interpolationPreviewUSize{0}, interpolationPreviewVSize{0};
+    std::vector<std::uint8_t> interpolationPreviewRGBA;
     virtual void renderViewportFrontFace() override;
 
     floatCoordinate arbNodeDragCache = {};
@@ -54,7 +68,11 @@ class ViewportOrtho : public ViewportBase {
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;
+    // returns true when the key was consumed by an active shape-interpolation session
+    bool handleShapeInterpolationKey(const QKeyEvent *event);
     virtual void handleMouseHover(const QMouseEvent *event) override;
+    virtual void handleMouseButtonLeft(const QMouseEvent *event) override;
+    bool shiftLeftPaint(const QMouseEvent *event);
     virtual void handleMouseReleaseLeft(const QMouseEvent *event) override;
     virtual void handleMouseMotionLeftHold(const QMouseEvent *event) override;
     virtual void handleMouseButtonRight(const QMouseEvent *event) override;

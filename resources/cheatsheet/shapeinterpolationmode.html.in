@@ -1,0 +1,70 @@
+<html>
+<head>
+	<meta content="text/html; charset=utf-8"/>
+	<link rel="stylesheet" href=":/resources/cheatsheet/cheatsheet.css" type="text/css" />
+</head>
+
+<body>
+	<h1>Segmentation Shape Interpolation</h1>
+
+	<p><a href=#annotation_seg>Segmentation table view</a> | <a href=#pref_seg>Visibility preferences</a></p>
+	<p><a href=#navi>Navigation preferences</a></p>
+
+	<p>
+	Paint an object on a few widely spaced slices and let KNOSSOS fill in everything between them.
+	Paint a slice, move to another slice, paint it again — the shape in between is previewed
+	continuously. Add as many slices as you like; each adjacent pair gets its own interpolation.
+	Press Enter to commit the whole chain at once.
+	</p>
+
+	<p>
+	The interpolation axis is fixed by the viewport you paint the first slice in: painting in
+	<b>xy</b> interpolates along z, <b>xz</b> along y, <b>zy</b> along x. The status bar shows
+	which plane the chain is in and how many key slices it has. The other two viewports show a
+	cross-section through the whole chain, so you can watch the shape from the side as you build it.
+	</p>
+
+	<p>
+	<b>Switching plane:</b> a chain belongs to one axis. While it has at most one key slice,
+	painting in a different viewport simply moves it there. Once there are two or more, press
+	Esc to end the chain first — the painted slices are kept either way.
+	</p>
+
+	<p>
+	<b>Correcting an interpolated slice:</b> just paint or erase on it. The preview is baked
+	into a real key slice on the first stroke, so you only have to touch the part that is wrong.
+	</p>
+
+	<p>
+	<table>
+		<thead>
+			<tr>
+				<th align="left">Shortcut</th><th align="left">Action</th>
+			</tr>
+		</thead>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Paint on the current slice</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Draw (alternative to right click; always paints, never erases)</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Erase</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> scroll</span></td><td>Change brush size</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>2D fill (stops at the edge of the loaded blocks)</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>3D fill (always confined to the loaded blocks)</td></tr>
+		<tr><td><span class="sh">G</span></td><td>2D fill at the crosshair</td></tr>
+		<tr><td><span class="sh">Shift + G</span></td><td>3D fill at the crosshair</td></tr>
+		<tr><td><span class="sh">Enter</span></td><td>Accept — write the interpolated volume</td></tr>
+		<tr><td><span class="sh">Ctrl + P</span></td><td>Toggle interpolation preview</td></tr>
+		<tr><td><span class="sh">Esc</span></td><td>End the current chain (painted slices are kept)</td></tr>
+		<tr><td><span class="sh">S</span></td><td>Toggle between Segmentation Paint and Shape Interpolation</td></tr>
+		<tr><td><span class="sh">&larr;</span></td><td>Jump to previous painted slice</td></tr>
+		<tr><td><span class="sh">&rarr;</span></td><td>Jump to next painted slice</td></tr>
+		<tr><td><span class="sh">Shift + &larr;</span></td><td>Jump to first painted slice</td></tr>
+		<tr><td><span class="sh">Shift + &rarr;</span></td><td>Jump to last painted slice</td></tr>
+		<tr><td><span class="sh">Delete</span> / <span class="sh">Backspace</span></td><td>Delete the painted slice at the current depth</td></tr>
+		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
+		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
+		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>
+		<tr><td><span class="sh">Hold space</span></td><td>Reveal raw data temporarily</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Select object</td></tr>
+	</table>
+	</p>
+</body>
+</html>

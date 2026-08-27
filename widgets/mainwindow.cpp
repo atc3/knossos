@@ -32,6 +32,8 @@
 #include "network.h"
 #include "scriptengine/scripting.h"
 #include "segmentation/cubeloader.h"
+#include "segmentation/floodfill.h"
+#include "segmentation/shapeinterpolation.h"
 #include "skeleton/swc.h"
 #include "skeleton/node.h"
 #include "skeleton/skeleton_dfs.h"
@@ -43,6 +45,7 @@
 #include "widgets/coordinateimportwidget.h"
 
 #include <QAction>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -148,6 +151,11 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     statusBar()->setSizeGripEnabled(false);
     GUIModeLabel.setVisible(false);
     statusBar()->addWidget(&GUIModeLabel);
+    // permanent readout of the interpolation chain, so the active plane and how many key
+    // slices are in it are never something you have to remember
+    shapeInterpolationLabel.setVisible(false);
+    statusBar()->addWidget(&shapeInterpolationLabel);
+    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::changed, this, &MainWindow::updateShapeInterpolationLabel);
     networkProgressBar.setVisible(false);
     networkProgressBar.setToolTip("Network progress");
     networkProgressBar.setTextVisible(false); // under windows percentage is shown next to progress bar (instead of on top of it) and is not visible on the dark status bar.
@@ -366,6 +374,7 @@ void MainWindow::createToolbars() {
                          "<b>" + workModes[AnnotationMode::Mode_Paint] + ":</b> Segmentation by painting<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_OverPaint] + ":</b> Segmentation by painting only over existing segmentation<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_CellSegmentation] + ":</b>Convenience cell segmentation workflow<br/>"
+                         "<b>" + workModes[AnnotationMode::Mode_ShapeInterpolation] + ":</b> Paint a few slices and interpolate the shape between them<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_Tracing] + ":</b> Skeletonization on one tree<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_TracingAdvanced] + ":</b> Unrestricted skeletonization<br/>");
     basicToolbar.addSeparator();
@@ -397,12 +406,22 @@ void MainWindow::createToolbars() {
     createToolToggleButton(widgetContainer.layerDialogWidget, ":/resources/icons/layers.png", "Layers");
     createToolToggleButton(widgetContainer.annotationWidget, ":/resources/icons/annotation.png", "Annotation");
     createToolToggleButton(widgetContainer.zoomWidget, ":/resources/icons/zoom.png", "Zoom");
+    shapeInterpolationButton = createToolToggleButton(widgetContainer.shapeInterpolationWidget, ":/resources/icons/annotation.png", "Shape Interpolation");
     createToolToggleButton(widgetContainer.snapshotWidget, ":/resources/icons/snapshot.png", "Snapshot");
     createToolToggleButton(widgetContainer.taskManagementWidget, ":/resources/icons/tasks-management.png", "Task Management");
     defaultToolbar.addSeparator();
     createToolToggleButton(widgetContainer.pythonInterpreterWidget, ":/resources/icons/python.png", "Python Interpreter");
 
     defaultToolbar.addSeparator();
+
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::acceptRequested, [this](){ shapeInterpolationAcceptAction->trigger(); });
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::discardRequested, [this](){ shapeInterpolationDiscardAction->trigger(); });
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::jumpToDepthRequested, [](const int depth){
+        auto & si = ShapeInterpolation::singleton();
+        auto pos = state->viewerState->currentPosition;
+        axisSet(pos, si.normalAxis(), depth);
+        state->viewer->setPosition(pos, USERMOVE_DRILL);
+    });
 
     auto resetVPsButton = new QPushButton("Reset vp positions", this);
     resetVPsButton->setToolTip("Reset viewport positions and sizes");
@@ -700,6 +719,96 @@ void MainWindow::createMenus() {
         []() { Segmentation::singleton().brush.setRadius(Segmentation::singleton().brush.getRadius() - 0.5 * Dataset::current().scales[0].x); }, Qt::SHIFT + Qt::Key_Minus);
 
     actionMenu.addSeparator();
+    // flood fill. Paintera uses F / Shift+F, but F steps a slice in KNOSSOS, so this sits
+    // on the neighbouring G. Not Ctrl+F: Qt maps Qt::CTRL to Command on macOS, so that
+    // binding would be Cmd+F there and a literal Ctrl+F would fall through to the viewport.
+    // The mouse gesture is middle click / Shift + middle click.
+    const auto fillAtCrosshair = [this](const bool threeDimensional){
+        auto * vp = state->viewer->window->viewportXY.get();
+        forEachOrthoVPDo([&vp](ViewportOrtho & orthoVP){
+            if (orthoVP.hasFocus()) {
+                vp = &orthoVP;
+            }
+        });
+        segmentation_flood_fill(state->viewerState->currentPosition, *vp, threeDimensional);
+    };
+    fill2dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("2D Fill at Crosshair"), this, [fillAtCrosshair]() { fillAtCrosshair(false); }, Qt::Key_G);
+    fill3dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("3D Fill at Crosshair"), this, [fillAtCrosshair]() { fillAtCrosshair(true); }, Qt::SHIFT + Qt::Key_G);
+    fillMayLoadAction = actionMenu.addAction(tr("Fill May Load More Blocks"), [this]() {
+        Segmentation::singleton().floodFillMayLoadCubes = fillMayLoadAction->isChecked();
+    });
+    fillMayLoadAction->setCheckable(true);
+    fillMayLoadAction->setChecked(Segmentation::singleton().floodFillMayLoadCubes);
+    fillMayLoadAction->setToolTip(tr("A fill normally stops at the edge of the blocks already in memory. With this on, a 2D fill "
+                                     "will pull the loader along and carry on — which moves the view and evicts what you were "
+                                     "looking at. 3D fills always stop at the boundary regardless."));
+
+    actionMenu.addSeparator();
+    // shape interpolation. Bindings mirror Paintera's so the muscle memory carries over;
+    // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
+    // yielded while a painting mode is active (see setWorkMode).
+    shapeInterpolationToggleModeAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Toggle Shape Interpolation"), this, [this]() {
+        setWorkMode(Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+                    ? AnnotationMode::Mode_Paint : AnnotationMode::Mode_ShapeInterpolation);
+    }, Qt::Key_S);
+    shapeInterpolationAcceptAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Accept Interpolated Shape"), this, [this]() {
+        if (ShapeInterpolation::singleton().sliceCount() < 2) {
+            return;// nothing to accept; stay quiet rather than nagging on a stray Return
+        }
+        // Return is an application shortcut, so it would otherwise steal the key from the
+        // coordinate spin boxes and any other line edit while a chain is running
+        if (qobject_cast<QAbstractSpinBox *>(QApplication::focusWidget()) != nullptr
+                || qobject_cast<QLineEdit *>(QApplication::focusWidget()) != nullptr) {
+            return;
+        }
+        const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().commit(this); });
+        statusBar()->showMessage(result.message, 8000);
+        if (!result.cancelled) {
+            // also on a partial write: the voxels are committed either way, so leaving the
+            // preview up would show a stale overlay on top of real segmentation
+            ShapeInterpolation::singleton().reset();
+        }
+        state->viewer->run();
+    }, Qt::Key_Return);
+    shapeInterpolationPreviewAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Toggle Interpolation Preview"), this, [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        si.setPreviewEnabled(!si.previewEnabled());
+        shapeInterpolationPreviewAction->setChecked(si.previewEnabled());
+        state->viewer->run();
+    }, Qt::CTRL + Qt::Key_P);
+    shapeInterpolationPreviewAction->setCheckable(true);
+    shapeInterpolationPreviewAction->setChecked(true);
+    shapeInterpolationAlignAction = actionMenu.addAction(tr("Align Slices on Their Centroids"), [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        si.setCentroidAlignment(shapeInterpolationAlignAction->isChecked());
+        state->viewer->run();
+    });
+    shapeInterpolationAlignAction->setCheckable(true);
+    shapeInterpolationAlignAction->setChecked(ShapeInterpolation::singleton().centroidAlignment());
+    shapeInterpolationAlignAction->setToolTip(tr("Shift the two key slices onto a common centre before interpolating. "
+                                                 "Without this a structure that drifts sideways between slices pinches, and "
+                                                 "disappears entirely once the two outlines no longer overlap."));
+    shapeInterpolationDiscardAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), tr("Discard Painted Slices"), [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        if (si.sliceCount() == 0) {
+            return;
+        }
+        QMessageBox prompt{this};
+        prompt.setIcon(QMessageBox::Question);
+        prompt.setText(tr("Erase the %n painted key slice(s) of this chain?", "", static_cast<int>(si.sliceCount())));
+        prompt.setInformativeText(tr("This cannot be undone — KNOSSOS keeps no undo history for segmentation."));
+        auto * confirm = prompt.addButton(tr("Erase"), QMessageBox::AcceptRole);
+        prompt.addButton(tr("Cancel"), QMessageBox::RejectRole);
+        prompt.exec();
+        if (prompt.clickedButton() == confirm) {
+            const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().eraseSlices(this); });
+            statusBar()->showMessage(result.message, 8000);
+            ShapeInterpolation::singleton().reset();
+            state->viewer->run();
+        }
+    });
+
+    actionMenu.addSeparator();
     clearMergelistAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), "Clear Merge List", &Segmentation::singleton(), &Segmentation::clear);
     //proof reading mode
     modeSwitchSeparator = actionMenu.addSeparator();
@@ -713,7 +822,7 @@ void MainWindow::createMenus() {
 
     auto viewMenu = menuBar()->addMenu("&Navigation");
 
-    addApplicationShortcut(*viewMenu, QIcon(), tr("Jump to Active Node"), &Skeletonizer::singleton(), [this]() {
+    auto & jumpToActiveNode = addApplicationShortcut(*viewMenu, QIcon(), tr("Jump to Active Node"), &Skeletonizer::singleton(), [this]() {
         boost::optional<floatCoordinate> pos;
         auto meshPriority = !state->skeletonState->jumpToSkeletonNext;
         const auto * const activeTree = Skeletonizer::singleton().skeletonState.activeTree;
@@ -738,6 +847,7 @@ void MainWindow::createMenus() {
         }
         viewport3D->refocus();
     }, Qt::Key_S);
+    jumpToActiveNodeAction = &jumpToActiveNode;
     addApplicationShortcut(*viewMenu, QIcon(), tr("Forward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Forward); }, Qt::Key_X);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Backward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Backward); }, Qt::SHIFT + Qt::Key_X);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Next Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(true);}, Qt::Key_N);
@@ -1143,6 +1253,27 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     enlargeBrushAction->setVisible(mode.testFlag(AnnotationMode::Brush));
     shrinkBrushAction->setVisible(mode.testFlag(AnnotationMode::Brush));
     // cell seg
+    const bool shapeInterpolation = mode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+    const bool fills = mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint);
+    for (auto * action : {fill2dAction, fill3dAction, fillMayLoadAction}) {
+        action->setVisible(fills);
+        action->setEnabled(fills);
+    }
+    for (auto * action : {shapeInterpolationAcceptAction, shapeInterpolationPreviewAction, shapeInterpolationAlignAction, shapeInterpolationDiscardAction}) {
+        action->setVisible(shapeInterpolation);
+        action->setEnabled(shapeInterpolation);// Return/Ctrl+P must not fire in other modes
+    }
+    shapeInterpolationButton->setVisible(shapeInterpolation);
+    if (!shapeInterpolation) {
+        widgetContainer.shapeInterpolationWidget.hide();
+    }
+    updateShapeInterpolationLabel();
+    // `S` toggles shape interpolation only from the two painting modes it switches between;
+    // everywhere else it stays Jump to Active Node
+    const bool paintish = shapeInterpolation || mode == AnnotationMode::Mode_Paint;
+    shapeInterpolationToggleModeAction->setVisible(paintish);
+    shapeInterpolationToggleModeAction->setEnabled(paintish);
+    jumpToActiveNodeAction->setEnabled(!paintish);
     cytoAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
     plusNucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
     nucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
@@ -1156,6 +1287,9 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
         Skeletonizer::singleton().selectObjectForNode(*state->skeletonState->activeNode);
     }
 
+    if (!mode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+        ShapeInterpolation::singleton().reset();// leaving the mode drops any in-progress slice chain
+    }
     cheatsheet.load(workMode);
 }
 
@@ -1667,4 +1801,12 @@ void MainWindow::pythonPluginMgrSlot() {
 
 void MainWindow::updateCompressionRatioDisplay() {
     compressionToggleAction->setText(tr("Toggle dataset compression: %1 ").arg(Dataset::current().compressionString()));
+}
+
+void MainWindow::updateShapeInterpolationLabel() {
+    const bool show = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+    shapeInterpolationLabel.setVisible(show);
+    if (show) {
+        shapeInterpolationLabel.setText(ShapeInterpolation::singleton().summary());
+    }
 }
