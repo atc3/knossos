@@ -100,7 +100,7 @@ public:
      * `relabelFrom`, when set, first rewrites that object's voxels in this plane to the
      * chain's id — a voxel-level steal of someone else's outline, leaving their object
      * untouched everywhere else. */
-    bool adoptPlaneAt(const Coordinate & seed, QString & note, std::optional<std::uint64_t> relabelFrom = std::nullopt);
+    bool adoptPlaneAt(const Coordinate & seed, QString & note, std::optional<std::uint64_t> relabelFrom = std::nullopt, QWidget * parent = nullptr);
 
     // depth navigation over the painted slices
     int depthOf(const Coordinate & pos) const;
@@ -233,8 +233,14 @@ private:
     bool buildCrossSection(int fixedAxis, int fixedCoord);
     // mask at `depth`, painted or interpolated, ignoring the preview toggle
     const SISlice * maskAtDepth(int depth);
-    // fills `slice` from the overlay across the resident part of its plane
-    bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated);
+    /* Fills `slice` from the overlay across its plane.
+     *
+     * With `mayLoad`, walks outward block by block wherever the object runs off the edge of
+     * one, pulling those blocks in — so adopting a slice picks up the whole outline, not
+     * just the part on screen. The loader takes a centre of its own, so this never moves
+     * the crosshair. Without it, only what is already in memory is read, which is what a
+     * brush stroke wants: painting must not start loading things. */
+    bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated, bool mayLoad, QWidget * parent = nullptr);
     WriteResult writeAll(bool wholeChain, std::uint64_t value, const QString & title, QWidget * parent);
 
     bool alignCentroids{true};

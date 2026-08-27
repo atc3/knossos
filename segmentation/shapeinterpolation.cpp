@@ -49,10 +49,28 @@ constexpr int PAD = 16;
 constexpr std::size_t MAX_PIXELS = 2048 * 2048;
 // ceiling on the cached distance transforms across all slice pairs (floats, so ×4 bytes)
 constexpr std::size_t MAX_CACHED_FLOATS = 16 * 1024 * 1024;
+
+// How long to wait for the loader to make a cube resident before giving up on it. A miss
+// is reported as a shortfall rather than silently dropping voxels, which is what
+// writeVoxel()/processRegion() would otherwise do.
+constexpr int LOAD_TIMEOUT_MS = 30000;
+
+bool awaitLoader(QProgressDialog & progress) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!Loader::Controller::singleton().isFinished()) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        if (progress.wasCanceled() || timer.elapsed() > LOAD_TIMEOUT_MS) {
+            return false;
+        }
+    }
+    return true;
+}
 }
 
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 
 void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoid) {
     const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
@@ -80,33 +98,105 @@ int ShapeInterpolation::depthOf(const Coordinate & pos) const {
     return axisGet(pos, axis);
 }
 
-/* Reads the chain's object out of one whole plane, bounded by what is actually in memory.
- * One plane of the default 3×3×3 supercube is 384×384 voxels, so this is cheap. */
-bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated) {
+/* Reads the chain's object out of one whole plane.
+ *
+ * Walks block by block from the seed, following the object wherever it runs off the edge
+ * of a block. With `mayLoad` it pulls in blocks that are not resident — via the loader's
+ * own centre, so the crosshair never moves and only rendering is paused. Without it the
+ * walk simply stops at the edge of memory, which is what a brush stroke needs: painting a
+ * slice must not start fetching data. */
+bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated, const bool mayLoad, QWidget * const parent) {
+    constexpr std::size_t MAX_BLOCKS = 96;// bounds both the wait and how far a leak can run
     const auto depth = depthOf(seed);
-    auto box = residentBoxAround(seed);
-    axisSet(box.first, axis, depth);
-    axisSet(box.second, axis, depth);
+    const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
+    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
 
     slice.depth = depth;
     slice.uStep = axisGet(step, uAxisIdx);
     slice.vStep = axisGet(step, vAxisIdx);
-    // snap onto the mag voxel lattice, so every slice in the session shares one grid and
-    // two slices can be compared index-for-index without a sub-voxel offset
-    slice.uMin = siFloorDiv(axisGet(box.first, uAxisIdx), slice.uStep) * slice.uStep;
-    slice.vMin = siFloorDiv(axisGet(box.first, vAxisIdx), slice.vStep) * slice.vStep;
+    // anchor on the seed's own block, aligned to the mag lattice; SISlice::set grows the
+    // box in either direction as the walk spreads
+    const auto seedBlock = dataset.global2cube(seed);
+    const auto seedCorner = dataset.cube2global(seedBlock);
+    slice.uMin = siFloorDiv(axisGet(seedCorner, uAxisIdx), slice.uStep) * slice.uStep;
+    slice.vMin = siFloorDiv(axisGet(seedCorner, vAxisIdx), slice.vStep) * slice.vStep;
 
-    truncated = !regionCubeResidency(box.first, box.second).second.empty();
-    readRegion(box.first, box.second, [this, &slice](const std::uint64_t voxel, const Coordinate & pos){
-        if (voxel == soid) {
-            slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
+    QProgressDialog progress(QObject::tr("Following the slice across blocks…"), QObject::tr("Stop"), 0, static_cast<int>(MAX_BLOCKS), parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(500);// the usual case is one resident block and instant
+    const LabelOnlyLoading labelOnly;// the image data is irrelevant here
+
+    std::unordered_set<CoordOfCube> seen;
+    std::vector<CoordOfCube> queue{seedBlock};
+    seen.insert(seedBlock);
+    std::size_t processed{0};
+    truncated = false;
+
+    while (!queue.empty()) {
+        if (processed >= MAX_BLOCKS || progress.wasCanceled()) {
+            truncated = truncated || !queue.empty();
+            break;
         }
-    });
+        const auto block = queue.back();
+        queue.pop_back();
+        progress.setValue(static_cast<int>(processed++));
+
+        auto first = dataset.cube2global(block);
+        auto last = first + cubeExtent - 1;
+        axisSet(first, axis, depth);
+        axisSet(last, axis, depth);
+        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+
+        if (!regionCubeResidency(first, last).second.empty()) {
+            if (!mayLoad) {
+                truncated = true;
+                continue;
+            }
+            // drive the loader to this block. startLoading takes its own centre, so
+            // viewerState->currentPosition — the crosshair — is untouched.
+            Loader::Controller::singleton().startLoading(dataset.cube2global(block) + cubeExtent / 2, USERMOVE_NEUTRAL, {});
+            if (!awaitLoader(progress) || !regionCubeResidency(first, last).second.empty()) {
+                truncated = true;
+                continue;
+            }
+        }
+
+        bool touchesU0{false}, touchesU1{false}, touchesV0{false}, touchesV1{false};
+        readRegion(first, last, [&](const std::uint64_t voxel, const Coordinate & pos){
+            if (voxel != soid) {
+                return;
+            }
+            slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
+            // a set voxel on a block edge means the object probably continues next door
+            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) <= axisGet(first, uAxisIdx);
+            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) >= axisGet(last, uAxisIdx);
+            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) <= axisGet(first, vAxisIdx);
+            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) >= axisGet(last, vAxisIdx);
+        });
+
+        const auto enqueue = [&](const int axisIdx, const int delta){
+            auto neighbour = block;
+            axisSet(neighbour, axisIdx, axisGet(neighbour, axisIdx) + delta);
+            if (seen.insert(neighbour).second) {
+                queue.push_back(neighbour);
+            }
+        };
+        if (touchesU0) { enqueue(uAxisIdx, -1); }
+        if (touchesU1) { enqueue(uAxisIdx, +1); }
+        if (touchesV0) { enqueue(vAxisIdx, -1); }
+        if (touchesV1) { enqueue(vAxisIdx, +1); }
+    }
+    progress.setValue(static_cast<int>(MAX_BLOCKS));
+
+    if (mayLoad) {
+        state->viewer->loader_notify();// bring the user's own surroundings back
+    }
     slice.shrinkToFit();
     return !slice.empty();
 }
 
-bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const std::optional<std::uint64_t> relabelFrom) {
+bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const std::optional<std::uint64_t> relabelFrom, QWidget * const parent) {
     if (!started) {
         return false;
     }
@@ -128,7 +218,7 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
 
     SISlice slice;
     bool truncated{false};
-    if (!seedSliceFromPlane(slice, seed, truncated)) {
+    if (!seedSliceFromPlane(slice, seed, truncated, true, parent)) {
         note = QObject::tr("Nothing painted with id %1 in this plane.").arg(soid);
         return false;
     }
@@ -137,7 +227,7 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
     ++gen;
     emit changed();
     note = truncated
-        ? QObject::tr("Adopted slice %1, but it runs past the loaded blocks — scroll there and click again to pick up the rest.").arg(depth)
+        ? QObject::tr("Adopted slice %1, but it runs further than this could follow — click again on the missing part to pick up the rest.").arg(depth)
         : QObject::tr("Adopted slice %1 as a key slice.").arg(depth);
     return true;
 }
@@ -171,7 +261,7 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
         // this stamp covered. Otherwise dropping one stamp onto an existing outline makes
         // the stamp the key slice — a brush-sized blob in the middle of the real object.
         bool truncated{false};
-        seedSliceFromPlane(slice, centerPos, truncated);
+        seedSliceFromPlane(slice, centerPos, truncated, false);
         slice.depth = depth;
     }
 
@@ -490,22 +580,6 @@ void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std:
 }
 
 namespace {
-// How long to wait for the loader to make a cube resident before giving up on it. A miss
-// is reported as a shortfall rather than silently dropping voxels, which is what
-// writeVoxel()/processRegion() would otherwise do.
-constexpr int LOAD_TIMEOUT_MS = 30000;
-
-bool awaitLoader(QProgressDialog & progress) {
-    QElapsedTimer timer;
-    timer.start();
-    while (!Loader::Controller::singleton().isFinished()) {
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
-        if (progress.wasCanceled() || timer.elapsed() > LOAD_TIMEOUT_MS) {
-            return false;
-        }
-    }
-    return true;
-}
 
 Coordinate componentMax(const Coordinate & a, const Coordinate & b) {
     return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};

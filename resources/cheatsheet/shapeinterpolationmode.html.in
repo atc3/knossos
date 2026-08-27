@@ -24,8 +24,9 @@
 	</p>
 
 	<p>
-	Click an existing slice to adopt it as a key slice; paint or erase on an interpolated one
-	to correct it, and only the part you touch changes.
+	Click an existing slice to adopt it as a key slice — the whole outline is picked up, not
+	just the part on screen. Paint or erase on an interpolated slice to correct it, and only
+	the part you touch changes.
 	</p>
 
 	<p>

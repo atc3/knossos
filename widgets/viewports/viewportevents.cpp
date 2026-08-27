@@ -470,7 +470,10 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
     }
 
     QString note;
-    const auto adopted = si.adoptPlaneAt(clickPos, note, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt);
+    // suspended so the viewports don't churn while the loader is walked across blocks
+    const auto adopted = state->viewer->suspend([&]{
+        return si.adoptPlaneAt(clickPos, note, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt, &state->viewer->mainWindow);
+    });
     state->viewer->mainWindow.warnShapeInterpolation(note);
     if (adopted) {
         state->viewer->run();

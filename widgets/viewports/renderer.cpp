@@ -1597,6 +1597,9 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
     if (viewportType != VIEWPORT_XY && viewportType != VIEWPORT_XZ && viewportType != VIEWPORT_ZY) {
         return;
     }
+    if (state->viewerState->showOnlyRawData) {
+        return;// holding space means "show me the image data", and this is not that
+    }
     auto & si = ShapeInterpolation::singleton();
     ShapeInterpolation::PlanarMask plane;
     if (!si.planarMaskFor(static_cast<int>(viewportType), state->viewerState->currentPosition, plane)) {
