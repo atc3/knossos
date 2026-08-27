@@ -39,6 +39,7 @@
 #include <limits>
 #include <random>
 #include <tuple>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -226,6 +227,10 @@ public:
     void createAndSelectObject(const Coordinate & position, const QString & category = "");
     SubObject & subobjectFromId(const uint64_t & subobjectId, const Coordinate & location);
     uint64_t subobjectIdOfFirstSelectedObject(const Coordinate & newLocation);
+    // The subobject id a brush stroke would use right now, without the side effect of
+    // moving the object's location the way subobjectIdOfFirstSelectedObject() does.
+    // Empty when nothing is selected.
+    std::optional<uint64_t> currentPaintSubobjectId() const;
     bool objectOrder(const uint64_t &lhsIndex, const uint64_t &rhsIndex) const;
     uint64_t largestObjectContainingSubobjectId(const uint64_t subObjectId, const Coordinate & location);
     uint64_t largestObjectContainingSubobject(const SubObject & subobject) const;

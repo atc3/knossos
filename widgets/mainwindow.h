@@ -31,6 +31,7 @@
 #include "viewports/viewport3d.h"
 #include "widgetcontainer.h"
 #include "widgets/coordinatespins.h"
+#include "widgets/subobjectidedit.h"
 
 #include <QComboBox>
 #include <QDropEvent>
@@ -119,6 +120,10 @@ class MainWindow : public QMainWindow {
                                                  {AnnotationMode::Mode_ShapeInterpolation, tr("Segmentation Shape Interpolation")},
                                                  {AnnotationMode::Mode_Selection, tr("Review")},
                                                };
+    SubobjectIdEdit subobjectIdEdit;
+    QAction *subobjectIdAction{};// so the toolbar entry can be hidden outside segmentation modes
+    QLabel subobjectIdLabel{tr(" id: ")};
+    QAction *subobjectIdLabelAction{};
     WorkModeModel workModeModel;
     QComboBox modeCombo;
     QAction *cheatsheetAction;

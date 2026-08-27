@@ -307,6 +307,14 @@ uint64_t Segmentation::oid(const uint64_t oidx) const {
     return objects[oidx].id;
 }
 
+std::optional<uint64_t> Segmentation::currentPaintSubobjectId() const {
+    if (selectedObjectIndices.empty()) {
+        return std::nullopt;
+    }
+    const auto & obj = objects[selectedObjectIndices.front()];
+    return obj.subobjects.empty() ? std::nullopt : std::optional<uint64_t>{obj.subobjects.front().get().id};
+}
+
 uint64_t Segmentation::subobjectIdOfFirstSelectedObject(const Coordinate & newLocation) {
     if (selectedObjectsCount() != 0) {
         auto & obj = objects[selectedObjectIndices.front()];

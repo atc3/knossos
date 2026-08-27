@@ -381,6 +381,9 @@ void MainWindow::createToolbars() {
     basicToolbar.addWidget(&currentPosSpins.copyButton);
     basicToolbar.addWidget(&currentPosSpins.pasteButton);
     QObject::connect(&currentPosSpins, &CoordinateSpins::coordinatesChanged, this, &MainWindow::coordinateEditingFinished);
+    basicToolbar.addSeparator();
+    subobjectIdLabelAction = basicToolbar.addWidget(&subobjectIdLabel);
+    subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
 
     basicToolbar.addWidget(&currentPosSpins.xSpin);
     basicToolbar.addWidget(&currentPosSpins.ySpin);
@@ -559,7 +562,9 @@ void MainWindow::updateTodosLeft() {
 
 void MainWindow::updateTitlebar() {
     const auto & session = Annotation::singleton();
-    QString title = QString("%1 %2 • ").arg(qApp->applicationDisplayName()).arg(KREVISION);
+    const QString branch = QString::fromUtf8(KBRANCH);
+    QString title = QString("%1 %2%3 • ").arg(qApp->applicationDisplayName()).arg(KREVISION)
+                        .arg(branch.isEmpty() ? QString{} : QString(" [%1]").arg(branch));
     title.append(QString("%1 • ").arg(Dataset::current().experimentname));
     if (!session.annotationFilename.isEmpty()) {
         title.append(Annotation::singleton().annotationFilename);
@@ -1248,6 +1253,10 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     swapSynapticNodes->setVisible((mode.testFlag(AnnotationMode::Mode_TracingAdvanced)));
     clearSkeletonAction->setVisible(skeleton && !mode.testFlag(AnnotationMode::Mode_MergeTracing));
     generateLUTAction->setVisible(segmentation);
+    for (auto * action : {subobjectIdLabelAction, subobjectIdAction}) {
+        action->setVisible(segmentation);
+    }
+    subobjectIdEdit.refresh();
     increaseOpacityAction->setVisible(segmentation);
     decreaseOpacityAction->setVisible(segmentation);
     enlargeBrushAction->setVisible(mode.testFlag(AnnotationMode::Brush));
