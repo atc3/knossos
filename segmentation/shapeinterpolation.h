@@ -110,6 +110,12 @@ public:
     std::optional<int> nextDepth(int depth) const;
     bool hasSliceAt(int depth) const { return slices.find(depth) != std::end(slices); }
 
+    /* Does the chain cover this position — as a key slice or as interpolation?
+     *
+     * Interpolated voxels do not exist in the overlay until the chain is accepted, so a
+     * click there reads as background. This is what lets one be recognised anyway. */
+    bool covers(const Coordinate & pos);
+
     // Interpolated mask at `depth`, or nullptr when `depth` is not strictly between two
     // painted slices, when preview is off, or when the region exceeds the budget (see
     // lastError()). The result is owned by the controller and invalidated by the next call.

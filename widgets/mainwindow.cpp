@@ -406,6 +406,9 @@ void MainWindow::createToolbars() {
     subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
     paintTargetButton = new QToolButton(this);
     paintTargetButton->setPopupMode(QToolButton::InstantPopup);
+    paintTargetButton->setIcon(QIcon(":/resources/icons/painttarget.png"));
+    // keeps the current choice readable at a glance, unlike the icon-only buttons
+    paintTargetButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     paintTargetButton->setToolTip(tr("<b>What the brush may write over.</b><br/>Erasing is unaffected by any of these."));
     paintTargetMenu = new QMenu(paintTargetButton);
     paintTargetButton->setMenu(paintTargetMenu);
@@ -455,7 +458,7 @@ void MainWindow::createToolbars() {
     });
 
     viewportLayoutButton = new QToolButton(this);
-    viewportLayoutButton->setText(tr("Layout"));
+    viewportLayoutButton->setIcon(QIcon(":/resources/icons/viewportlayout.png"));
     viewportLayoutButton->setToolTip(tr("Viewport arrangement — pick a preset, or save the current one"));
     viewportLayoutButton->setPopupMode(QToolButton::InstantPopup);
     viewportLayoutMenu = new QMenu(viewportLayoutButton);

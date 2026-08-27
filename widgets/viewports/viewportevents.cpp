@@ -429,10 +429,22 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
     auto & si = ShapeInterpolation::singleton();
     auto & seg = Segmentation::singleton();
     const auto clicked = readVoxel(clickPos);
+    const bool steal = event->modifiers().testFlag(Qt::ControlModifier);
     if (clicked == seg.getBackgroundId()) {
+        // Interpolated voxels are not in the overlay until the chain is accepted, so they
+        // read as background — but clicking one should still get you back to the object
+        // the chain is building, the same as clicking one of its key slices.
+        if (!steal && si.active() && si.covers(clickPos)) {
+            if (seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != si.subobjectId()) {
+                seg.clearObjectSelection();
+                seg.selectObjectFromSubObject(si.subobjectId(), clickPos);
+                state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(si.subobjectId()));
+                state->viewer->run();
+            }
+            return true;
+        }
         return false;// clicking empty space still means "deselect", as everywhere else
     }
-    const bool steal = event->modifiers().testFlag(Qt::ControlModifier);
 
     if (!si.active()) {
         if (steal) {

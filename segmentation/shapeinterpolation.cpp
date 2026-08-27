@@ -266,6 +266,17 @@ bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
     return true;
 }
 
+bool ShapeInterpolation::covers(const Coordinate & pos) {
+    if (!started) {
+        return false;
+    }
+    const auto * slice = maskAtDepth(depthOf(pos));
+    if (slice == nullptr) {
+        return false;
+    }
+    return slice->at(slice->uIndexOf(axisGet(pos, uAxisIdx)), slice->vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+}
+
 std::optional<int> ShapeInterpolation::firstDepth() const {
     return slices.empty() ? std::nullopt : std::optional<int>{std::begin(slices)->first};
 }
