@@ -125,7 +125,7 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                     if (si.active() && si.normalAxisViewport() == static_cast<int>(vp.viewportType)) {
                         QString note;
                         if (si.materializeAt(axisGet(coord, si.normalAxis()), note)) {
-                            state->viewer->mainWindow.statusBar()->showMessage(note, 5000);
+                            state->viewer->mainWindow.warnShapeInterpolation(note);
                         }
                     }
                 }
@@ -133,7 +133,7 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                 if (shapeInterpolation) {
                     QString reason;
                     if (!ShapeInterpolation::singleton().absorbStamp(coord, brush, soid, reason)) {
-                        state->viewer->mainWindow.statusBar()->showMessage(reason, 5000);
+                        state->viewer->mainWindow.warnShapeInterpolation(reason);
                     }
                 }
             }
@@ -415,6 +415,49 @@ void ViewportOrtho::handleMouseMotionLeftHold(const QMouseEvent *event) {
     ViewportBase::handleMouseMotionLeftHold(event);
 }
 
+/* Clicking an already-painted slice pulls it into the chain, so slices drawn before
+ * entering the mode — or in a previous session — don't have to be redrawn.
+ *
+ * Plain click adopts the chain's own object. Ctrl+click on a *different* object relabels
+ * that object's voxels in this plane to the chain's id and adopts the result: a
+ * voxel-level steal of the outline, which leaves their object intact everywhere else. */
+bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos) {
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            || Annotation::singleton().outsideMovementArea(clickPos)) {
+        return false;
+    }
+    auto & si = ShapeInterpolation::singleton();
+    auto & seg = Segmentation::singleton();
+    const auto clicked = readVoxel(clickPos);
+    if (clicked == seg.getBackgroundId()) {
+        return false;// clicking empty space still means "deselect", as everywhere else
+    }
+    const bool steal = event->modifiers().testFlag(Qt::ControlModifier);
+
+    if (!si.active()) {
+        if (steal) {
+            return false;// nothing to steal into yet
+        }
+        // no chain running: adopt the clicked object and start one in this viewport
+        seg.clearObjectSelection();
+        seg.selectObjectFromSubObject(clicked, clickPos);
+        si.beginAt(static_cast<brush_t::view_t>(viewportType), clicked);
+    } else if (!steal && clicked != si.subobjectId()) {
+        return false;// a plain click on someone else's object is still just a selection
+    } else if (si.normalAxisViewport() != static_cast<int>(viewportType)) {
+        state->viewer->mainWindow.warnShapeInterpolation(tr("This chain runs in the %1 plane.").arg(si.planeName()));
+        return true;
+    }
+
+    QString note;
+    const auto adopted = si.adoptPlaneAt(clickPos, note, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt);
+    state->viewer->mainWindow.warnShapeInterpolation(note);
+    if (adopted) {
+        state->viewer->run();
+    }
+    return true;
+}
+
 void ViewportOrtho::handleMouseButtonLeft(const QMouseEvent *event) {
     if (shiftLeftPaint(event)) {
         return;
@@ -497,6 +540,10 @@ void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
     }
     auto & segmentation = Segmentation::singleton();
     const auto clickPos = getCoordinateFromOrthogonalClick(event->pos(), *this);
+    if (event->pos() == mouseDown && shapeInterpolationAdopt(event, clickPos)) {
+        ViewportBase::handleMouseReleaseLeft(event);
+        return;
+    }
     if (!Annotation::singleton().outsideMovementArea(clickPos) && Annotation::singleton().annotationMode.testFlag(AnnotationMode::ObjectSelection)) { // in task mode the object should not be switched
         if (event->pos() == mouseDown) {// mouse click
             const auto subobjectId = readVoxel(clickPos);
@@ -700,13 +747,27 @@ bool ViewportOrtho::handleShapeInterpolationKey(const QKeyEvent *event) {
     case Qt::Key_Delete:
     case Qt::Key_Backspace:
         if (si.removeSliceAt(depth)) {
-            state->viewer->mainWindow.statusBar()->showMessage(tr("Removed the key slice at %1. Its painted voxels are still there — erase them if you don’t want them.").arg(depth), 5000);
+            state->viewer->mainWindow.warnShapeInterpolation(tr("Removed the key slice at %1. Its painted voxels are still there — erase them if you don’t want them.").arg(depth));
             state->viewer->run();
         }
         return true;
     case Qt::Key_Escape:
+        // Esc is far more often a slip than a deliberate discard, so confirm — but only
+        // when there is a chain to lose; an empty one just exits.
+        if (si.sliceCount() != 0) {
+            QMessageBox prompt{QApplication::activeWindow()};
+            prompt.setIcon(QMessageBox::Question);
+            prompt.setText(tr("End this shape interpolation chain?"));
+            prompt.setInformativeText(tr("It has %n key slice(s). The painted voxels are kept either way — only the chain and its interpolations are discarded.", "", static_cast<int>(si.sliceCount())));
+            auto * confirm = prompt.addButton(tr("End chain"), QMessageBox::AcceptRole);
+            prompt.addButton(tr("Keep going"), QMessageBox::RejectRole);
+            state->viewer->suspend([&prompt]{ return prompt.exec(); });
+            if (prompt.clickedButton() != confirm) {
+                return true;
+            }
+        }
         si.reset();
-        state->viewer->mainWindow.statusBar()->showMessage(tr("Shape interpolation: chain ended. Painted slices are kept."), 5000);
+        state->viewer->mainWindow.warnShapeInterpolation(tr("Chain ended. Painted slices are kept."));
         state->viewer->run();
         return true;
     default:

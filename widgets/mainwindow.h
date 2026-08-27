@@ -34,6 +34,7 @@
 #include "widgets/subobjectidedit.h"
 #include "widgets/viewportlayouts.h"
 
+#include <QTimer>
 #include <QComboBox>
 #include <QDropEvent>
 #include <QList>
@@ -125,6 +126,8 @@ class MainWindow : public QMainWindow {
     QAction *subobjectIdAction{};// so the toolbar entry can be hidden outside segmentation modes
     QLabel subobjectIdLabel{tr(" id: ")};
     QAction *subobjectIdLabelAction{};
+    class QToolButton *overwriteLabelsButton{};
+    QAction *overwriteLabelsAction{};
     class QToolButton *viewportLayoutButton{};
     class QMenu *viewportLayoutMenu{};
     QString activeViewportLayout;
@@ -165,6 +168,7 @@ class MainWindow : public QMainWindow {
     QAction *shapeInterpolationDiscardAction{};
     QAction *shapeInterpolationToggleModeAction{};
     QAction *jumpToActiveNodeAction{};// held so its `S` shortcut can yield in paint modes
+    QAction *nextNodeInTableAction{};// held so its `N` shortcut can yield in paint modes
     class QToolButton *shapeInterpolationButton{};
     // cell mode
     QAction *cytoAction{};
@@ -206,6 +210,8 @@ class MainWindow : public QMainWindow {
     QLabel hoverLabel;
     QLabel GUIModeLabel{""};
     QLabel shapeInterpolationLabel;// persistent chain state: plane, key slices, span
+    QString shapeInterpolationWarning;// shown in that label, in place of the summary
+    QTimer shapeInterpolationWarningTimer;
     QLabel nodeLockingLabel;
     QLabel segmentStateLabel;
     QLabel synapseStateLabel;
@@ -298,6 +304,9 @@ public slots:
     /* edit skeleton menu*/
     void setWorkMode(AnnotationMode workMode);
     void updateShapeInterpolationLabel();
+    void warnShapeInterpolation(const QString & message);
+    // false when the user declined to discard a running chain
+    bool confirmLeavingShapeInterpolation();
     void clearSkeletonSlot();
 
     /* preferences menu */

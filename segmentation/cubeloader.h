@@ -66,6 +66,16 @@ CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate &
 // Splits the cubes covering a region into (resident, missing).
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast);
 
+/* The box around `pos` that can possibly be in memory: the M³ supercube the loader keeps
+ * resident, clipped to the movement area. Anything outside it is guaranteed absent, so a
+ * scan that wants "everything currently available" should bound itself by this rather
+ * than by the movement area, which may be the whole dataset. */
+std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos);
+
+// Replaces every occurrence of `from` with `to` in a region, returning how many voxels
+// changed. A voxel-level relabel, leaving the object graph alone.
+std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordinate & globalLast, std::uint64_t from, std::uint64_t to, bool markChanged = true);
+
 /* Flood fill that treats a non-resident cube as a wall rather than as background.
  *
  * This is the whole point of it. readVoxel() returns the background id for a cube that is

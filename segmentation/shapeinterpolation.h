@@ -76,6 +76,9 @@ public:
     // reason, if the stamp does not belong to the running session.
     bool absorbStamp(const Coordinate & centerPos, const brush_t &, const std::uint64_t soid, QString & reason);
 
+    // Start a chain without painting first, so an existing slice can simply be clicked.
+    void beginAt(brush_t::view_t view, std::uint64_t soid);
+
     // Same idea for a flood fill, which covers a region rather than a brush footprint.
     // Only the plane at `depth` is absorbed: a key slice is by definition planar, so a 3D
     // fill contributes just its intersection with the current slice.
@@ -86,6 +89,18 @@ public:
     // painting on a previewed slice, so correcting a few pixels doesn't mean redrawing the
     // whole outline. Returns false if there was no preview there to bake.
     bool materializeAt(int depth, QString & note);
+
+    /* Adopt whatever is already painted in the plane through `seed` as a key slice.
+     *
+     * This is also what a fresh slice does when you simply paint on it: capturing only the
+     * brush footprint would make a stamp dropped onto an existing outline *become* the key
+     * slice, which is the "square in the middle of the blob" bug. Returns false when the
+     * plane holds nothing of the chain's object.
+     *
+     * `relabelFrom`, when set, first rewrites that object's voxels in this plane to the
+     * chain's id — a voxel-level steal of someone else's outline, leaving their object
+     * untouched everywhere else. */
+    bool adoptPlaneAt(const Coordinate & seed, QString & note, std::optional<std::uint64_t> relabelFrom = std::nullopt);
 
     // depth navigation over the painted slices
     int depthOf(const Coordinate & pos) const;
@@ -111,6 +126,9 @@ public:
         int uAxis{0}, vAxis{1};         // dataset axes mapped onto mask u and v (uAxis < vAxis)
         int uMin{0}, vMin{0}, uStep{1}, vStep{1}, uSize{0}, vSize{0};
         const std::vector<std::uint8_t> * mask{nullptr};
+        // whole plane is a painted key slice. In a cross-section the two are mixed, and
+        // there a mask value of 2 marks key-slice voxels and 1 interpolated ones.
+        bool keySlice{false};
     };
     // `viewportType` is a ViewportType; VIEWPORT_XY/XZ/ZY only.
     bool planarMaskFor(int viewportType, const Coordinate & pos, PlanarMask & out);
@@ -193,6 +211,8 @@ private:
     bool buildCrossSection(int fixedAxis, int fixedCoord);
     // mask at `depth`, painted or interpolated, ignoring the preview toggle
     const SISlice * maskAtDepth(int depth);
+    // fills `slice` from the overlay across the resident part of its plane
+    bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated);
     WriteResult writeAll(bool wholeChain, std::uint64_t value, const QString & title, QWidget * parent);
 
     bool alignCentroids{true};

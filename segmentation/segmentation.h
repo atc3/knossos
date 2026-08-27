@@ -132,6 +132,8 @@ Q_OBJECT
     const QSet<QString> prefixed_categories = {"", "cell", "cytoplasm", "ecs", "mito", "myelin", "neuron", "nucleus", "synapse"};
     QSet<QString> categories = prefixed_categories;
     uint64_t backgroundId = 0;
+    // highest subobject id known to exist in the data, including parts never loaded
+    std::uint64_t maxId = 0;
     uint64_t hovered_subobject_id = 0;
     // Selection via subobjects touches all objects containing the subobject.
     uint64_t touched_subobject_id = 0;
@@ -176,6 +178,14 @@ public:
     bool renderOnlySelectedObjs{false};
     uint8_t alpha;
     brush_subject brush;
+    /* What a brush stroke is allowed to write over.
+     *
+     * Anything is the historical behaviour and stays the default. OnlyExisting is what
+     * Mode_OverPaint hardcodes. OnlyBackground is the new one: paint into unlabelled
+     * voxels but leave other objects intact. */
+    enum class PaintTarget { Anything, OnlyBackground, OnlyExisting };
+    PaintTarget paintTarget{PaintTarget::Anything};
+
     bool createPaintObject{true};
     // Off by default: letting a fill pull the loader along moves the view, evicts what
     // the user was looking at, and on a connected region can walk a very long way.
@@ -227,6 +237,16 @@ public:
     void createAndSelectObject(const Coordinate & position, const QString & category = "");
     SubObject & subobjectFromId(const uint64_t & subobjectId, const Coordinate & location);
     uint64_t subobjectIdOfFirstSelectedObject(const Coordinate & newLocation);
+    /* Allocates a subobject id guaranteed to be above everything KNOSSOS knows about.
+     *
+     * SubObject::highestId only rises when a SubObject is *constructed*, and the loader
+     * never touches Segmentation — so on a pre-segmented dataset with no mergelist it is
+     * still 0 and the first new object would take id 1, silently aliasing whatever already
+     * owns it in the data. maxId is the user's declared floor for exactly that case; it is
+     * edited in the Layers panel and stored with the annotation. */
+    std::uint64_t nextFreeSubobjectId();
+    std::uint64_t getMaxId() const { return maxId; }
+    void setMaxId(const std::uint64_t id) { maxId = id; }
     // The subobject id a brush stroke would use right now, without the side effect of
     // moving the object's location the way subobjectIdOfFirstSelectedObject() does.
     // Empty when nothing is selected.

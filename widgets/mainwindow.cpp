@@ -152,10 +152,19 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     statusBar()->setSizeGripEnabled(false);
     GUIModeLabel.setVisible(false);
     statusBar()->addWidget(&GUIModeLabel);
-    // permanent readout of the interpolation chain, so the active plane and how many key
-    // slices are in it are never something you have to remember
+    // Permanent readout of the interpolation chain, so the active plane and how many key
+    // slices are in it are never something you have to remember. addPermanentWidget, not
+    // addWidget: showMessage() hides every non-permanent widget for the length of the
+    // message, and this feature fires transient messages on every brush stroke — the two
+    // were fighting over the same strip. segmentStateLabel below is the same shape.
     shapeInterpolationLabel.setVisible(false);
-    statusBar()->addWidget(&shapeInterpolationLabel);
+    shapeInterpolationLabel.setMaximumWidth(520);// the permanent zone is shared, don’t crowd it out
+    statusBar()->addPermanentWidget(&shapeInterpolationLabel);
+    shapeInterpolationWarningTimer.setSingleShot(true);
+    QObject::connect(&shapeInterpolationWarningTimer, &QTimer::timeout, this, [this](){
+        shapeInterpolationWarning.clear();
+        updateShapeInterpolationLabel();
+    });
     QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::changed, this, &MainWindow::updateShapeInterpolationLabel);
     networkProgressBar.setVisible(false);
     networkProgressBar.setToolTip("Network progress");
@@ -367,7 +376,14 @@ void MainWindow::createToolbars() {
     modeCombo.setModel(&workModeModel);
     modeCombo.setCurrentIndex(static_cast<int>(AnnotationMode::Mode_Tracing));
     basicToolbar.addWidget(&modeCombo);
-    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), [this](int index) { setWorkMode(workModeModel.at(index).first); });
+    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), [this](int index) {
+        const auto target = workModeModel.at(index).first;
+        if (target != AnnotationMode::Mode_ShapeInterpolation && !confirmLeavingShapeInterpolation()) {
+            modeCombo.setCurrentIndex(workModeModel.indexOf(static_cast<AnnotationMode>(static_cast<int>(Annotation::singleton().annotationMode))));// put it back
+            return;
+        }
+        setWorkMode(target);
+    });
     modeCombo.setToolTip("<b>Select a work mode:</b><br/>"
                          "<b>" + workModes[AnnotationMode::Mode_MergeTracing] + ":</b> Merge segmentation objects by tracing<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_Selection] + ":</b> Skeleton manipulation and segmentation selection<br/>"
@@ -385,6 +401,17 @@ void MainWindow::createToolbars() {
     basicToolbar.addSeparator();
     subobjectIdLabelAction = basicToolbar.addWidget(&subobjectIdLabel);
     subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
+    overwriteLabelsButton = new QToolButton(this);
+    overwriteLabelsButton->setText(tr("overwrite"));
+    overwriteLabelsButton->setCheckable(true);
+    overwriteLabelsButton->setChecked(true);// the historical behaviour, and the default
+    overwriteLabelsButton->setToolTip(tr("<b>Overwrite other labels.</b><br/>On, the brush replaces whatever is under it. "
+                                         "Off, it only paints into unlabelled voxels and leaves other objects intact. "
+                                         "Erasing is unaffected either way."));
+    QObject::connect(overwriteLabelsButton, &QToolButton::toggled, [](const bool on){
+        Segmentation::singleton().paintTarget = on ? Segmentation::PaintTarget::Anything : Segmentation::PaintTarget::OnlyBackground;
+    });
+    overwriteLabelsAction = basicToolbar.addWidget(overwriteLabelsButton);
 
     basicToolbar.addWidget(&currentPosSpins.xSpin);
     basicToolbar.addWidget(&currentPosSpins.ySpin);
@@ -712,6 +739,9 @@ void MainWindow::createMenus() {
     newObjectAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New segmentation object"), this, [this]() {
         widgetContainer.annotationWidget.segmentationTab.userCreateObject();
     }, Qt::Key_C);
+    // N as well as C, matching merge tracing. The id comes from nextFreeSubobjectId(),
+    // so it clears the user's declared max id rather than just what happens to be loaded.
+    newObjectAction->setShortcuts({QKeySequence{Qt::Key_C}, QKeySequence{Qt::Key_N}});
     actionMenu.addSeparator();
     //cell mode
     cytoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell with cyoplasm"), this, [](){ Segmentation::singleton().cell(true); }, Qt::Key_1);
@@ -759,8 +789,13 @@ void MainWindow::createMenus() {
     // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
     // yielded while a painting mode is active (see setWorkMode).
     shapeInterpolationToggleModeAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Toggle Shape Interpolation"), this, [this]() {
-        setWorkMode(Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
-                    ? AnnotationMode::Mode_Paint : AnnotationMode::Mode_ShapeInterpolation);
+        if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+            if (confirmLeavingShapeInterpolation()) {
+                setWorkMode(AnnotationMode::Mode_Paint);
+            }
+        } else {
+            setWorkMode(AnnotationMode::Mode_ShapeInterpolation);
+        }
     }, Qt::Key_S);
     shapeInterpolationAcceptAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Accept Interpolated Shape"), this, [this]() {
         if (ShapeInterpolation::singleton().sliceCount() < 2) {
@@ -861,7 +896,7 @@ void MainWindow::createMenus() {
     jumpToActiveNodeAction = &jumpToActiveNode;
     addApplicationShortcut(*viewMenu, QIcon(), tr("Forward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Forward); }, Qt::Key_X);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Backward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Backward); }, Qt::SHIFT + Qt::Key_X);
-    addApplicationShortcut(*viewMenu, QIcon(), tr("Next Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(true);}, Qt::Key_N);
+    nextNodeInTableAction = &addApplicationShortcut(*viewMenu, QIcon(), tr("Next Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(true);}, Qt::Key_N);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(false);}, Qt::Key_P);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Next Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(true);}, Qt::Key_Z);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(false);}, Qt::SHIFT + Qt::Key_Z);
@@ -1275,14 +1310,17 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
         setSegmentState(SegmentState::On);
     }
     newTreeAction->setVisible(trees);
-    newObjectAction->setVisible(mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint));
+    const bool painting = mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint);
+    newObjectAction->setVisible(painting);
+    // `N` is "new object" while painting; everywhere else it stays Next Node in Table
+    nextNodeInTableAction->setEnabled(!painting);
     pushBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
     popBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
     createSynapse->setVisible(mode.testFlag(AnnotationMode::Mode_TracingAdvanced));
     swapSynapticNodes->setVisible((mode.testFlag(AnnotationMode::Mode_TracingAdvanced)));
     clearSkeletonAction->setVisible(skeleton && !mode.testFlag(AnnotationMode::Mode_MergeTracing));
     generateLUTAction->setVisible(segmentation);
-    for (auto * action : {subobjectIdLabelAction, subobjectIdAction}) {
+    for (auto * action : {subobjectIdLabelAction, subobjectIdAction, overwriteLabelsAction}) {
         action->setVisible(segmentation);
     }
     subobjectIdEdit.refresh();
@@ -1553,8 +1591,17 @@ void MainWindow::loadSettings() {
     widgetContainer.snapshotWidget.loadSettings();
     widgetContainer.zoomWidget.loadSettings();
 
+    // `knossos exit` is the headless smoke test — it starts up and quits. Don't steal
+    // focus for it: it gets run repeatedly during development, and each run yanking the
+    // window in front of whatever you were typing into is its own small disaster.
+    const bool smokeTest = qApp->arguments().contains("exit");
+    if (smokeTest) {
+        setAttribute(Qt::WA_ShowWithoutActivating);
+    }
     show();
-    activateWindow();// prevent mainwin in background in gnome when other widgets are also visible
+    if (!smokeTest) {
+        activateWindow();// prevent mainwin in background in gnome when other widgets are also visible
+    }
     state->viewer->loadSettings();// size vps after show() for proper maximized space
     ViewportLayouts::singleton().loadSettings();
     // applied after show(), so the central widget already has its final size
@@ -1999,7 +2046,43 @@ void MainWindow::updateCompressionRatioDisplay() {
 void MainWindow::updateShapeInterpolationLabel() {
     const bool show = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
     shapeInterpolationLabel.setVisible(show);
-    if (show) {
-        shapeInterpolationLabel.setText(ShapeInterpolation::singleton().summary());
+    if (!show) {
+        return;
     }
+    const auto summary = ShapeInterpolation::singleton().summary();
+    if (shapeInterpolationWarning.isEmpty()) {
+        shapeInterpolationLabel.setStyleSheet({});
+        shapeInterpolationLabel.setText(summary);
+        shapeInterpolationLabel.setToolTip({});
+    } else {
+        shapeInterpolationLabel.setStyleSheet(QStringLiteral("QLabel { color: palette(bright-text); background: #b03030; padding: 0 4px; }"));
+        shapeInterpolationLabel.setText(shapeInterpolationWarning);
+        shapeInterpolationLabel.setToolTip(summary);// the chain state is still one hover away
+    }
+}
+
+/* Interpolation warnings go into the chain label rather than through showMessage(), which
+ * would be hidden behind the very readout it is trying to talk about. */
+void MainWindow::warnShapeInterpolation(const QString & message) {
+    shapeInterpolationWarning = message;
+    updateShapeInterpolationLabel();
+    shapeInterpolationWarningTimer.start(6000);
+}
+
+/* Leaving the mode throws the chain away, and both routes out of it — the work-mode combo
+ * and the S shortcut — are easy to hit by accident. Confirm only when there is something
+ * to lose; the painted voxels survive regardless, it is the chain that does not. */
+bool MainWindow::confirmLeavingShapeInterpolation() {
+    auto & si = ShapeInterpolation::singleton();
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation) || si.sliceCount() == 0) {
+        return true;
+    }
+    QMessageBox prompt{this};
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setText(tr("Leave shape interpolation?"));
+    prompt.setInformativeText(tr("The chain has %n key slice(s) and will be discarded. The painted voxels are kept — only the chain and its interpolations go. Accept it first (Enter) if you want the interpolated volume written.", "", static_cast<int>(si.sliceCount())));
+    auto * confirm = prompt.addButton(tr("Discard chain"), QMessageBox::AcceptRole);
+    prompt.addButton(tr("Stay"), QMessageBox::RejectRole);
+    state->viewer->suspend([&prompt]{ return prompt.exec(); });
+    return prompt.clickedButton() == confirm;
 }

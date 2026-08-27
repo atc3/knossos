@@ -1622,11 +1622,14 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
             interpolationPreviewUSize = plane.uSize;
             interpolationPreviewVSize = plane.vSize;
         }
-        constexpr std::array<std::uint8_t, 4> previewColor{{38, 217, 242, 115}};// cyan, ~45% alpha
+        constexpr std::array<std::uint8_t, 4> interpolatedColor{{38, 217, 242, 115}};// cyan, ~45% alpha
+        constexpr std::array<std::uint8_t, 4> keySliceColor{{255, 176, 32, 130}};// amber: painted, not inferred
         interpolationPreviewRGBA.assign(plane.mask->size() * 4, 0);
         for (std::size_t i = 0; i < plane.mask->size(); ++i) {
-            if ((*plane.mask)[i] != 0) {
-                std::copy(std::begin(previewColor), std::end(previewColor), std::begin(interpolationPreviewRGBA) + 4 * i);
+            const auto value = (*plane.mask)[i];
+            if (value != 0) {
+                const auto & color = (plane.keySlice || value == 2) ? keySliceColor : interpolatedColor;
+                std::copy(std::begin(color), std::end(color), std::begin(interpolationPreviewRGBA) + 4 * i);
             }
         }
         interpolationPreviewTex->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, interpolationPreviewRGBA.data());

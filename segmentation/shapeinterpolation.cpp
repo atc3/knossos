@@ -69,8 +69,75 @@ void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoi
     started = true;
 }
 
+void ShapeInterpolation::beginAt(const brush_t::view_t newView, const std::uint64_t newSoid) {
+    brush_t brush;
+    brush.view = newView;
+    begin(brush, newSoid);
+}
+
 int ShapeInterpolation::depthOf(const Coordinate & pos) const {
     return axisGet(pos, axis);
+}
+
+/* Reads the chain's object out of one whole plane, bounded by what is actually in memory.
+ * One plane of the default 3×3×3 supercube is 384×384 voxels, so this is cheap. */
+bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated) {
+    const auto depth = depthOf(seed);
+    auto box = residentBoxAround(seed);
+    axisSet(box.first, axis, depth);
+    axisSet(box.second, axis, depth);
+
+    slice.depth = depth;
+    slice.uStep = axisGet(step, uAxisIdx);
+    slice.vStep = axisGet(step, vAxisIdx);
+    // snap onto the mag voxel lattice, so every slice in the session shares one grid and
+    // two slices can be compared index-for-index without a sub-voxel offset
+    slice.uMin = siFloorDiv(axisGet(box.first, uAxisIdx), slice.uStep) * slice.uStep;
+    slice.vMin = siFloorDiv(axisGet(box.first, vAxisIdx), slice.vStep) * slice.vStep;
+
+    truncated = !regionCubeResidency(box.first, box.second).second.empty();
+    readRegion(box.first, box.second, [this, &slice](const std::uint64_t voxel, const Coordinate & pos){
+        if (voxel == soid) {
+            slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
+        }
+    });
+    slice.shrinkToFit();
+    return !slice.empty();
+}
+
+bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const std::optional<std::uint64_t> relabelFrom) {
+    if (!started) {
+        return false;
+    }
+    const auto depth = depthOf(seed);
+
+    if (relabelFrom && *relabelFrom != soid && *relabelFrom != Segmentation::singleton().getBackgroundId()) {
+        // voxel-level steal: rewrite that object's voxels in this plane only
+        auto box = residentBoxAround(seed);
+        axisSet(box.first, axis, depth);
+        axisSet(box.second, axis, depth);
+        const auto other = *relabelFrom;
+        const auto touched = processRegionReplacing(box.first, box.second, other, soid);
+        if (touched == 0) {
+            note = QObject::tr("Nothing of that object is in this plane.");
+            return false;
+        }
+    }
+
+    SISlice slice;
+    bool truncated{false};
+    if (!seedSliceFromPlane(slice, seed, truncated)) {
+        note = QObject::tr("Nothing painted with id %1 in this plane.").arg(soid);
+        return false;
+    }
+    slices[depth] = std::move(slice);
+    previewValid = false;
+    ++gen;
+    emit changed();
+    note = truncated
+        ? QObject::tr("Adopted slice %1, but it runs past the loaded blocks — scroll there and click again to pick up the rest.").arg(depth)
+        : QObject::tr("Adopted slice %1 as a key slice.").arg(depth);
+    return true;
 }
 
 bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t & brush, const std::uint64_t stampSoid, QString & reason) {
@@ -97,14 +164,13 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
 
     const auto depth = depthOf(centerPos);
     auto & slice = slices[depth];
-    if (slice.uSize == 0) { // fresh slice: anchor the mask origin at the stamp
+    if (slice.uSize == 0) {
+        // A fresh slice takes whatever is already painted across the plane, not just what
+        // this stamp covered. Otherwise dropping one stamp onto an existing outline makes
+        // the stamp the key slice — a brush-sized blob in the middle of the real object.
+        bool truncated{false};
+        seedSliceFromPlane(slice, centerPos, truncated);
         slice.depth = depth;
-        slice.uStep = axisGet(step, uAxisIdx);
-        slice.vStep = axisGet(step, vAxisIdx);
-        // snap onto the mag voxel lattice, so every slice in the session shares one grid
-        // and two slices can be compared index-for-index without a sub-voxel offset
-        slice.uMin = siFloorDiv(axisGet(centerPos, uAxisIdx), slice.uStep) * slice.uStep;
-        slice.vMin = siFloorDiv(axisGet(centerPos, vAxisIdx), slice.vStep) * slice.vStep;
     }
 
     // Read back what is actually in the overlay now that the stamp has been applied. This
@@ -676,7 +742,7 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
             if (set) {
                 const auto u = axisIsU ? ai : wi;
                 const auto v = axisIsU ? wi : ai;
-                mask[static_cast<std::size_t>(v) * uSize + u] = 1;
+                mask[static_cast<std::size_t>(v) * uSize + u] = (painted != std::end(slices)) ? 2 : 1;
             }
         }
     }
@@ -704,11 +770,15 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
 
     if (planeNormal == axis) {// the viewport the chain lives in
         const auto depth = axisGet(pos, axis);
-        const auto * slice = previewAt(depth);
+        const auto painted = slices.find(depth);
+        const auto isKeySlice = painted != std::end(slices);
+        // a key slice is drawn too, in its own colour, so which slices are in the chain is
+        // obvious at a glance rather than something you have to remember
+        const auto * slice = isKeySlice ? &painted->second : previewAt(depth);
         if (slice == nullptr || slice->count() == 0) {
             return false;
         }
-        out = {axis, depth, uAxisIdx, vAxisIdx, slice->uMin, slice->vMin, slice->uStep, slice->vStep, slice->uSize, slice->vSize, &slice->mask};
+        out = {axis, depth, uAxisIdx, vAxisIdx, slice->uMin, slice->vMin, slice->uStep, slice->vStep, slice->uSize, slice->vSize, &slice->mask, isKeySlice};
         return true;
     }
 
@@ -719,7 +789,7 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
     const auto wAxis = (planeNormal == uAxisIdx) ? vAxisIdx : uAxisIdx;
     out = {planeNormal, fixedCoord, std::min(axis, wAxis), std::max(axis, wAxis),
            crossSection.uMin, crossSection.vMin, crossSection.uStep, crossSection.vStep,
-           crossSection.uSize, crossSection.vSize, &crossSection.mask};
+           crossSection.uSize, crossSection.vSize, &crossSection.mask, false};
     return true;
 }
 

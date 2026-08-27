@@ -81,6 +81,37 @@ bool writeVoxel(const Coordinate & pos, const uint64_t value, bool isMarkChanged
     return true;
 }
 
+namespace {
+/* Which voxels a write is allowed to replace. Resolved once per operation into a plain
+ * pair of values so the per-voxel test is two integer compares, not a singleton lookup —
+ * writeVoxels() is deliberately written to inline hard and this sits in its inner loop. */
+struct PaintGuard {
+    Segmentation::PaintTarget target{Segmentation::PaintTarget::Anything};
+    std::uint64_t background{0};
+
+    bool allows(const std::uint64_t voxel, const std::uint64_t value) const {
+        if (value == background) {
+            return true;// an erase is not a paint; protecting labels must not block it
+        }
+        switch (target) {
+        case Segmentation::PaintTarget::OnlyBackground: return voxel == background || voxel == value;
+        case Segmentation::PaintTarget::OnlyExisting: return voxel != background;
+        case Segmentation::PaintTarget::Anything: break;
+        }
+        return true;
+    }
+    bool unrestricted() const { return target == Segmentation::PaintTarget::Anything; }
+};
+
+PaintGuard currentPaintGuard() {
+    const auto & seg = Segmentation::singleton();
+    // Mode_OverPaint has always meant "only over existing segmentation"; keep it winning
+    // over the toggle rather than having two settings disagree
+    const auto overPaint = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint);
+    return {overPaint ? Segmentation::PaintTarget::OnlyExisting : seg.paintTarget, seg.getBackgroundId()};
+}
+}
+
 bool isInsideSphere(const double xi, const double yi, const double zi, const double radius) {
     const auto x = xi * Dataset::current().scales[0].x;
     const auto y = yi * Dataset::current().scales[0].y;
@@ -226,17 +257,21 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
     CubeCoordSet cubeChangeSetWholeCube;
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_Paint) || Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) {
         const auto region = getRegion(centerPos, brush);
+        const auto guard = currentPaintGuard();
         if (brush.shape == brush_t::shape_t::angular) {
             if (!brush.inverse || Segmentation::singleton().selectedObjectsCount() == 0) {
                 //for rectangular brushes no further range checks are needed
-                if (brush.mode == brush_t::mode_t::three_dim && brush.shape == brush_t::shape_t::angular) {
+                if (brush.mode == brush_t::mode_t::three_dim && brush.shape == brush_t::shape_t::angular && guard.unrestricted()) {
                     //rarest special case: processes completely exclosed cubes first
+                    //(only when nothing is being protected — the whole-cube fill can’t look at what it overwrites)
                     cubeChangeSet = processRegion(region.first, region.second, [value](uint64_t & voxel, Coordinate){
                         voxel = value;
                     }, wholeCubes(region.first, region.second, value, cubeChangeSetWholeCube));
                 } else {
-                    cubeChangeSet = processRegion(region.first, region.second, [value](uint64_t & voxel, Coordinate){
-                        voxel = value;
+                    cubeChangeSet = processRegion(region.first, region.second, [value, guard](uint64_t & voxel, Coordinate){
+                        if (guard.allows(voxel, value)) {
+                            voxel = value;
+                        }
                     });
                 }
             } else {//inverse but selected
@@ -249,20 +284,12 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
         } else {
             if (!brush.inverse || Segmentation::singleton().selectedObjectsCount() == 0) {
                 //voxel need to check if they are inside the circle
-                if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) {
-                    cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos, value](uint64_t & voxel, Coordinate globalPos){
-                        if (isInsideSphere(globalPos.x - centerPos.x, globalPos.y - centerPos.y, globalPos.z - centerPos.z, brush.radius)
-                                && Segmentation::singleton().getBackgroundId() != voxel) {
-                            voxel = value;
-                        }
-                    });
-                } else {
-                    cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos, value](uint64_t & voxel, Coordinate globalPos){
-                        if (isInsideSphere(globalPos.x - centerPos.x, globalPos.y - centerPos.y, globalPos.z - centerPos.z, brush.radius)) {
-                            voxel = value;
-                        }
-                    });
-                }
+                cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos, value, guard](uint64_t & voxel, Coordinate globalPos){
+                    if (isInsideSphere(globalPos.x - centerPos.x, globalPos.y - centerPos.y, globalPos.z - centerPos.z, brush.radius)
+                            && guard.allows(voxel, value)) {
+                        voxel = value;
+                    }
+                });
             } else {//circle, inverse and selected
                 cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos](uint64_t & voxel, Coordinate globalPos){
                     if (isInsideSphere(globalPos.x - centerPos.x, globalPos.y - centerPos.y, globalPos.z - centerPos.z, brush.radius)
@@ -323,8 +350,9 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t & brush
 }
 
 CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged) {
-    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value](uint64_t & voxel, Coordinate globalPos){
-        if (inside(globalPos)) {
+    const auto guard = currentPaintGuard();
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard](uint64_t & voxel, Coordinate globalPos){
+        if (guard.allows(voxel, value) && inside(globalPos)) {
             voxel = value;
         }
     });
@@ -332,6 +360,32 @@ CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate &
         coordCubesMarkChanged(cubeChangeSet);
     }
     return cubeChangeSet;
+}
+
+std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordinate & globalLast, const std::uint64_t from, const std::uint64_t to, const bool markChanged) {
+    std::size_t changed{0};
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [from, to, &changed](uint64_t & voxel, Coordinate){
+        if (voxel == from) {
+            voxel = to;
+            ++changed;
+        }
+    });
+    if (markChanged && changed != 0) {
+        coordCubesMarkChanged(cubeChangeSet);
+    }
+    return changed;
+}
+
+std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos) {
+    const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
+    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+    const auto centre = dataset.global2cube(pos);
+    const auto half = std::max(0, (state->M - 1) / 2);
+    const auto first = dataset.cube2global({centre.x - half, centre.y - half, centre.z - half});
+    const auto last = dataset.cube2global({centre.x + half, centre.y + half, centre.z + half}) + cubeExtent - 1;
+    const auto & areaMin = Annotation::singleton().movementAreaMin;
+    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    return {first.capped(areaMin, areaMax + 1), last.capped(areaMin, areaMax + 1)};
 }
 
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast) {

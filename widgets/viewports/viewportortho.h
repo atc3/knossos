@@ -73,6 +73,8 @@ class ViewportOrtho : public ViewportBase {
     virtual void handleMouseHover(const QMouseEvent *event) override;
     virtual void handleMouseButtonLeft(const QMouseEvent *event) override;
     bool shiftLeftPaint(const QMouseEvent *event);
+    // returns true when the click was consumed as a shape-interpolation slice adoption
+    bool shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos);
     virtual void handleMouseReleaseLeft(const QMouseEvent *event) override;
     virtual void handleMouseMotionLeftHold(const QMouseEvent *event) override;
     virtual void handleMouseButtonRight(const QMouseEvent *event) override;

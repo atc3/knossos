@@ -36,6 +36,12 @@
 	</p>
 
 	<p>
+	<b>Picking up slices you already painted:</b> click one. Slices drawn before you entered
+	the mode become key slices as they are, without redrawing. Key slices are tinted amber,
+	interpolated ones cyan.
+	</p>
+
+	<p>
 	<table>
 		<thead>
 			<tr>
@@ -60,10 +66,13 @@
 		<tr><td><span class="sh">Shift + &rarr;</span></td><td>Jump to last painted slice</td></tr>
 		<tr><td><span class="sh">Delete</span> / <span class="sh">Backspace</span></td><td>Delete the painted slice at the current depth</td></tr>
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
+		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>Off: paint only into unlabelled voxels, leaving other objects intact</td></tr>
+		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
 		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>
 		<tr><td><span class="sh">Hold space</span></td><td>Reveal raw data temporarily</td></tr>
-		<tr><td><span class="sh"><img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Select object</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Select object; on this chain’s object, adopt that slice as a key slice</td></tr>
+		<tr><td><span class="sh">Ctrl + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Take another object’s outline in this slice: relabels those voxels to the current id and adopts them</td></tr>
 	</table>
 	</p>
 </body>

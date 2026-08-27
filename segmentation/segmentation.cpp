@@ -123,9 +123,15 @@ bool Segmentation::hasObjects() const {
     return !this->objects.empty();
 }
 
+std::uint64_t Segmentation::nextFreeSubobjectId() {
+    const auto id = std::max(SubObject::highestId, maxId) + 1;
+    maxId = id;// remember it, so successive calls keep climbing even before the object exists
+    return id;
+}
+
 void Segmentation::createAndSelectObject(const Coordinate & position, const QString & category) {
     clearObjectSelection();
-    auto & newObject = createObjectFromSubobjectId(SubObject::highestId + 1, position);
+    auto & newObject = createObjectFromSubobjectId(nextFreeSubobjectId(), position);
     newObject.category = category;
     newObject.immutable = Segmentation::singleton().lockNewObjects;
     selectObject(newObject);
@@ -831,7 +837,7 @@ void Segmentation::toggleVolumeRender(const bool render) {
 
 void Segmentation::cell(bool cyto) {
     clearObjectSelection();
-    const auto id = SubObject::highestId + 1;
+    const auto id = nextFreeSubobjectId();
     const Coordinate nopos{-1,-1,-1};
     auto cellidx = createObjectFromSubobjectId(id, nopos).index;
     objects[cellidx].category = "cell";
@@ -865,7 +871,7 @@ void Segmentation::plusNuc() {
             if (auto cell = mesh.find("cell"); cell != std::end(mesh)) {
                 const auto oidx = cell->second;
                 const Coordinate nopos{-1,-1,-1};
-                const auto id = SubObject::highestId + 1;
+                const auto id = nextFreeSubobjectId();
                 auto & nuc = createObjectFromSubobjectId(id, nopos);
                 nuc.category = "nucleus";
                 nuc.immutable = true;
