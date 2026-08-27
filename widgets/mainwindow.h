@@ -308,6 +308,7 @@ public slots:
     /* edit skeleton menu*/
     void setWorkMode(AnnotationMode workMode);
     void updateShapeInterpolationLabel();
+    void showAnnotationsFolder();
     void warnShapeInterpolation(const QString & message);
     // false when the user declined to discard a running chain
     bool confirmLeavingShapeInterpolation();

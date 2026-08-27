@@ -672,6 +672,7 @@ void MainWindow::createMenus() {
     }
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/save-annotation.png"), tr("Save Annotation"), this, &MainWindow::saveSlot, QKeySequence::Save);
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/save-annotation-as.png"), tr("Save Annotation as …"), this, &MainWindow::saveAsSlotWrap, QKeySequence::SaveAs);
+    fileMenu.addAction(tr("Go To Annotations Folder"), this, &MainWindow::showAnnotationsFolder);
     fileMenu.addSeparator();
     fileMenu.addAction(QIcon(":/resources/icons/open-annotation.png"), "Import Coordinates", [this] {
         const auto filenames = QFileDialog::getOpenFileNames(this, tr("Import coordinate list"), QDir::homePath(), tr("Text files (*.txt *.csv *.tsv)"));
@@ -2132,5 +2133,19 @@ void MainWindow::rebuildPaintTargetMenu() {
             paintTargetButton->setToolTip(tr("<b>What the brush may write over: %1.</b><br/>%2<br/>Erasing is unaffected.")
                                               .arg(option.label).arg(option.hint));
         }
+    }
+}
+
+/* Opens the folder the current annotation lives in, or the default one autosave writes to
+ * when nothing has been saved yet — which is buried under the platform's data location and
+ * is not somewhere anyone would find by hand. Creates it if autosave has not run yet, so
+ * the entry does nothing surprising on a fresh install. */
+void MainWindow::showAnnotationsFolder() {
+    const auto & filename = Annotation::singleton().annotationFilename;
+    const auto folder = filename.isEmpty() ? QFileInfo(annotationFileDefaultPath()).absolutePath()
+                                           : QFileInfo(filename).absolutePath();
+    QDir{}.mkpath(folder);
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(folder))) {
+        QMessageBox::warning(this, tr("Go To Annotations Folder"), tr("Could not open %1.").arg(folder));
     }
 }
