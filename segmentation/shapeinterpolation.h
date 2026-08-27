@@ -164,6 +164,22 @@ public:
     // Destructive rollback: erases the painted key slices back to background.
     WriteResult eraseSlices(QWidget * parent);
 
+    /* The whole chain, for undo to carry alongside the voxels.
+     *
+     * Key slices are in-memory masks, not overlay data, so rolling back the voxels without
+     * them leaves the preview drawing an object that is no longer there. */
+    struct State {
+        bool started{false};
+        brush_t::view_t view{brush_t::view_t::xy};
+        int axis{2}, uAxisIdx{0}, vAxisIdx{1};
+        Coordinate step{1, 1, 1};
+        std::size_t magIndex{0}, layerId{0};
+        std::uint64_t soid{0};
+        std::map<int, SISlice> slices;
+    };
+    State saveState() const;
+    void restoreState(const State &);
+
     void reset();
 
 signals:

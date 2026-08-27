@@ -34,6 +34,7 @@
 #include <boost/multi_array.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <limits>
 
 std::pair<bool, void *> getRawCube(const Coordinate & pos, const std::size_t layerIdx = Segmentation::singleton().layerId) {
@@ -96,13 +97,16 @@ struct PaintGuard {
             return true;// an erase is not a paint; protecting labels must not block it
         }
         switch (target) {
-        case Segmentation::PaintTarget::OnlyBackground: return voxel == background || voxel == value;
+        case Segmentation::PaintTarget::OnlyBackground:
+        case Segmentation::PaintTarget::BackgroundWithGap:// the gap itself is checked separately
+            return voxel == background || voxel == value;
         case Segmentation::PaintTarget::OnlyExisting: return voxel != background;
         case Segmentation::PaintTarget::Anything: break;
         }
         return true;
     }
     bool unrestricted() const { return target == Segmentation::PaintTarget::Anything; }
+    bool needsGap() const { return target == Segmentation::PaintTarget::BackgroundWithGap; }
 };
 
 PaintGuard currentPaintGuard() {
@@ -255,6 +259,71 @@ subobjectRetrievalMap readVoxels(const Coordinate & centerPos, const brush_t &br
     return subobjects;
 }
 
+namespace {
+/* "Is there a label that isn't ours at, or next to, this voxel?" over a whole region.
+ *
+ * This is what the one-voxel-gap paint mode tests: refusing to paint anywhere within
+ * 26-connected reach of a foreign label is the same thing as dilating that label by one
+ * and treating the result as off-limits, and it guarantees every object keeps a background
+ * boundary. Built by reading the region grown by one voxel on each side, so the neighbours
+ * of the edge voxels are covered too. */
+class ForeignProximity {
+    Coordinate origin, step;
+    int sizeX{0}, sizeY{0}, sizeZ{0};
+    std::vector<std::uint8_t> foreign;
+
+    std::size_t index(const int x, const int y, const int z) const {
+        return (static_cast<std::size_t>(z) * sizeY + y) * sizeX + x;
+    }
+    bool foreignAt(const int x, const int y, const int z) const {
+        if (x < 0 || y < 0 || z < 0 || x >= sizeX || y >= sizeY || z >= sizeZ) {
+            return false;// outside what we read; treat as clear rather than guess
+        }
+        return foreign[index(x, y, z)] != 0;
+    }
+
+public:
+    ForeignProximity(const Coordinate & first, const Coordinate & last, const std::uint64_t own, const std::uint64_t background) {
+        const auto & dataset = Dataset::current();
+        step = {std::max(1, static_cast<int>(dataset.scaleFactor.x)),
+                std::max(1, static_cast<int>(dataset.scaleFactor.y)),
+                std::max(1, static_cast<int>(dataset.scaleFactor.z))};
+        origin = first - step;
+        const auto grownLast = last + step;
+        sizeX = (grownLast.x - origin.x) / step.x + 1;
+        sizeY = (grownLast.y - origin.y) / step.y + 1;
+        sizeZ = (grownLast.z - origin.z) / step.z + 1;
+        foreign.assign(static_cast<std::size_t>(sizeX) * sizeY * sizeZ, 0);
+        processRegion(origin, grownLast, [this, own, background](uint64_t & voxel, Coordinate pos){
+            if (voxel != background && voxel != own) {
+                const auto x = (pos.x - origin.x) / step.x;
+                const auto y = (pos.y - origin.y) / step.y;
+                const auto z = (pos.z - origin.z) / step.z;
+                if (x >= 0 && y >= 0 && z >= 0 && x < sizeX && y < sizeY && z < sizeZ) {
+                    foreign[index(x, y, z)] = 1;
+                }
+            }
+        });
+    }
+
+    bool blocked(const Coordinate & pos) const {
+        const auto x = (pos.x - origin.x) / step.x;
+        const auto y = (pos.y - origin.y) / step.y;
+        const auto z = (pos.z - origin.z) / step.z;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (foreignAt(x + dx, y + dy, z + dz)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+};
+}
+
 void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush_t & brush, bool isMarkChanged) {
     //all the different invocations here are listed explicitly so the compiler can inline the fuck out of it
     //the brush differentiations were moved outside the core lambda which is called for every voxel
@@ -263,6 +332,13 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_Paint) || Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) {
         const auto region = getRegion(centerPos, brush);
         const auto guard = currentPaintGuard();
+        // only built when the gap rule is on; it costs one read of the grown region
+        const std::unique_ptr<const ForeignProximity> gap = guard.needsGap()
+                ? std::make_unique<const ForeignProximity>(region.first, region.second, value, Segmentation::singleton().getBackgroundId())
+                : nullptr;
+        const auto permitted = [&guard, gapPtr = gap.get()](const std::uint64_t voxel, const std::uint64_t value_, const Coordinate & pos){
+            return guard.allows(voxel, value_) && (gapPtr == nullptr || !gapPtr->blocked(pos));
+        };
         if (brush.shape == brush_t::shape_t::angular) {
             if (!brush.inverse || Segmentation::singleton().selectedObjectsCount() == 0) {
                 //for rectangular brushes no further range checks are needed
@@ -273,8 +349,8 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
                         voxel = value;
                     }, wholeCubes(region.first, region.second, value, cubeChangeSetWholeCube));
                 } else {
-                    cubeChangeSet = processRegion(region.first, region.second, [value, guard](uint64_t & voxel, Coordinate){
-                        if (guard.allows(voxel, value)) {
+                    cubeChangeSet = processRegion(region.first, region.second, [value, &permitted](uint64_t & voxel, Coordinate globalPos){
+                        if (permitted(voxel, value, globalPos)) {
                             voxel = value;
                         }
                     });
@@ -289,9 +365,9 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
         } else {
             if (!brush.inverse || Segmentation::singleton().selectedObjectsCount() == 0) {
                 //voxel need to check if they are inside the circle
-                cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos, value, guard](uint64_t & voxel, Coordinate globalPos){
+                cubeChangeSet = processRegion(region.first, region.second, [&brush, centerPos, value, &permitted](uint64_t & voxel, Coordinate globalPos){
                     if (isInsideSphere(globalPos.x - centerPos.x, globalPos.y - centerPos.y, globalPos.z - centerPos.z, brush.radius)
-                            && guard.allows(voxel, value)) {
+                            && permitted(voxel, value, globalPos)) {
                         voxel = value;
                     }
                 });
@@ -356,8 +432,11 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t & brush
 
 CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged) {
     const auto guard = currentPaintGuard();
-    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard](uint64_t & voxel, Coordinate globalPos){
-        if (guard.allows(voxel, value) && inside(globalPos)) {
+    const std::unique_ptr<const ForeignProximity> gap = guard.needsGap()
+            ? std::make_unique<const ForeignProximity>(globalFirst, globalLast, value, Segmentation::singleton().getBackgroundId())
+            : nullptr;
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){
+        if (guard.allows(voxel, value) && (gapPtr == nullptr || !gapPtr->blocked(globalPos)) && inside(globalPos)) {
             voxel = value;
         }
     });

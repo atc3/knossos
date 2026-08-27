@@ -11,34 +11,21 @@
 	<p><a href=#navi>Navigation preferences</a></p>
 
 	<p>
-	Paint an object on a few widely spaced slices and let KNOSSOS fill in everything between them.
-	Paint a slice, move to another slice, paint it again — the shape in between is previewed
-	continuously. Add as many slices as you like; each adjacent pair gets its own interpolation.
-	Press Enter to commit the whole chain at once.
+	Paint an object on a few spaced-out slices; everything between them is filled in and
+	previewed as you go. Enter commits the whole chain. Key slices are amber, interpolated
+	ones cyan, and the status bar shows the plane and slice count.
 	</p>
 
 	<p>
-	The interpolation axis is fixed by the viewport you paint the first slice in: painting in
-	<b>xy</b> interpolates along z, <b>xz</b> along y, <b>zy</b> along x. The status bar shows
-	which plane the chain is in and how many key slices it has. The other two viewports show a
-	cross-section through the whole chain, so you can watch the shape from the side as you build it.
+	The axis comes from the viewport you paint the first slice in — <b>xy</b> interpolates
+	along z, <b>xz</b> along y, <b>zy</b> along x — and the other two show a cross-section
+	through the chain. A chain belongs to one axis; with at most one key slice, painting
+	elsewhere moves it, otherwise press Esc first. Painted slices are always kept.
 	</p>
 
 	<p>
-	<b>Switching plane:</b> a chain belongs to one axis. While it has at most one key slice,
-	painting in a different viewport simply moves it there. Once there are two or more, press
-	Esc to end the chain first — the painted slices are kept either way.
-	</p>
-
-	<p>
-	<b>Correcting an interpolated slice:</b> just paint or erase on it. The preview is baked
-	into a real key slice on the first stroke, so you only have to touch the part that is wrong.
-	</p>
-
-	<p>
-	<b>Picking up slices you already painted:</b> click one. Slices drawn before you entered
-	the mode become key slices as they are, without redrawing. Key slices are tinted amber,
-	interpolated ones cyan.
+	Click an existing slice to adopt it as a key slice; paint or erase on an interpolated one
+	to correct it, and only the part you touch changes.
 	</p>
 
 	<p>
@@ -66,7 +53,7 @@
 		<tr><td><span class="sh">Shift + &rarr;</span></td><td>Jump to last painted slice</td></tr>
 		<tr><td><span class="sh">Delete</span> / <span class="sh">Backspace</span></td><td>Delete the painted slice at the current depth</td></tr>
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
-		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>Off: paint only into unlabelled voxels, leaving other objects intact</td></tr>
+		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
 		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>
 		<tr><td><span class="sh">Ctrl + Shift + Z</span></td><td>Redo</td></tr>

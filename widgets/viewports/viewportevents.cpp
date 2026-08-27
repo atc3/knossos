@@ -444,6 +444,14 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         si.beginAt(static_cast<brush_t::view_t>(viewportType), clicked);
     } else if (!steal && clicked != si.subobjectId()) {
         return false;// a plain click on someone else's object is still just a selection
+    } else if (!steal && seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != clicked) {
+        // clicking back onto the chain's own object after having selected another one:
+        // switch the brush back to it, which is the only way back without typing the id
+        seg.clearObjectSelection();
+        seg.selectObjectFromSubObject(clicked, clickPos);
+        state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(clicked));
+        state->viewer->run();
+        return true;
     } else if (si.normalAxisViewport() != static_cast<int>(viewportType)) {
         state->viewer->mainWindow.warnShapeInterpolation(tr("This chain runs in the %1 plane.").arg(si.planeName()));
         return true;

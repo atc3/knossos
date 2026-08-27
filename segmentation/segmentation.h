@@ -190,7 +190,12 @@ public:
      * Anything is the historical behaviour and stays the default. OnlyExisting is what
      * Mode_OverPaint hardcodes. OnlyBackground is the new one: paint into unlabelled
      * voxels but leave other objects intact. */
-    enum class PaintTarget { Anything, OnlyBackground, OnlyExisting };
+    enum class PaintTarget {
+        Anything,           // historical behaviour: replace whatever is under the brush
+        OnlyBackground,     // leave other objects alone
+        BackgroundWithGap,  // …and keep a one-voxel background gap around them
+        OnlyExisting,       // what Mode_OverPaint hardcodes
+    };
     PaintTarget paintTarget{PaintTarget::Anything};
 
     bool createPaintObject{true};

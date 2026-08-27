@@ -404,17 +404,13 @@ void MainWindow::createToolbars() {
     basicToolbar.addSeparator();
     subobjectIdLabelAction = basicToolbar.addWidget(&subobjectIdLabel);
     subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
-    overwriteLabelsButton = new QToolButton(this);
-    overwriteLabelsButton->setText(tr("overwrite"));
-    overwriteLabelsButton->setCheckable(true);
-    overwriteLabelsButton->setChecked(true);// the historical behaviour, and the default
-    overwriteLabelsButton->setToolTip(tr("<b>Overwrite other labels.</b><br/>On, the brush replaces whatever is under it. "
-                                         "Off, it only paints into unlabelled voxels and leaves other objects intact. "
-                                         "Erasing is unaffected either way."));
-    QObject::connect(overwriteLabelsButton, &QToolButton::toggled, [](const bool on){
-        Segmentation::singleton().paintTarget = on ? Segmentation::PaintTarget::Anything : Segmentation::PaintTarget::OnlyBackground;
-    });
-    overwriteLabelsAction = basicToolbar.addWidget(overwriteLabelsButton);
+    paintTargetButton = new QToolButton(this);
+    paintTargetButton->setPopupMode(QToolButton::InstantPopup);
+    paintTargetButton->setToolTip(tr("<b>What the brush may write over.</b><br/>Erasing is unaffected by any of these."));
+    paintTargetMenu = new QMenu(paintTargetButton);
+    paintTargetButton->setMenu(paintTargetMenu);
+    rebuildPaintTargetMenu();
+    paintTargetAction = basicToolbar.addWidget(paintTargetButton);
 
     basicToolbar.addWidget(&currentPosSpins.xSpin);
     basicToolbar.addWidget(&currentPosSpins.ySpin);
@@ -439,9 +435,9 @@ void MainWindow::createToolbars() {
     defaultToolbar.addSeparator();
     createToolToggleButton(widgetContainer.layerDialogWidget, ":/resources/icons/layers.png", "Layers");
     createToolToggleButton(widgetContainer.annotationWidget, ":/resources/icons/annotation.png", "Annotation");
-    createToolToggleButton(widgetContainer.historyWidget, ":/resources/icons/annotation.png", "History");
+    createToolToggleButton(widgetContainer.historyWidget, ":/resources/icons/history.png", "History");
     createToolToggleButton(widgetContainer.zoomWidget, ":/resources/icons/zoom.png", "Zoom");
-    shapeInterpolationButton = createToolToggleButton(widgetContainer.shapeInterpolationWidget, ":/resources/icons/annotation.png", "Shape Interpolation");
+    shapeInterpolationButton = createToolToggleButton(widgetContainer.shapeInterpolationWidget, ":/resources/icons/shapeinterpolation.png", "Shape Interpolation");
     createToolToggleButton(widgetContainer.snapshotWidget, ":/resources/icons/snapshot.png", "Snapshot");
     createToolToggleButton(widgetContainer.taskManagementWidget, ":/resources/icons/tasks-management.png", "Task Management");
     defaultToolbar.addSeparator();
@@ -1338,7 +1334,7 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     swapSynapticNodes->setVisible((mode.testFlag(AnnotationMode::Mode_TracingAdvanced)));
     clearSkeletonAction->setVisible(skeleton && !mode.testFlag(AnnotationMode::Mode_MergeTracing));
     generateLUTAction->setVisible(segmentation);
-    for (auto * action : {subobjectIdLabelAction, subobjectIdAction, overwriteLabelsAction}) {
+    for (auto * action : {subobjectIdLabelAction, subobjectIdAction, paintTargetAction}) {
         action->setVisible(segmentation);
     }
     subobjectIdEdit.refresh();
@@ -2103,4 +2099,31 @@ bool MainWindow::confirmLeavingShapeInterpolation() {
     prompt.addButton(tr("Stay"), QMessageBox::RejectRole);
     state->viewer->suspend([&prompt]{ return prompt.exec(); });
     return prompt.clickedButton() == confirm;
+}
+
+void MainWindow::rebuildPaintTargetMenu() {
+    using Target = Segmentation::PaintTarget;
+    struct Option { Target target; QString label; QString hint; };
+    const std::array<Option, 3> options{{
+        {Target::Anything, tr("overwrite"), tr("Replace whatever is under the brush.")},
+        {Target::OnlyBackground, tr("no overwrite"), tr("Paint only into unlabelled voxels; other objects are left intact.")},
+        {Target::BackgroundWithGap, tr("no overwrite + 1 voxel boundary"),
+         tr("As above, and refuse any voxel touching another label — including diagonally. "
+            "Every object keeps a one-voxel background boundary.")},
+    }};
+
+    paintTargetMenu->clear();
+    const auto current = Segmentation::singleton().paintTarget;
+    for (const auto & option : options) {
+        auto * action = paintTargetMenu->addAction(option.label, [this, target = option.target](){
+            Segmentation::singleton().paintTarget = target;
+            rebuildPaintTargetMenu();
+        });
+        action->setCheckable(true);
+        action->setChecked(option.target == current);
+        action->setToolTip(option.hint);
+        if (option.target == current) {
+            paintTargetButton->setText(option.label);
+        }
+    }
 }

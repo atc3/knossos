@@ -29,7 +29,7 @@
 		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Draw</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Draw (alternative to right click; always paints, never erases)</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Erase</td></tr>
-		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>Off: paint only into unlabelled voxels, leaving other objects intact</td></tr>
+		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
 		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>
 		<tr><td><span class="sh">Ctrl + Shift + Z</span></td><td>Redo</td></tr>

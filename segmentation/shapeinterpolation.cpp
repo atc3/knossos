@@ -293,6 +293,28 @@ bool ShapeInterpolation::removeSliceAt(const int depth) {
     return true;
 }
 
+ShapeInterpolation::State ShapeInterpolation::saveState() const {
+    return {started, view, axis, uAxisIdx, vAxisIdx, step, magIndex, layerId, soid, slices};
+}
+
+void ShapeInterpolation::restoreState(const State & state) {
+    started = state.started;
+    view = state.view;
+    axis = state.axis;
+    uAxisIdx = state.uAxisIdx;
+    vAxisIdx = state.vAxisIdx;
+    step = state.step;
+    magIndex = state.magIndex;
+    layerId = state.layerId;
+    soid = state.soid;
+    slices = state.slices;
+    interpolants.clear();
+    previewValid = false;
+    crossSectionValid = false;
+    ++gen;
+    emit changed();
+}
+
 void ShapeInterpolation::reset() {
     if (!started && slices.empty()) {
         return;

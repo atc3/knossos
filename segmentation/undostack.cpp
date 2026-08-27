@@ -27,6 +27,7 @@
 #include "loader.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/shapeinterpolation.h"
 #include "stateInfo.h"
 #include "widgets/historytimeline.h"
 #include "viewer.h"
@@ -131,6 +132,7 @@ void UndoStack::beginScope(const QString & description) {
     pending.subObjectHighestId = seg.highestSubobjectId();
     pending.objectHighestId = Segmentation::Object::highestId;
     pending.objectHighestIndex = Segmentation::Object::highestIndex;
+    pending.shapeInterpolation = ShapeInterpolation::singleton().saveState();
     graphRevisionAtScopeStart = seg.graphRevision;
 }
 
@@ -197,6 +199,7 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
     inverse.subObjectHighestId = seg.highestSubobjectId();
     inverse.objectHighestId = Segmentation::Object::highestId;
     inverse.objectHighestIndex = Segmentation::Object::highestIndex;
+    inverse.shapeInterpolation = ShapeInterpolation::singleton().saveState();
 
     // Cubes that are still in memory are restored in place, which is instant and covers
     // the common case of undoing what you are looking at. Everything else goes through the
@@ -245,6 +248,7 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
         // the object graph rides along, otherwise objects whose voxels just vanished stay
         // in the segmentation table
         restoreGraph(entry);
+        ShapeInterpolation::singleton().restoreState(entry.shapeInterpolation);
         cachedRevision = std::numeric_limits<std::uint64_t>::max();// force a re-snapshot
     }
 

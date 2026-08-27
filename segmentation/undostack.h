@@ -38,6 +38,7 @@
  * still sitting in the segmentation table. */
 
 #include "coordinate.h"
+#include "segmentation/shapeinterpolation.h"
 
 #include <QByteArray>
 #include <QDateTime>
@@ -61,6 +62,8 @@ struct UndoEntry {
     QByteArray mergelist;  // empty when the operation left the object graph alone
     std::vector<std::uint64_t> selectedObjectIds;// not part of the mergelist format
     std::uint64_t subObjectHighestId{0}, objectHighestId{0}, objectHighestIndex{0};
+    // key slices live in memory, not in the overlay, so they roll back with the voxels
+    ShapeInterpolation::State shapeInterpolation;
     std::size_t bytes{0};
 };
 

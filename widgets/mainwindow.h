@@ -126,8 +126,10 @@ class MainWindow : public QMainWindow {
     QAction *subobjectIdAction{};// so the toolbar entry can be hidden outside segmentation modes
     QLabel subobjectIdLabel{tr(" id: ")};
     QAction *subobjectIdLabelAction{};
-    class QToolButton *overwriteLabelsButton{};
-    QAction *overwriteLabelsAction{};
+    class QToolButton *paintTargetButton{};
+    QAction *paintTargetAction{};
+    class QMenu *paintTargetMenu{};
+    void rebuildPaintTargetMenu();
     class QToolButton *viewportLayoutButton{};
     class QMenu *viewportLayoutMenu{};
     QString activeViewportLayout;
