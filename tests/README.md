@@ -31,3 +31,16 @@ coordinate, that the origin stays on the magnification lattice, erase accounting
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/sislice_test sislice_test.cpp && /tmp/sislice_test
 ```
+
+## viewportlayout_test
+
+Exercises `widgets/viewportlayoutgeometry.h`, the placement arithmetic behind the named
+viewport arrangements. Checks that the reference unit fits an arrangement into the window
+(whichever of width and height binds), that nothing escapes the window at any aspect ratio,
+that the built-in shapes are what they claim, and that capturing the current arrangement
+and re-applying it reproduces it — including preserving empty space the user deliberately
+left, which an earlier version stretched away.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/vplayout_test viewportlayout_test.cpp && /tmp/vplayout_test
+```

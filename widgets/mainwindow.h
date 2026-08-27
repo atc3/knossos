@@ -32,6 +32,7 @@
 #include "widgetcontainer.h"
 #include "widgets/coordinatespins.h"
 #include "widgets/subobjectidedit.h"
+#include "widgets/viewportlayouts.h"
 
 #include <QComboBox>
 #include <QDropEvent>
@@ -124,6 +125,9 @@ class MainWindow : public QMainWindow {
     QAction *subobjectIdAction{};// so the toolbar entry can be hidden outside segmentation modes
     QLabel subobjectIdLabel{tr(" id: ")};
     QAction *subobjectIdLabelAction{};
+    class QToolButton *viewportLayoutButton{};
+    class QMenu *viewportLayoutMenu{};
+    QString activeViewportLayout;
     WorkModeModel workModeModel;
     QComboBox modeCombo;
     QAction *cheatsheetAction;
@@ -306,6 +310,11 @@ public slots:
     void updateCoordinateBar(const Coordinate & pos);
     // viewports
     void defaultViewports();
+    void applyViewportLayout(const QString & name);
+    ViewportLayout captureViewportLayout(const QString & name);
+    bool viewportsMatchLayout(const ViewportLayout & layout);
+    void rebuildViewportLayoutMenu();
+    void saveCurrentViewportLayout();
     void adjustViewports();
 
     // from the event handler

@@ -63,6 +63,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLayout>
+#include <QInputDialog>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -426,10 +427,15 @@ void MainWindow::createToolbars() {
         state->viewer->setPosition(pos, USERMOVE_DRILL);
     });
 
-    auto resetVPsButton = new QPushButton("Reset vp positions", this);
-    resetVPsButton->setToolTip("Reset viewport positions and sizes");
-    defaultToolbar.addWidget(resetVPsButton);
-    QObject::connect(resetVPsButton, &QPushButton::clicked, this, &MainWindow::defaultViewports);
+    viewportLayoutButton = new QToolButton(this);
+    viewportLayoutButton->setText(tr("Layout"));
+    viewportLayoutButton->setToolTip(tr("Viewport arrangement — pick a preset, or save the current one"));
+    viewportLayoutButton->setPopupMode(QToolButton::InstantPopup);
+    viewportLayoutMenu = new QMenu(viewportLayoutButton);
+    viewportLayoutButton->setMenu(viewportLayoutMenu);
+    defaultToolbar.addWidget(viewportLayoutButton);
+    QObject::connect(&ViewportLayouts::singleton(), &ViewportLayouts::changed, this, &MainWindow::rebuildViewportLayoutMenu);
+    rebuildViewportLayoutMenu();
 
     defaultToolbar.addWidget(new QLabel(" Loader pending: "));
     loaderProgress = new QLabel();
@@ -1065,6 +1071,21 @@ bool MainWindow::openFileDispatch(QStringList fileNames, const bool mergeAll, co
     }
     Skeletonizer::singleton().resetData();
 
+    if (Annotation::singleton().extraFiles.contains(VIEWPORT_LAYOUTS_FILE)) {
+        QStringList skipped;
+        const auto added = ViewportLayouts::singleton().importJson(Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE], skipped);
+        if (added != 0 || !skipped.isEmpty()) {
+            QStringList parts;
+            if (added != 0) {
+                parts << tr("%n viewport layout(s) imported from the annotation", "", added);
+            }
+            if (!skipped.isEmpty()) {// never redefine an arrangement the user already has
+                parts << tr("kept your own: %1").arg(skipped.join(", "));
+            }
+            statusBar()->showMessage(parts.join(" · "), 8000);
+        }
+    }
+
     Annotation::singleton().setUnsavedChanges(multipleFiles || mergeSkeleton || mergeSegmentation);// merge implies changes
     if (!mergeSkeleton && !mergeSegmentation) { // if an annotation was already open don't change its filename, otherwise…
         // if multiple files are loaded, let KNOSSOS generate a new filename. Otherwise either an .nml or a .k.zip was loaded
@@ -1186,6 +1207,14 @@ try {
         }
     }
     emit aboutToSave();
+    // Ride along in the .k.zip via extraFiles, which round trips unrecognised entries
+    // verbatim — so saved arrangements travel with the annotation.
+    const auto layoutsJson = ViewportLayouts::singleton().userLayoutsJson();
+    if (ViewportLayouts::singleton().userLayouts().empty()) {
+        Annotation::singleton().extraFiles.remove(VIEWPORT_LAYOUTS_FILE);
+    } else {
+        Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE] = layoutsJson;
+    }
     annotationFileSave(filename, onlySelectedTrees, saveTime, saveDatasetPath);
     Annotation::singleton().annotationFilename = filename;
     updateRecentFile(filename);
@@ -1479,6 +1508,8 @@ void MainWindow::saveSettings() {
     widgetContainer.pythonInterpreterWidget.saveSettings();
     widgetContainer.pythonPropertyWidget.saveSettings();
     widgetContainer.snapshotWidget.saveSettings();
+    ViewportLayouts::singleton().saveSettings();
+    settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();
     widgetContainer.zoomWidget.saveSettings();
 }
@@ -1525,6 +1556,12 @@ void MainWindow::loadSettings() {
     show();
     activateWindow();// prevent mainwin in background in gnome when other widgets are also visible
     state->viewer->loadSettings();// size vps after show() for proper maximized space
+    ViewportLayouts::singleton().loadSettings();
+    // applied after show(), so the central widget already has its final size
+    const auto restoredLayout = settings.value(VIEWPORT_LAYOUTS + '/' + "active").toString();
+    if (!restoredLayout.isEmpty() && ViewportLayouts::singleton().find(restoredLayout) != nullptr) {
+        applyViewportLayout(restoredLayout);
+    }
     if (Annotation::singleton().guiMode == GUIMode::ProofReading) {
         setProofReadingUI(true);// this breaks restoring segmentation work modes
     }
@@ -1574,12 +1611,24 @@ void MainWindow::resizeEvent(QResizeEvent *) {
     if(state->viewerState->defaultVPSizeAndPos) {
         // don't resize viewports when user positioned and resized them manually
         adjustViewports();
-    } else {//ensure viewports fit the window
-        forEachVPDo([](ViewportBase & vp) {
-            vp.posAdapt();
-            vp.sizeAdapt();
-        });
+        return;
     }
+    if (!activeViewportLayout.isEmpty()) {
+        const auto * layout = ViewportLayouts::singleton().find(activeViewportLayout);
+        // Re-apply so the arrangement keeps its proportions — but only while it still
+        // matches, so that dragging a viewport by hand quietly drops out of the preset
+        // instead of having the next window resize undo the change.
+        if (layout != nullptr && !layout->stockArrangement && viewportsMatchLayout(*layout)) {
+            applyViewportLayout(activeViewportLayout);
+            return;
+        }
+        activeViewportLayout.clear();
+        rebuildViewportLayoutMenu();
+    }
+    forEachVPDo([](ViewportBase & vp) {//ensure viewports fit the window
+        vp.posAdapt();
+        vp.sizeAdapt();
+    });
 }
 
 void MainWindow::dropEvent(QDropEvent *event) {
@@ -1619,6 +1668,141 @@ void MainWindow::dragEnterEvent(QDragEnterEvent * event) {
 void MainWindow::defaultViewports() {
     state->viewerState->defaultVPSizeAndPos = true;
     adjustViewports();
+}
+
+void MainWindow::applyViewportLayout(const QString & name) {
+    const auto * layout = ViewportLayouts::singleton().find(name);
+    if (layout == nullptr) {
+        return;
+    }
+    activeViewportLayout = name;
+    if (layout->stockArrangement) {
+        defaultViewports();
+        rebuildViewportLayoutMenu();
+        return;
+    }
+    const auto unit = layoutUnit(layout->placements, layout->canvas, centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    if (unit <= 0) {
+        return;
+    }
+    state->viewerState->defaultVPSizeAndPos = false;
+    state->viewer->setDefaultVPSizeAndPos(false);
+    forEachVPDo([layout, unit](ViewportBase & vp) {
+        const auto placement = layout->placements.find(vp.viewportType);
+        const bool shown = placement != std::end(layout->placements)
+                && (vp.viewportType != VIEWPORT_ARBITRARY || state->viewerState->enableArbVP);
+        if (!shown) {
+            vp.setHidden(true);
+            return;
+        }
+        if (!vp.isDocked) {
+            vp.setDock(true);
+        }
+        const auto box = placementGeometry(placement->second, unit, DEFAULT_VP_MARGIN);
+        vp.setGeometry(box.x, box.y, box.side, box.side);
+        vp.show();
+    });
+    rebuildViewportLayoutMenu();
+}
+
+bool MainWindow::viewportsMatchLayout(const ViewportLayout & layout) {
+    const auto unit = layoutUnit(layout.placements, layout.canvas, centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    if (unit <= 0) {
+        return false;
+    }
+    bool matches{true};
+    forEachVPDo([&layout, unit, &matches](ViewportBase & vp) {
+        const auto placement = layout.placements.find(vp.viewportType);
+        const bool shouldShow = placement != std::end(layout.placements)
+                && (vp.viewportType != VIEWPORT_ARBITRARY || state->viewerState->enableArbVP);
+        if (!shouldShow) {
+            matches = matches && vp.isHidden();
+            return;
+        }
+        const auto expected = placementGeometry(placement->second, unit, DEFAULT_VP_MARGIN);
+        constexpr int SLACK = 2;// rounding, not user intent
+        matches = matches && !vp.isHidden() && vp.isDocked
+                && std::abs(vp.x() - expected.x) <= SLACK && std::abs(vp.y() - expected.y) <= SLACK
+                && std::abs(vp.width() - expected.side) <= SLACK;
+    });
+    return matches;
+}
+
+ViewportLayout MainWindow::captureViewportLayout(const QString & name) {
+    ViewportLayout layout;
+    layout.name = name;
+    // normalise against the height, matching how layoutUnit() reads them back
+    const auto unit = std::max(1, centralWidget()->height() - 2 * DEFAULT_VP_MARGIN);
+    layout.canvas = captureCanvas(centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    forEachVPDo([&layout, unit](ViewportBase & vp) {
+        if (vp.isHidden() || !vp.isDocked) {
+            return;// floating and hidden viewports are not part of an arrangement
+        }
+        layout.placements[vp.viewportType] = capturePlacement(vp.x(), vp.y(), vp.width(), unit, DEFAULT_VP_MARGIN);
+    });
+    return layout;
+}
+
+void MainWindow::saveCurrentViewportLayout() {
+    auto & layouts = ViewportLayouts::singleton();
+    bool ok{false};
+    const auto name = QInputDialog::getText(this, tr("Save viewport layout"), tr("Name:"), QLineEdit::Normal, QString{}, &ok).trimmed();
+    if (!ok || name.isEmpty()) {
+        return;
+    }
+    const auto * existing = layouts.find(name);
+    if (existing != nullptr && existing->builtin) {
+        QMessageBox::warning(this, tr("Save viewport layout"), tr("“%1” is a built-in layout. Pick another name.").arg(name));
+        return;
+    }
+    if (existing != nullptr && QMessageBox::question(this, tr("Save viewport layout"), tr("Replace the existing layout “%1”?").arg(name)) != QMessageBox::Yes) {
+        return;
+    }
+    const auto layout = captureViewportLayout(name);
+    if (layout.placements.empty()) {
+        QMessageBox::warning(this, tr("Save viewport layout"), tr("No docked viewports to save."));
+        return;
+    }
+    layouts.addOrReplaceUser(layout);
+    activeViewportLayout = name;
+    rebuildViewportLayoutMenu();
+}
+
+void MainWindow::rebuildViewportLayoutMenu() {
+    if (viewportLayoutMenu == nullptr) {
+        return;
+    }
+    viewportLayoutMenu->clear();
+    auto & layouts = ViewportLayouts::singleton();
+    const auto addEntry = [this](QMenu & menu, const ViewportLayout & layout){
+        auto * action = menu.addAction(layout.name, [this, name = layout.name](){ applyViewportLayout(name); });
+        action->setCheckable(true);
+        action->setChecked(layout.name == activeViewportLayout);
+    };
+    for (const auto & layout : layouts.builtinLayouts()) {
+        addEntry(*viewportLayoutMenu, layout);
+    }
+    if (!layouts.userLayouts().empty()) {
+        viewportLayoutMenu->addSeparator();
+        for (const auto & layout : layouts.userLayouts()) {
+            addEntry(*viewportLayoutMenu, layout);
+        }
+    }
+    viewportLayoutMenu->addSeparator();
+    viewportLayoutMenu->addAction(tr("Save current layout…"), this, &MainWindow::saveCurrentViewportLayout);
+    if (!layouts.userLayouts().empty()) {
+        auto * removeMenu = viewportLayoutMenu->addMenu(tr("Delete saved layout"));
+        for (const auto & layout : layouts.userLayouts()) {
+            removeMenu->addAction(layout.name, [this, name = layout.name](){
+                if (QMessageBox::question(this, tr("Delete viewport layout"), tr("Delete “%1”?").arg(name)) == QMessageBox::Yes) {
+                    ViewportLayouts::singleton().removeUser(name);
+                    if (activeViewportLayout == name) {
+                        activeViewportLayout.clear();
+                    }
+                }
+            });
+        }
+    }
 }
 
 void MainWindow::adjustViewports() {

@@ -37,6 +37,8 @@ const QString PYTHON_PROPERTY_WIDGET = "pythonpropertywidget";
 const QString REDMINE_INTEGRATION = "redmine_integration";
 const QString SNAPSHOT_WIDGET = "snapshot_widget";
 const QString SHAPE_INTERPOLATION_WIDGET = "shape_interpolation_widget";
+const QString VIEWPORT_LAYOUTS = "viewport_layouts";
+const QString VIEWPORT_LAYOUTS_FILE = "viewport_layouts.json";// entry name inside the .k.zip
 const QString VIEWER = "viewer";
 const QString ZOOM_WIDGET = "zoom_and_multires_widget";
 
