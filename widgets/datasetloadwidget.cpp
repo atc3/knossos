@@ -398,6 +398,17 @@ void DatasetLoadWidget::adaptMemoryConsumption(boost::optional<Coordinate> cubeS
     mebibytes += infos.size() * std::pow(std::pow(2, std::ceil(std::log2(fov + cubeEdgeSpin.value()))), 2) *4./*RGBA*/*2/*cpu+gpu*/*3/*vps*//(1<<20);
     auto text = QString("FOV per dimension (%1 MiB memory)").arg(mebibytes);
     superCubeSizeLabel.setText(text);
+    /* Worth spelling out, because this is also the zoom control people go looking for and
+     * do not find: the viewport holds exactly this many voxels at full zoom-out, since
+     * nothing beyond it is loaded — so this value *is* the point at which zooming out
+     * drops to a coarser magnification. */
+    const auto hint = tr("<b>How much data is held around the cursor, per axis.</b><br/>"
+                         "This is also where zooming out switches to a coarser magnification: the switch happens when "
+                         "this much data fills the viewport, because nothing beyond it is loaded. Raise it to stay at a "
+                         "fine magnification while zoomed further out — currently %1 voxels, for the memory shown.")
+                          .arg(fov);
+    superCubeSizeLabel.setToolTip(hint);
+    fovSpin.setToolTip(hint);
 }
 
 void DatasetLoadWidget::processButtonClicked() {
