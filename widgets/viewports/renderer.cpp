@@ -1798,7 +1798,8 @@ void ViewportOrtho::renderBrush(const Coordinate coord) {
 
     };
     const auto objColor = seg.colorOfSelectedObject();
-    if (seg.brush.isInverse()) {
+    // red for an erase, whether that is Shift held down or background selected as the id
+    if (seg.brush.isInverse() || seg.paintingBackground()) {
         drawCursor(1.f, 0.f, 0.f);
     } else {
         drawCursor(std::get<0>(objColor)/255., std::get<1>(objColor)/255., std::get<2>(objColor)/255.);

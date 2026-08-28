@@ -135,6 +135,14 @@ Q_OBJECT
     const QSet<QString> prefixed_categories = {"", "cell", "cytoplasm", "ecs", "mito", "myelin", "neuron", "nucleus", "synapse"};
     QSet<QString> categories = prefixed_categories;
     uint64_t backgroundId = 0;
+    /* Whether the brush and the fills write the background id — i.e. erase — with nothing
+     * held down, which is how "background" is selected as the thing being painted.
+     *
+     * Distinct from brush.inverse, KNOSSOS's Shift-to-erase, because that flag lives
+     * exactly as long as Shift is down (it is cleared on key release and on focus loss)
+     * and so cannot express a standing choice. Mutually exclusive with an object
+     * selection: arming it clears the selection, and selecting an object clears it. */
+    bool paintsBackground{false};
     // highest subobject id known to exist in the data, including parts never loaded
     std::uint64_t maxId = 0;
     /* Bumped whenever the object graph changes. Undo uses it to skip serialising the
@@ -219,6 +227,8 @@ public:
     void setRenderOnlySelectedObjs(const bool onlySelected);
     decltype(backgroundId) getBackgroundId() const;
     void setBackgroundId(decltype(backgroundId));
+    bool paintingBackground() const { return paintsBackground; }
+    void setPaintingBackground(const bool paint);
     decltype(lockNewObjects) getLockNewObjects() const;
     void setLockNewObjects(const decltype(lockNewObjects));
     using color_t = std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>;
@@ -327,6 +337,7 @@ signals:
     void resetTouchedObjects();
     void renderOnlySelectedObjsChanged(bool onlySelected);
     void backgroundIdChanged(uint64_t backgroundId);
+    void paintingBackgroundChanged(bool paintsBackground);
     void lockNewObjectsChanged(const bool lockNewObjects);
     void categoriesChanged();
     void todosLeftChanged();

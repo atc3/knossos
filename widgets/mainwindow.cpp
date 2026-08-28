@@ -822,6 +822,27 @@ void MainWindow::createMenus() {
                                      "will pull the loader along and carry on — which moves the view and evicts what you were "
                                      "looking at. 3D fills always stop at the boundary regardless."));
 
+    /* Selecting the background as the paint id, so the brush and the fills erase.
+     *
+     * Background is not an object and so cannot be selected the way a label is, which left
+     * erasing reachable only by holding Shift — no use for "fill this chunk away", where
+     * the gesture is a keystroke rather than a drag. `0` sits with the other paint ids and
+     * mirrors typing 0 into the toolbar field. */
+    paintBackgroundAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Paint Background (Erase)"), this, [this]() {
+        auto & seg = Segmentation::singleton();
+        seg.setPaintingBackground(paintBackgroundAction->isChecked());
+        statusBar()->showMessage(seg.paintingBackground()
+            ? tr("Painting background — the brush and the fills now erase. Click a label, or type an id, to paint again.")
+            : tr("Painting labels again."), 8000);
+        state->viewer->run();
+    }, Qt::Key_0);
+    paintBackgroundAction->setCheckable(true);
+    paintBackgroundAction->setToolTip(tr("Paint and fill with id 0 instead of a label, rubbing out whatever is touched. "
+                                         "Same as typing 0 into the id box, or clicking unlabelled data."));
+    QObject::connect(&Segmentation::singleton(), &Segmentation::paintingBackgroundChanged, this, [this](const bool on) {
+        paintBackgroundAction->setChecked(on);// it is also set by the id field and by clicking
+    });
+
     actionMenu.addSeparator();
     // shape interpolation. Bindings mirror Paintera's so the muscle memory carries over;
     // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
@@ -1362,6 +1383,10 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     for (auto * action : {subobjectIdLabelAction, subobjectIdAction, paintTargetAction}) {
         action->setVisible(segmentation);
     }
+    // no brush, no paint id to point at the background
+    paintBackgroundAction->setVisible(mode.testFlag(AnnotationMode::Brush));
+    paintBackgroundAction->setEnabled(mode.testFlag(AnnotationMode::Brush));
+    paintBackgroundAction->setChecked(Segmentation::singleton().paintingBackground());
     subobjectIdEdit.refresh();
     increaseOpacityAction->setVisible(segmentation);
     decreaseOpacityAction->setVisible(segmentation);

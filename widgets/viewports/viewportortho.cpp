@@ -98,7 +98,8 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     magWarningShownThisStroke = false;
     lastBrushStamp = boost::none;// a fresh stroke starts with a single stamp
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
-        paintUndoScope = std::make_unique<UndoScope>(Segmentation::singleton().brush.isInverse() ? tr("Erase") : tr("Brush stroke"));
+        paintUndoScope = std::make_unique<UndoScope>(
+                    Segmentation::singleton().brush.isInverse() || Segmentation::singleton().paintingBackground() ? tr("Erase") : tr("Brush stroke"));
     }
     ViewportBase::mousePressEvent(event);
 }

@@ -29,10 +29,15 @@
  * A plain QLineEdit rather than a QSpinBox because subobject ids are 64 bit and QSpinBox
  * tops out at 32. Typing an id selects the object holding it, creating that object if the
  * id is not in the mergelist yet, which is how you deliberately paint into a specific
- * label rather than whatever happens to be selected. */
+ * label rather than whatever happens to be selected.
+ *
+ * The background id (0) is accepted too, and means erase — see Segmentation::paintsBackground.
+ * That is a big enough change in what the brush does that the field colours itself for it;
+ * a bare `0` is far too easy to miss. */
 class SubobjectIdEdit : public QLineEdit {
     Q_OBJECT
     bool editing{false};
+    bool showingErase{false};
 
 public:
     explicit SubobjectIdEdit(QWidget * parent = nullptr);
@@ -40,4 +45,5 @@ public:
 
 private:
     void commit();
+    void showErasing(const bool erasing);
 };

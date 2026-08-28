@@ -244,6 +244,23 @@ void Segmentation::setBackgroundId(decltype(backgroundId) newBackgroundId) {
     emit backgroundIdChanged(backgroundId = newBackgroundId);
 }
 
+/* Select background as the thing being painted, so the brush and the fills erase.
+ *
+ * There is no object to select for the background id — it is the absence of a label — so
+ * this is a flag rather than a selection, and the two are alternatives: arming it drops
+ * the object selection, and selectObject() below drops it again the moment a real object
+ * is picked. */
+void Segmentation::setPaintingBackground(const bool paint) {
+    if (paintsBackground == paint) {
+        return;
+    }
+    paintsBackground = paint;
+    if (paint) {
+        clearObjectSelection();
+    }
+    emit paintingBackgroundChanged(paintsBackground);
+}
+
 decltype(Segmentation::lockNewObjects) Segmentation::getLockNewObjects() const {
     return lockNewObjects;
 }
@@ -327,6 +344,9 @@ uint64_t Segmentation::oid(const uint64_t oidx) const {
 }
 
 std::optional<uint64_t> Segmentation::currentPaintSubobjectId() const {
+    if (paintsBackground) {
+        return backgroundId;// a deliberate choice, unlike "nothing is selected"
+    }
     if (selectedObjectIndices.empty()) {
         return std::nullopt;
     }
@@ -453,6 +473,10 @@ void Segmentation::clearObjectSelection() {
 }
 
 void Segmentation::selectObject(Object & object) {
+    if (paintsBackground) {// picking a real object ends "painting background"
+        paintsBackground = false;
+        emit paintingBackgroundChanged(false);
+    }
     if (object.selected) {
         return;
     }
@@ -619,6 +643,10 @@ void Segmentation::mergelistClear() {
     SubObject::highestId = 0;
     subobjects.clear();
     backgroundId = 0;
+    if (paintsBackground) {// nothing left to erase; also un-checks the menu entry
+        paintsBackground = false;
+        emit paintingBackgroundChanged(false);
+    }
     hovered_subobject_id = 0;
     touched_subobject_id = 0;
     lastTodoObject_id = 0;

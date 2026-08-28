@@ -128,6 +128,7 @@ class MainWindow : public QMainWindow {
     QAction *subobjectIdLabelAction{};
     class QToolButton *paintTargetButton{};
     QAction *paintTargetAction{};
+    QAction *paintBackgroundAction{};// checkable: paint/fill with id 0, i.e. erase
     class QMenu *paintTargetMenu{};
     void rebuildPaintTargetMenu();
     class QToolButton *viewportLayoutButton{};

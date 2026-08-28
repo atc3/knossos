@@ -106,7 +106,11 @@ struct PaintGuard {
         return true;
     }
     bool unrestricted() const { return target == Segmentation::PaintTarget::Anything; }
-    bool needsGap() const { return target == Segmentation::PaintTarget::BackgroundWithGap; }
+    // takes the value for the same reason allows() does: an erase is not a paint, so the
+    // gap that keeps labels apart must not stop one being rubbed out next to another
+    bool needsGap(const std::uint64_t value) const {
+        return target == Segmentation::PaintTarget::BackgroundWithGap && value != background;
+    }
 };
 
 PaintGuard currentPaintGuard() {
@@ -333,7 +337,7 @@ void writeVoxels(const Coordinate & centerPos, const uint64_t value, const brush
         const auto region = getRegion(centerPos, brush);
         const auto guard = currentPaintGuard();
         // only built when the gap rule is on; it costs one read of the grown region
-        const std::unique_ptr<const ForeignProximity> gap = guard.needsGap()
+        const std::unique_ptr<const ForeignProximity> gap = guard.needsGap(value)
                 ? std::make_unique<const ForeignProximity>(region.first, region.second, value, Segmentation::singleton().getBackgroundId())
                 : nullptr;
         const auto permitted = [&guard, gapPtr = gap.get()](const std::uint64_t voxel, const std::uint64_t value_, const Coordinate & pos){
@@ -432,7 +436,7 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t & brush
 
 CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged) {
     const auto guard = currentPaintGuard();
-    const std::unique_ptr<const ForeignProximity> gap = guard.needsGap()
+    const std::unique_ptr<const ForeignProximity> gap = guard.needsGap(value)
             ? std::make_unique<const ForeignProximity>(globalFirst, globalLast, value, Segmentation::singleton().getBackgroundId())
             : nullptr;
     const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){

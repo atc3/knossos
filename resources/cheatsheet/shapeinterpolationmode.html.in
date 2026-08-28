@@ -57,6 +57,7 @@
 		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
 		<tr><td><span class="sh">Action menu</span></td><td>Lock painting to the current magnification</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
+		<tr><td><span class="sh">0</span> / <span class="sh">id</span> (toolbar) / <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/> on empty space outside the preview</td><td>Paint the background instead of a label — the brush and both fills then erase, so a fill rubs out the connected chunk it lands on and the key slice is re-read to match. The id box turns red. Click the chain’s object, or one of its key slices, to go back</td></tr>
 		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>
 		<tr><td><span class="sh">Ctrl + Shift + Z</span></td><td>Redo</td></tr>
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>

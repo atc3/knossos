@@ -148,12 +148,20 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
         if (event->modifiers().testFlag(Qt::AltModifier)) {
             merging(event, vp);
         } else {
-            if (seg.createPaintObject && !seg.brush.isInverse() && seg.selectedObjectsCount() == 0) {
+            /* Background selected as the paint id means the stroke erases, with nothing
+             * held down — the standing counterpart to Shift. */
+            const bool eraseBackground = seg.paintingBackground();
+            if (seg.createPaintObject && !seg.brush.isInverse() && !eraseBackground && seg.selectedObjectsCount() == 0) {
                 seg.createAndSelectObject(coord);
             }
-            if (seg.selectedObjectsCount() > 0) {
-                uint64_t soid = seg.subobjectIdOfFirstSelectedObject(coord);
+            if (eraseBackground || seg.selectedObjectsCount() > 0) {
+                uint64_t soid = eraseBackground ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
                 auto brush = seg.brush.value();
+                if (eraseBackground) {
+                    // brush.inverse means "erase only what is selected", and nothing is —
+                    // writing background outright is what selecting background asked for
+                    brush.inverse = false;
+                }
                 const bool shapeInterpolation = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
                 if (shapeInterpolation) {
                     brush.mode = brush_t::mode_t::two_dim;// key slices are strictly planar
@@ -172,9 +180,16 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                 const auto stamp = [&](const Coordinate & at){
                     writeVoxels(at, soid, brush);
                     if (shapeInterpolation) {
-                        QString reason;
-                        if (!ShapeInterpolation::singleton().absorbStamp(at, brush, soid, reason)) {
-                            state->viewer->mainWindow.warnShapeInterpolation(reason);
+                        auto & si = ShapeInterpolation::singleton();
+                        // An erase is absorbed against the chain's own id: absorbStamp reads
+                        // the overlay back, so rubbed-out voxels fall out of the key slice.
+                        // With no chain running there is nothing to absorb into — an erase
+                        // must not start one on id 0.
+                        if (!eraseBackground || si.active()) {
+                            QString reason;
+                            if (!si.absorbStamp(at, brush, eraseBackground ? si.subobjectId() : soid, reason)) {
+                                state->viewer->mainWindow.warnShapeInterpolation(reason);
+                            }
                         }
                     }
                 };
@@ -222,16 +237,23 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
         state->viewer->mainWindow.statusBar()->showMessage(QObject::tr("Fill: use one of the xy/xz/zy viewports."), 5000);
         return;
     }
-    if (seg.createPaintObject && seg.selectedObjectsCount() == 0) {
-        seg.createAndSelectObject(coord);
-    }
-    if (seg.selectedObjectsCount() == 0) {
-        return;
+    /* Filling with the background id is an erase: the connected region the seed lands in
+     * is replaced with background rather than with a label, which is how a chunk of a label
+     * gets rubbed out in one gesture. Two ways in — holding Shift, KNOSSOS's transient erase
+     * modifier, or selecting background as the paint id, which is the standing form. */
+    const bool erasing = seg.brush.isInverse() || seg.paintingBackground();
+    if (!erasing) {
+        if (seg.createPaintObject && seg.selectedObjectsCount() == 0) {
+            seg.createAndSelectObject(coord);
+        }
+        if (seg.selectedObjectsCount() == 0) {
+            return;
+        }
     }
 
     FloodFillRequest request;
     request.seed = coord;
-    request.fillsoid = seg.brush.isInverse() ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+    request.fillsoid = erasing ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
     request.threeDimensional = threeDimensional;
     request.view = static_cast<brush_t::view_t>(vp.viewportType);
     request.mayLoadCubes = Segmentation::singleton().floodFillMayLoadCubes;
@@ -241,12 +263,32 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
 
     if (report.didSomething && Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
         auto & si = ShapeInterpolation::singleton();
-        QString reason;
-        const auto depth = si.active() ? axisGet(coord, si.normalAxis()) : 0;
         if (!si.active()) {
-            message += " " + QObject::tr("Paint a stroke first — a fill alone doesn’t start a chain.");
-        } else if (!si.absorbRegion(report.filledMin, report.filledMax, depth, request.fillsoid, reason)) {
-            message += " " + reason;
+            if (!erasing) {// an erase is a cleanup, not the start of anything
+                message += " " + QObject::tr("Paint a stroke first — a fill alone doesn’t start a chain.");
+            }
+        } else {
+            /* absorbRegion() re-reads the overlay, so it takes paint and erase alike as
+             * long as it is handed the chain's own id — the erased voxels simply come back
+             * as "not the chain's id" and drop out of the key slice.
+             *
+             * A 3D fill spans depths, and each key slice it crossed has to be re-read or it
+             * would keep claiming voxels the fill has already changed. Only depths that
+             * actually hold a key slice cost anything. */
+            const auto soid = erasing ? si.subobjectId() : request.fillsoid;
+            const auto seedDepth = axisGet(coord, si.normalAxis());
+            const auto first = axisGet(report.filledMin, si.normalAxis());
+            const auto last = axisGet(report.filledMax, si.normalAxis());
+            const auto depthStep = std::max(1, axisGet(si.voxelStep(), si.normalAxis()));
+            for (auto depth = first; depth <= last; depth += depthStep) {
+                if (depth == seedDepth || si.hasSliceAt(depth)) {
+                    QString reason;
+                    if (!si.absorbRegion(report.filledMin, report.filledMax, depth, soid, reason)) {
+                        message += " " + reason;
+                        break;// they would all fail the same way
+                    }
+                }
+            }
         }
     }
     state->viewer->mainWindow.statusBar()->showMessage(message, 8000);
@@ -650,7 +692,23 @@ void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
     if (!Annotation::singleton().outsideMovementArea(clickPos) && Annotation::singleton().annotationMode.testFlag(AnnotationMode::ObjectSelection)) { // in task mode the object should not be switched
         if (event->pos() == mouseDown) {// mouse click
             const auto subobjectId = readVoxel(clickPos);
-            if (subobjectId != segmentation.getBackgroundId()) {// don’t select the unsegmented area as object
+            if (subobjectId == segmentation.getBackgroundId()) {
+                /* Clicking unlabelled data selects the background as the thing being
+                 * painted, so the brush and the fills erase from here on.
+                 *
+                 * It is the only way to pick id 0 with the mouse: 0 is not an object, so
+                 * the empty space itself is the only thing there is to click. Restricted to
+                 * brush modes — with no brush there is no paint id to change and this would
+                 * just be a way to lose a selection by missing. Ctrl is the add-to-selection
+                 * modifier and is left alone. */
+                if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)
+                        && !event->modifiers().testFlag(Qt::ControlModifier)
+                        && !segmentation.paintingBackground()) {
+                    segmentation.setPaintingBackground(true);
+                    state->viewer->mainWindow.statusBar()->showMessage(
+                        tr("Painting background — the brush and the fills now erase. Click a label, or type an id, to paint again."), 8000);
+                }
+            } else {// don’t select the unsegmented area as object
                 auto & subobject = segmentation.subobjectFromId(subobjectId, clickPos);
                 auto objIndex = segmentation.largestObjectContainingSubobject(subobject);
                 Segmentation::singleton().setObjectLocation(objIndex, clickPos);

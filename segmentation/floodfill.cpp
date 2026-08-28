@@ -65,9 +65,13 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
         return report;
     }
 
+    // writing the background id is an erase, not a fill, and the History window should say so
+    const bool erasing = request.fillsoid == Segmentation::singleton().getBackgroundId();
+
     // the whole fill, including any load-and-continue rounds, is one undo step — which is
     // the entire point: a fill that escapes through a gap is exactly what you need to undo
-    const UndoScope undoScope(request.threeDimensional ? QObject::tr("3D fill") : QObject::tr("2D fill"));
+    const UndoScope undoScope(request.threeDimensional ? (erasing ? QObject::tr("3D erase") : QObject::tr("3D fill"))
+                                                       : (erasing ? QObject::tr("2D erase") : QObject::tr("2D fill")));
 
     FloodFillOptions options;
     options.threeDimensional = request.threeDimensional;
@@ -81,7 +85,8 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
     }
     if (result.seedAlreadyFilled) {
         report.ok = true;
-        report.message = QObject::tr("Fill: that voxel already belongs to this object.");
+        report.message = erasing ? QObject::tr("Erase: that voxel is already background.")
+                                 : QObject::tr("Fill: that voxel already belongs to this object.");
         return report;
     }
 
@@ -140,20 +145,27 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
     report.boundaryStops = result.deferred.size();
 
     report.ok = true;
+    // a fill that writes the background id is an erase, and saying "filled" for it reads as
+    // if the wrong thing just happened to a few thousand voxels
     const auto dim = request.threeDimensional ? QObject::tr("3D") : QObject::tr("2D");
+    const auto what = (erasing ? QObject::tr("%1 erase") : QObject::tr("%1 fill")).arg(dim);
     if (!report.didSomething) {
-        report.message = QObject::tr("%1 fill: nothing to fill here.").arg(dim);
+        report.message = erasing ? QObject::tr("%1: nothing to erase here.").arg(what)
+                                 : QObject::tr("%1: nothing to fill here.").arg(what);
     } else if (report.hitCap) {
-        report.message = QObject::tr("%1 fill: stopped at the %2 voxel safety limit after filling %3 voxels — the region is probably leaking into the background.")
-                             .arg(dim).arg(FloodFillOptions{}.maxVoxels).arg(report.voxelsFilled);
+        report.message = erasing
+            ? QObject::tr("%1: stopped at the %2 voxel safety limit after removing %3 voxels — the label reaches further than expected.")
+                  .arg(what).arg(FloodFillOptions{}.maxVoxels).arg(report.voxelsFilled)
+            : QObject::tr("%1: stopped at the %2 voxel safety limit after filling %3 voxels — the region is probably leaking into the background.")
+                  .arg(what).arg(FloodFillOptions{}.maxVoxels).arg(report.voxelsFilled);
     } else if (report.boundaryStops != 0) {
         report.message = request.threeDimensional
-            ? QObject::tr("%1 fill: %2 voxels in %3 block(s). Stopped at the edge of the loaded blocks — a 3D fill never loads more.").arg(dim).arg(report.voxelsFilled).arg(report.cubesWritten)
-            : QObject::tr("%1 fill: %2 voxels in %3 block(s). Stopped at the edge of the loaded blocks — enable “Fill may load more blocks” to continue past it.").arg(dim).arg(report.voxelsFilled).arg(report.cubesWritten);
+            ? QObject::tr("%1: %2 voxels in %3 block(s). Stopped at the edge of the loaded blocks — a 3D fill never loads more.").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten)
+            : QObject::tr("%1: %2 voxels in %3 block(s). Stopped at the edge of the loaded blocks — enable “Fill may load more blocks” to continue past it.").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten);
     } else if (report.loadRounds != 0) {
-        report.message = QObject::tr("%1 fill: %2 voxels in %3 block(s), loading %4 extra block(s) on the way.").arg(dim).arg(report.voxelsFilled).arg(report.cubesWritten).arg(report.loadRounds);
+        report.message = QObject::tr("%1: %2 voxels in %3 block(s), loading %4 extra block(s) on the way.").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten).arg(report.loadRounds);
     } else {
-        report.message = QObject::tr("%1 fill: %2 voxels in %3 block(s).").arg(dim).arg(report.voxelsFilled).arg(report.cubesWritten);
+        report.message = QObject::tr("%1: %2 voxels in %3 block(s).").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten);
     }
     return report;
 }
