@@ -2065,15 +2065,16 @@ void MainWindow::updateShapeInterpolationLabel() {
         return;
     }
     const auto summary = ShapeInterpolation::singleton().summary();
-    if (shapeInterpolationWarning.isEmpty()) {
-        shapeInterpolationLabel.setStyleSheet({});
-        shapeInterpolationLabel.setText(summary);
-        shapeInterpolationLabel.setToolTip({});
-    } else {
-        shapeInterpolationLabel.setStyleSheet(QStringLiteral("QLabel { color: palette(bright-text); background: #b03030; padding: 0 4px; }"));
-        shapeInterpolationLabel.setText(shapeInterpolationWarning);
-        shapeInterpolationLabel.setToolTip(summary);// the chain state is still one hover away
-    }
+    const auto warning = !shapeInterpolationWarning.isEmpty();
+    const auto & text = warning ? shapeInterpolationWarning : summary;
+    shapeInterpolationLabel.setStyleSheet(warning
+        ? QStringLiteral("QLabel { color: palette(bright-text); background: #b03030; padding: 0 4px; }")
+        : QString{});
+    // the label is width-capped so it can share the permanent zone; elide rather than
+    // letting Qt clip mid-word, and keep the whole thing on the tooltip
+    const auto available = shapeInterpolationLabel.maximumWidth() - 12;
+    shapeInterpolationLabel.setText(shapeInterpolationLabel.fontMetrics().elidedText(text, Qt::ElideRight, available));
+    shapeInterpolationLabel.setToolTip(warning ? text + "\n" + summary : QString{});
 }
 
 /* Interpolation warnings go into the chain label rather than through showMessage(), which

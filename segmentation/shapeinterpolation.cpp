@@ -70,6 +70,7 @@ bool awaitLoader(QProgressDialog & progress) {
 
 #include <cmath>
 #include <limits>
+#include <deque>
 #include <unordered_set>
 
 void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoid) {
@@ -105,8 +106,11 @@ int ShapeInterpolation::depthOf(const Coordinate & pos) const {
  * own centre, so the crosshair never moves and only rendering is paused. Without it the
  * walk simply stops at the edge of memory, which is what a brush stroke needs: painting a
  * slice must not start fetching data. */
-bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated, const bool mayLoad, QWidget * const parent) {
-    constexpr std::size_t MAX_BLOCKS = 96;// bounds both the wait and how far a leak can run
+bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, PlaneScan & scan, const bool mayLoad, QWidget * const parent) {
+    // Reading a block is cheap (one 128² plane); only *loading* a missing one costs
+    // anything, and the progress dialog can be cancelled. So this is set high enough not
+    // to clip a real object and exists only to stop a runaway.
+    constexpr std::size_t MAX_BLOCKS = 1024;
     const auto depth = depthOf(seed);
     const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
     const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
@@ -127,18 +131,20 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
     const LabelOnlyLoading labelOnly;// the image data is irrelevant here
 
     std::unordered_set<CoordOfCube> seen;
-    std::vector<CoordOfCube> queue{seedBlock};
+    // breadth first: on a budget, spreading out from the seed beats following one tendril
+    // to its end and leaving everything nearby unvisited
+    std::deque<CoordOfCube> queue{seedBlock};
     seen.insert(seedBlock);
     std::size_t processed{0};
-    truncated = false;
+    scan = PlaneScan{};
 
     while (!queue.empty()) {
         if (processed >= MAX_BLOCKS || progress.wasCanceled()) {
-            truncated = truncated || !queue.empty();
+            scan.hitLimit = true;
             break;
         }
-        const auto block = queue.back();
-        queue.pop_back();
+        const auto block = queue.front();
+        queue.pop_front();
         progress.setValue(static_cast<int>(processed++));
 
         auto first = dataset.cube2global(block);
@@ -150,14 +156,14 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
 
         if (!regionCubeResidency(first, last).second.empty()) {
             if (!mayLoad) {
-                truncated = true;
+                ++scan.unreachable;
                 continue;
             }
             // drive the loader to this block. startLoading takes its own centre, so
             // viewerState->currentPosition — the crosshair — is untouched.
             Loader::Controller::singleton().startLoading(dataset.cube2global(block) + cubeExtent / 2, USERMOVE_NEUTRAL, {});
             if (!awaitLoader(progress) || !regionCubeResidency(first, last).second.empty()) {
-                truncated = true;
+                ++scan.unreachable;
                 continue;
             }
         }
@@ -178,6 +184,13 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
         const auto enqueue = [&](const int axisIdx, const int delta){
             auto neighbour = block;
             axisSet(neighbour, axisIdx, axisGet(neighbour, axisIdx) + delta);
+            const auto corner = dataset.cube2global(neighbour);
+            // a block off the edge of the dataset will never load; not finding it there is
+            // not a shortfall, so don't queue it and don't report one
+            if (corner.x < 0 || corner.y < 0 || corner.z < 0
+                    || corner.x >= dataset.boundary.x || corner.y >= dataset.boundary.y || corner.z >= dataset.boundary.z) {
+                return;
+            }
             if (seen.insert(neighbour).second) {
                 queue.push_back(neighbour);
             }
@@ -189,6 +202,7 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
     }
     progress.setValue(static_cast<int>(MAX_BLOCKS));
 
+    scan.blocks = processed - scan.unreachable;
     if (mayLoad) {
         state->viewer->loader_notify();// bring the user's own surroundings back
     }
@@ -217,8 +231,8 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
     }
 
     SISlice slice;
-    bool truncated{false};
-    if (!seedSliceFromPlane(slice, seed, truncated, true, parent)) {
+    PlaneScan scan;
+    if (!seedSliceFromPlane(slice, seed, scan, true, parent)) {
         note = QObject::tr("Nothing painted with id %1 in this plane.").arg(soid);
         return false;
     }
@@ -226,9 +240,17 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
     previewValid = false;
     ++gen;
     emit changed();
-    note = truncated
-        ? QObject::tr("Adopted slice %1, but it runs further than this could follow — click again on the missing part to pick up the rest.").arg(depth)
-        : QObject::tr("Adopted slice %1 as a key slice.").arg(depth);
+    // say which kind of shortfall it was, so a partial result is diagnosable rather than
+    // just disappointing
+    if (scan.complete()) {
+        note = QObject::tr("Adopted slice %1 from %n block(s).", "", static_cast<int>(scan.blocks)).arg(depth);
+    } else if (scan.unreachable != 0) {
+        note = QObject::tr("Adopted slice %1 from %2 block(s); %n would not load.", "", static_cast<int>(scan.unreachable))
+                   .arg(depth).arg(scan.blocks);
+    } else {
+        note = QObject::tr("Adopted slice %1 from %2 blocks, stopping at the block limit — click the rest to add it.")
+                   .arg(depth).arg(scan.blocks);
+    }
     return true;
 }
 
@@ -260,8 +282,8 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
         // A fresh slice takes whatever is already painted across the plane, not just what
         // this stamp covered. Otherwise dropping one stamp onto an existing outline makes
         // the stamp the key slice — a brush-sized blob in the middle of the real object.
-        bool truncated{false};
-        seedSliceFromPlane(slice, centerPos, truncated, false);
+        PlaneScan scan;
+        seedSliceFromPlane(slice, centerPos, scan, false);
         slice.depth = depth;
     }
 

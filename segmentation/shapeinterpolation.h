@@ -240,7 +240,13 @@ private:
      * just the part on screen. The loader takes a centre of its own, so this never moves
      * the crosshair. Without it, only what is already in memory is read, which is what a
      * brush stroke wants: painting must not start loading things. */
-    bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, bool & truncated, bool mayLoad, QWidget * parent = nullptr);
+    struct PlaneScan {
+        std::size_t blocks{0};      // blocks actually read
+        std::size_t unreachable{0}; // blocks that would not load
+        bool hitLimit{false};       // stopped at the block budget or was cancelled
+        bool complete() const { return unreachable == 0 && !hitLimit; }
+    };
+    bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, PlaneScan & scan, bool mayLoad, QWidget * parent = nullptr);
     WriteResult writeAll(bool wholeChain, std::uint64_t value, const QString & title, QWidget * parent);
 
     bool alignCentroids{true};
