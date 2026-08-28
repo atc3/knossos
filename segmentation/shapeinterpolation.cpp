@@ -210,7 +210,7 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
     return !slice.empty();
 }
 
-bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const std::optional<std::uint64_t> relabelFrom, QWidget * const parent) {
+bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const bool replace, const std::optional<std::uint64_t> relabelFrom, QWidget * const parent) {
     if (!started) {
         return false;
     }
@@ -244,13 +244,13 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
      * up a piece at a time. */
     const auto existing = slices.find(depth);
     const auto pieceVoxels = slice.count();
-    if (existing == std::end(slices)) {
+    if (replace || existing == std::end(slices)) {
         slices[depth] = std::move(slice);
     } else {
         existing->second.mergeFrom(slice);
     }
     const auto totalVoxels = slices.at(depth).count();
-    const bool added = existing != std::end(slices);
+    const bool added = !replace && existing != std::end(slices);
     previewValid = false;
     ++gen;
     emit changed();

@@ -103,7 +103,7 @@ public:
      * `relabelFrom`, when set, first rewrites that object's voxels in this plane to the
      * chain's id — a voxel-level steal of someone else's outline, leaving their object
      * untouched everywhere else. */
-    bool adoptPlaneAt(const Coordinate & seed, QString & note, std::optional<std::uint64_t> relabelFrom = std::nullopt, QWidget * parent = nullptr);
+    bool adoptPlaneAt(const Coordinate & seed, QString & note, bool replace, std::optional<std::uint64_t> relabelFrom = std::nullopt, QWidget * parent = nullptr);
 
     // depth navigation over the painted slices
     int depthOf(const Coordinate & pos) const;

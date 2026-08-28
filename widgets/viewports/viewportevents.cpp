@@ -308,9 +308,23 @@ void ViewportOrtho::handleMouseButtonMiddle(const QMouseEvent *event) {
     ViewportBase::handleMouseButtonMiddle(event);
 }
 
+/* In shape interpolation the right button adopts slices rather than painting.
+ *
+ * Paintera puts replace on left and add on right, and with Shift+left already painting
+ * there is nothing for a plain right drag to do that Shift+left does not. Shift+right is
+ * left alone as erase — it is the established gesture and removing it would leave the mode
+ * with no way to rub anything out. */
+bool rightButtonAdoptsSlices(const QMouseEvent *event) {
+    return Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            && !event->modifiers().testFlag(Qt::ShiftModifier);
+}
+
 void ViewportOrtho::handleMouseButtonRight(const QMouseEvent *event) {
     const auto & annotationMode = Annotation::singleton().annotationMode;
     if (annotationMode.testFlag(AnnotationMode::Brush)) {
+        if (rightButtonAdoptsSlices(event)) {
+            return;// handled on release, so a drag can still be told from a click
+        }
         Segmentation::singleton().brush.setInverse(event->modifiers().testFlag(Qt::ShiftModifier));
         segmentation_brush_work(event, *this);
         return;
@@ -487,7 +501,7 @@ void ViewportOrtho::handleMouseMotionLeftHold(const QMouseEvent *event) {
  * Plain click adopts the chain's own object. Ctrl+click on a *different* object relabels
  * that object's voxels in this plane to the chain's id and adopts the result: a
  * voxel-level steal of the outline, which leaves their object intact everywhere else. */
-bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos) {
+bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos, const bool replace) {
     if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
             || Annotation::singleton().outsideMovementArea(clickPos)) {
         return false;
@@ -538,7 +552,7 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
     QString note;
     // suspended so the viewports don't churn while the loader is walked across blocks
     const auto adopted = state->viewer->suspend([&]{
-        return si.adoptPlaneAt(clickPos, note, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt, &state->viewer->mainWindow);
+        return si.adoptPlaneAt(clickPos, note, replace, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt, &state->viewer->mainWindow);
     });
     state->viewer->mainWindow.warnShapeInterpolation(note);
     if (adopted) {
@@ -564,7 +578,7 @@ void Viewport3D::handleMouseMotionRightHold(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseMotionRightHold(const QMouseEvent *event) {
-    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush) && !rightButtonAdoptsSlices(event)) {
         const bool notOrigin = event->pos() != mouseDown;//don’t do redundant work
         if (notOrigin) {
             segmentation_brush_work(event, *this);
@@ -629,7 +643,7 @@ void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
     }
     auto & segmentation = Segmentation::singleton();
     const auto clickPos = getCoordinateFromOrthogonalClick(event->pos(), *this);
-    if (event->pos() == mouseDown && shapeInterpolationAdopt(event, clickPos)) {
+    if (event->pos() == mouseDown && shapeInterpolationAdopt(event, clickPos, true)) {// left replaces
         ViewportBase::handleMouseReleaseLeft(event);
         return;
     }
@@ -662,6 +676,13 @@ void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseReleaseRight(const QMouseEvent *event) {
+    if (rightButtonAdoptsSlices(event)) {
+        if (event->pos() == mouseDown) {// a click, not a drag
+            shapeInterpolationAdopt(event, getCoordinateFromOrthogonalClick(event->pos(), *this), false);// right adds
+        }
+        ViewportBase::handleMouseReleaseRight(event);
+        return;
+    }
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         if (event->pos() != mouseDown) {//merge took already place on mouse down
             segmentation_brush_work(event, *this);

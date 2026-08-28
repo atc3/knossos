@@ -24,9 +24,9 @@
 	</p>
 
 	<p>
-	Click an existing slice to adopt it as a key slice — the whole outline is picked up, not
-	just the part on screen. A label split into separate pieces in one plane takes one click
-	each; later clicks add to the slice rather than replacing it. Paint or erase on an interpolated slice to correct it, and only
+	Left click an existing slice to make it the key slice; right click adds a piece to it, so
+	a label split into separate parts in one plane — the two arms of a U above the join — takes
+	one right click each. Either way the whole outline is picked up, not just the part on screen. Paint or erase on an interpolated slice to correct it, and only
 	the part you touch changes.
 	</p>
 
@@ -37,9 +37,8 @@
 				<th align="left">Shortcut</th><th align="left">Action</th>
 			</tr>
 		</thead>
-		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Paint on the current slice</td></tr>
-		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Draw (alternative to right click; always paints, never erases)</td></tr>
-		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Erase</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/> drag</span></td><td>Draw — the only painting gesture in this mode</td></tr>
+		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/> drag</span></td><td>Erase</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> scroll</span></td><td>Change brush size</td></tr>
 		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>2D fill (stops at the edge of the loaded blocks)</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>3D fill (always confined to the loaded blocks)</td></tr>
@@ -63,7 +62,8 @@
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
 		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>
 		<tr><td><span class="sh">Hold space</span></td><td>Reveal raw data temporarily</td></tr>
-		<tr><td><span class="sh"><img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Select object; on this chain’s object, adopt that slice as a key slice</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Select object; on this chain’s object, <b>replace</b> the key slice with that piece</td></tr>
+		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td><b>Add</b> that piece to the key slice — click each part of a split label in turn</td></tr>
 		<tr><td><span class="sh">Ctrl + <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/></span></td><td>Take another object’s outline in this slice: relabels those voxels to the current id and adopts them</td></tr>
 	</table>
 	</p>
