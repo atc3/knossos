@@ -52,6 +52,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDesktopWidget>
@@ -802,7 +803,41 @@ void MainWindow::createMenus() {
     // on the neighbouring G. Not Ctrl+F: Qt maps Qt::CTRL to Command on macOS, so that
     // binding would be Cmd+F there and a literal Ctrl+F would fall through to the viewport.
     // The mouse gesture is middle click / Shift + middle click.
-    const auto fillAtCrosshair = [this](const bool threeDimensional){
+    /*
+     * Aimed with the pointer, like the middle-click gesture it shares its code with.
+     *
+     * The crosshair is fixed at the centre of the viewport, so filling there meant moving
+     * the view onto the region first — one navigation per fill, for an operation whose
+     * whole point is picking out a particular blob. The pointer is already where the user
+     * is looking.
+     *
+     * Falls back to the crosshair when the pointer is over no orthogonal viewport at all —
+     * the 3D viewport, another window, off screen — since there is nothing to aim at then.
+     * Pointing at the arbitrary viewport is *not* a fallback: it is turned away with the
+     * usual "use one of the xy/xz/zy viewports", because quietly filling at the crosshair
+     * of some other viewport would put voxels somewhere nobody was looking. */
+    const auto fillUnderPointer = [this](const bool threeDimensional){
+        const auto globalPos = QCursor::pos();
+        /* widgetAt() first, because it respects stacking and viewports can be dragged on
+         * top of one another — a geometry scan would then answer with whichever one it
+         * happened to test first, not the one being looked at. The scan is the backup for
+         * when widgetAt() comes back with nothing useful, as it does over another
+         * application's window. */
+        ViewportOrtho * hovered{nullptr};
+        for (auto * w = QApplication::widgetAt(globalPos); w != nullptr && hovered == nullptr; w = w->parentWidget()) {
+            hovered = dynamic_cast<ViewportOrtho *>(w);
+        }
+        if (hovered == nullptr) {
+            forEachOrthoVPDo([&hovered, &globalPos](ViewportOrtho & orthoVP){
+                if (hovered == nullptr && orthoVP.isVisible() && orthoVP.rect().contains(orthoVP.mapFromGlobal(globalPos))) {
+                    hovered = &orthoVP;
+                }
+            });
+        }
+        if (hovered != nullptr) {
+            segmentation_flood_fill(getCoordinateFromOrthogonalClick(hovered->mapFromGlobal(globalPos), *hovered), *hovered, threeDimensional);
+            return;
+        }
         auto * vp = state->viewer->window->viewportXY.get();
         forEachOrthoVPDo([&vp](ViewportOrtho & orthoVP){
             if (orthoVP.hasFocus()) {
@@ -811,8 +846,12 @@ void MainWindow::createMenus() {
         });
         segmentation_flood_fill(state->viewerState->currentPosition, *vp, threeDimensional);
     };
-    fill2dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("2D Fill at Crosshair"), this, [fillAtCrosshair]() { fillAtCrosshair(false); }, Qt::Key_G);
-    fill3dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("3D Fill at Crosshair"), this, [fillAtCrosshair]() { fillAtCrosshair(true); }, Qt::SHIFT + Qt::Key_G);
+    fill2dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("2D Fill at Pointer"), this, [fillUnderPointer]() { fillUnderPointer(false); }, Qt::Key_G);
+    fill3dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("3D Fill at Pointer"), this, [fillUnderPointer]() { fillUnderPointer(true); }, Qt::SHIFT + Qt::Key_G);
+    for (auto * action : {fill2dAction, fill3dAction}) {
+        action->setToolTip(tr("Fills where the mouse is pointing, the same spot a middle click would. "
+                              "With the pointer outside the xy/xz/zy viewports it falls back to the crosshair."));
+    }
     fillMayLoadAction = actionMenu.addAction(tr("Fill May Load More Blocks"), [this]() {
         Segmentation::singleton().floodFillMayLoadCubes = fillMayLoadAction->isChecked();
     });

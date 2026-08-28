@@ -58,7 +58,7 @@ void SubobjectIdEdit::showErasing(const bool erasing) {
     showingErase = erasing;
     setStyleSheet(erasing ? QStringLiteral("QLineEdit { background-color: #7d2727; color: #ffe4e4; }") : QString{});
     setToolTip(erasing ? tr("<b>Painting background (0) — the brush and the fills erase.</b><br/>"
-                            "Fill with G to rub out the connected region under the crosshair. "
+                            "Fill with G to rub out the connected region under the pointer. "
                             "Type another id, or click a label, to paint again.")
                        : tr("<b>Subobject id being painted.</b><br/>Type an id to paint into that label instead; "
                             "an id that isn’t in the mergelist yet becomes a new object.<br/>"

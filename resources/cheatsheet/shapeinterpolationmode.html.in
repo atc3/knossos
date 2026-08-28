@@ -42,8 +42,8 @@
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> scroll</span></td><td>Change brush size</td></tr>
 		<tr><td><span class="sh"><img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>2D fill (stops at the edge of the loaded blocks)</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> click</span></td><td>3D fill (always confined to the loaded blocks)</td></tr>
-		<tr><td><span class="sh">G</span></td><td>2D fill at the crosshair</td></tr>
-		<tr><td><span class="sh">Shift + G</span></td><td>3D fill at the crosshair</td></tr>
+		<tr><td><span class="sh">G</span></td><td>2D fill where the mouse is pointing (falls back to the crosshair if the pointer is outside the xy/xz/zy viewports)</td></tr>
+		<tr><td><span class="sh">Shift + G</span></td><td>3D fill where the mouse is pointing</td></tr>
 		<tr><td><span class="sh">Enter</span></td><td>Accept — write the interpolated volume</td></tr>
 		<tr><td><span class="sh">Ctrl + P</span></td><td>Toggle interpolation preview</td></tr>
 		<tr><td><span class="sh">Esc</span></td><td>End the current chain (painted slices are kept)</td></tr>
