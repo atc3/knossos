@@ -117,6 +117,48 @@ int main() {
         check(s.count() == 0 && s.empty(), "empty after adopting a blank mask");
     }
 
+    std::printf("9. mergeFrom: adding a second disconnected piece to a key slice\n");
+    {
+        // the two arms of a U, far apart in the plane and captured by separate clicks
+        SISlice left; left.uMin = 1000; left.vMin = 1000; left.uStep = 1; left.vStep = 1;
+        paint(left, 1000, 1000); paint(left, 1001, 1000);
+
+        SISlice right; right.uMin = 1400; right.vMin = 1000; right.uStep = 1; right.vStep = 1;
+        paint(right, 1400, 1000); paint(right, 1401, 1000);
+
+        left.mergeFrom(right);
+        check(left.count() == 4, "both arms are present");
+        check(read(left, 1000, 1000) && read(left, 1001, 1000), "the first arm survived");
+        check(read(left, 1400, 1000) && read(left, 1401, 1000), "the second arm was added");
+        check(read(left, 1200, 1000) == 0, "the gap between them stays empty");
+    }
+
+    std::printf("10. mergeFrom: incoming piece below the existing origin\n");
+    {
+        SISlice a; a.uMin = 2000; a.vMin = 2000; a.uStep = 1; a.vStep = 1;
+        paint(a, 2000, 2000);
+        SISlice b; b.uMin = 1500; b.vMin = 1500; b.uStep = 1; b.vStep = 1;
+        paint(b, 1500, 1500);
+        a.mergeFrom(b);   // forces the box to grow downward and the origin to shift
+        check(a.count() == 2, "both voxels counted");
+        check(read(a, 2000, 2000) == 1, "original still at its global coord");
+        check(read(a, 1500, 1500) == 1, "merged voxel at its global coord");
+    }
+
+    std::printf("11. mergeFrom at step 4, and merging twice\n");
+    {
+        SISlice a; a.uMin = 4000; a.vMin = 4000; a.uStep = 4; a.vStep = 4;
+        paint(a, 4000, 4000);
+        SISlice b; b.uMin = 4400; b.vMin = 4000; b.uStep = 4; b.vStep = 4;
+        paint(b, 4400, 4000); paint(b, 4404, 4000);
+        a.mergeFrom(b);
+        check(a.count() == 3, "three voxels after the merge");
+        check(read(a, 4400, 4000) && read(a, 4404, 4000), "merged voxels land on the lattice");
+        check(a.uMin % 4 == 0, "origin stays on the lattice");
+        a.mergeFrom(b);
+        check(a.count() == 3, "merging the same piece again changes nothing");
+    }
+
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "THERE WERE FAILURES");
     return failures != 0;
 }

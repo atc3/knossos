@@ -236,13 +236,31 @@ bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, c
         note = QObject::tr("Nothing painted with id %1 in this plane.").arg(soid);
         return false;
     }
-    slices[depth] = std::move(slice);
+    /* Add to whatever is already keyed at this depth rather than replacing it.
+     *
+     * A label can have several disconnected pieces in one plane — the two arms of a U seen
+     * above the join, say — and each click follows only the piece it landed on. Replacing
+     * would make the second click throw the first arm away; merging lets a slice be built
+     * up a piece at a time. */
+    const auto existing = slices.find(depth);
+    const auto pieceVoxels = slice.count();
+    if (existing == std::end(slices)) {
+        slices[depth] = std::move(slice);
+    } else {
+        existing->second.mergeFrom(slice);
+    }
+    const auto totalVoxels = slices.at(depth).count();
+    const bool added = existing != std::end(slices);
     previewValid = false;
     ++gen;
     emit changed();
     // say which kind of shortfall it was, so a partial result is diagnosable rather than
     // just disappointing
-    if (scan.complete()) {
+    if (added) {
+        note = totalVoxels > pieceVoxels
+            ? QObject::tr("Added %1 voxels to slice %2, now %3.").arg(pieceVoxels).arg(depth).arg(totalVoxels)
+            : QObject::tr("That piece was already in slice %1.").arg(depth);
+    } else if (scan.complete()) {
         note = QObject::tr("Adopted slice %1 from %n block(s).", "", static_cast<int>(scan.blocks)).arg(depth);
     } else if (scan.unreachable != 0) {
         note = QObject::tr("Adopted slice %1 from %2 block(s); %n would not load.", "", static_cast<int>(scan.unreachable))

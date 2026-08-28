@@ -25,7 +25,8 @@
 
 	<p>
 	Click an existing slice to adopt it as a key slice — the whole outline is picked up, not
-	just the part on screen. Paint or erase on an interpolated slice to correct it, and only
+	just the part on screen. A label split into separate pieces in one plane takes one click
+	each; later clicks add to the slice rather than replacing it. Paint or erase on an interpolated slice to correct it, and only
 	the part you touch changes.
 	</p>
 

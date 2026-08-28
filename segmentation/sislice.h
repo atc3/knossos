@@ -64,6 +64,11 @@ public:
     void set(int u, int v, std::uint8_t value);
     // replace the whole mask (used for computed, rather than painted, masks)
     void adoptMask(std::vector<std::uint8_t> && newMask);
+    /* ORs another slice's content into this one, growing the box as needed.
+     *
+     * Both sides are snapped to the same magnification lattice, so the global coordinate
+     * of every set voxel maps onto an exact index here. */
+    void mergeFrom(const SISlice & other);
     // grow the bounding box so that mask index (u,v) becomes representable, preserving
     // content and shifting uMin/vMin to match when padding the low side
     void reserveIndex(int u, int v);
@@ -127,6 +132,16 @@ inline void SISlice::adoptMask(std::vector<std::uint8_t> && newMask) {
     voxelCount = 0;
     for (const auto cell : mask) {
         voxelCount += (cell != 0) ? 1 : 0;
+    }
+}
+
+inline void SISlice::mergeFrom(const SISlice & other) {
+    for (int v = 0; v < other.vSize; ++v) {
+        for (int u = 0; u < other.uSize; ++u) {
+            if (other.at(u, v) != 0) {
+                set(uIndexOf(other.uCoordOf(u)), vIndexOf(other.vCoordOf(v)), 1);
+            }
+        }
     }
 }
 
