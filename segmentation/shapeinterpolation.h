@@ -69,6 +69,8 @@ public:
     int vAxis() const { return vAxisIdx; }
     Coordinate voxelStep() const { return step; }
     std::uint64_t subobjectId() const { return soid; }
+    // magnification index the chain was started at; painting elsewhere is refused
+    std::size_t magnificationIndex() const { return magIndex; }
 
     // Absorb a brush stamp that has just been applied to the overlay. Reads the affected
     // voxels back out of the cubes rather than re-rasterising the brush, so the mask can
@@ -147,6 +149,7 @@ public:
     QString summary() const;
     // human name of the plane the chain is pinned to ("xy" / "xz" / "zy")
     QString planeName() const;
+    QString magName() const;
 
     // When two key slices don't overlap, a plain distance-transform blend collapses to
     // nothing — and it visibly pinches the shape well before that. Aligning the two
@@ -258,6 +261,11 @@ private:
     std::uint64_t gen{1};
     QString error;
 };
+
+/* Magnification index to the number KNOSSOS shows. PyKnossos datasets number their mags
+ * 1,2,3…; everywhere else they are powers of two. Mirrors what saveXmlSkeleton writes for
+ * the existing brush_lock. */
+std::size_t magFromIndex(std::size_t magIndex);
 
 // Component access by axis index, since Coordinate has no operator[]. Templated so that
 // floatCoordinate (the voxel scales) keeps its precision instead of being rounded to int.

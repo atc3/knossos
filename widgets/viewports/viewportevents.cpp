@@ -96,8 +96,47 @@ void merging(const QMouseEvent *event, ViewportOrtho & vp) {
     }
 }
 
+/* Refuses a paint at the wrong magnification, and offers to fix it.
+ *
+ * KNOSSOS already refused this — both for the annotation-wide brush lock and for a running
+ * interpolation chain — but silently, so the brush simply did nothing and there was no way
+ * to tell why. Offering the switch turns it into one click rather than an error. The
+ * dialog is shown once per drag; a stroke is dozens of stamps. */
+bool magBlocksPainting(ViewportOrtho & vp) {
+    const auto currentMag = Dataset::datasets[Segmentation::singleton().layerId].magIndex;
+    auto & si = ShapeInterpolation::singleton();
+    std::optional<std::size_t> wanted;
+    QString reason;
+    if (Annotation::singleton().magLock && currentMag != Annotation::singleton().magLock.value()) {
+        wanted = Annotation::singleton().magLock.value();
+        reason = QObject::tr("Painting is locked to magnification %1.").arg(magFromIndex(*wanted));
+    } else if (si.active() && currentMag != si.magnificationIndex()) {
+        wanted = si.magnificationIndex();
+        reason = QObject::tr("This interpolation chain was started at magnification %1.").arg(magFromIndex(*wanted));
+    }
+    if (!wanted) {
+        return false;
+    }
+    if (!vp.magWarningShownThisStroke) {
+        vp.magWarningShownThisStroke = true;
+        state->viewer->mainWindow.warnShapeInterpolation(reason);
+        QMessageBox prompt{QApplication::activeWindow()};
+        prompt.setIcon(QMessageBox::Warning);
+        prompt.setText(reason);
+        prompt.setInformativeText(QObject::tr("You are viewing magnification %1, so nothing was painted.")
+                                      .arg(magFromIndex(currentMag)));
+        auto * confirm = prompt.addButton(QObject::tr("Switch to mag %1").arg(magFromIndex(*wanted)), QMessageBox::AcceptRole);
+        prompt.addButton(QObject::tr("Stay here"), QMessageBox::RejectRole);
+        state->viewer->suspend([&prompt]{ return prompt.exec(); });
+        if (prompt.clickedButton() == confirm) {
+            state->viewer->updateDatasetMag(static_cast<int>(magFromIndex(*wanted)));
+        }
+    }
+    return true;
+}
+
 void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
-    if (Annotation::singleton().magLock && Dataset::datasets[Segmentation::singleton().layerId].magIndex != Annotation::singleton().magLock.value()) {
+    if (magBlocksPainting(vp)) {
         return;
     }
     const Coordinate coord = getCoordinateFromOrthogonalClick(event->pos(), vp);

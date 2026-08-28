@@ -39,6 +39,8 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, bool 
 
 class ViewportOrtho : public ViewportBase {
     Q_OBJECT
+    // the paint helpers in viewportevents.cpp are part of this class in all but name
+    friend bool magBlocksPainting(ViewportOrtho &);
     QAction zoomResetAction{tr("Reset zoom"), &menuButton};
 
     floatCoordinate handleMovement(const QPoint & pos);
@@ -68,6 +70,7 @@ class ViewportOrtho : public ViewportBase {
     virtual void mouseReleaseEvent(QMouseEvent *event) override;
     // spans a whole drag, so one stroke is one undo step rather than one per stamp
     std::unique_ptr<class UndoScope> paintUndoScope;
+    bool magWarningShownThisStroke{false};// one dialog per drag, not one per stamp
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;

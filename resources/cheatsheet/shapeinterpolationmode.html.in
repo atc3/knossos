@@ -55,6 +55,7 @@
 		<tr><td><span class="sh">Delete</span> / <span class="sh">Backspace</span></td><td>Delete the painted slice at the current depth</td></tr>
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
 		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
+		<tr><td><span class="sh">Action menu</span></td><td>Lock painting to the current magnification</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
 		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>
 		<tr><td><span class="sh">Ctrl + Shift + Z</span></td><td>Redo</td></tr>

@@ -95,6 +95,7 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     Segmentation::singleton().brush.setView(static_cast<brush_t::view_t>(viewportType), v1, v2, n);
     // One scope for the whole drag: a stroke is dozens of stamps, and undoing them one at
     // a time would be useless.
+    magWarningShownThisStroke = false;
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         paintUndoScope = std::make_unique<UndoScope>(Segmentation::singleton().brush.isInverse() ? tr("Erase") : tr("Brush stroke"));
     }

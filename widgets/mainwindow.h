@@ -171,6 +171,8 @@ class MainWindow : public QMainWindow {
     QAction *shapeInterpolationToggleModeAction{};
     QAction *jumpToActiveNodeAction{};// held so its `S` shortcut can yield in paint modes
     QAction *nextNodeInTableAction{};// held so its `N` shortcut can yield in paint modes
+    QAction *magLockAction{};
+    void refreshMagLockAction();
     QAction *undoAction{};
     QAction *redoAction{};
     class QToolButton *shapeInterpolationButton{};

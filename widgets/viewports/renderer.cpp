@@ -1657,8 +1657,11 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
     glEnable(GL_BLEND);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_2D);
-    // the colour and alpha are baked into the texture, so draw it as-is
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    // Modulate rather than replace, so the overlay opacity keys (+/-) reach this too — it
+    // is drawn on top of the segmentation and would otherwise ignore them, which makes the
+    // key slices look pinned at full strength while everything under them fades.
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(1.f, 1.f, 1.f, Segmentation::singleton().alpha / 255.f);
 
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);

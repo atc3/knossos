@@ -144,6 +144,7 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     QObject::connect(&Annotation::singleton(), &Annotation::autoSaveSignal, [this](){ save(); });
     // a different annotation is a different history
     QObject::connect(&Annotation::singleton(), &Annotation::clearedAnnotation, [](){ UndoStack::singleton().clear(); });
+    QObject::connect(&Annotation::singleton(), &Annotation::clearedAnnotation, this, &MainWindow::refreshMagLockAction);
 
     createToolbars();
     createMenus();
@@ -775,6 +776,24 @@ void MainWindow::createMenus() {
     redoAction->setEnabled(false);
 
     actionMenu.addSeparator();
+    /* Surfaces Annotation::magLock, which the brush and the fills have always honoured but
+     * which could previously only be set by hand-editing an annotation file — so painting
+     * at the wrong magnification just silently did nothing. */
+    magLockAction = actionMenu.addAction(tr("Lock Painting to Magnification"), [this]() {
+        auto & lock = Annotation::singleton().magLock;
+        if (magLockAction->isChecked()) {
+            lock = Dataset::datasets[Segmentation::singleton().layerId].magIndex;
+        } else {
+            lock.reset();
+        }
+        refreshMagLockAction();
+        statusBar()->showMessage(lock ? tr("Painting locked to magnification %1.").arg(magFromIndex(*lock))
+                                      : tr("Painting is no longer locked to a magnification."), 6000);
+    });
+    magLockAction->setCheckable(true);
+    refreshMagLockAction();
+
+    actionMenu.addSeparator();
     // flood fill. Paintera uses F / Shift+F, but F steps a slice in KNOSSOS, so this sits
     // on the neighbouring G. Not Ctrl+F: Qt maps Qt::CTRL to Command on macOS, so that
     // binding would be Cmd+F there and a literal Ctrl+F would fall through to the viewport.
@@ -1120,6 +1139,7 @@ bool MainWindow::openFileDispatch(QStringList fileNames, const bool mergeAll, co
         return false;
     }
     Skeletonizer::singleton().resetData();
+    refreshMagLockAction();// annotation.xml may carry a brush_lock
 
     if (Annotation::singleton().extraFiles.contains(VIEWPORT_LAYOUTS_FILE)) {
         QStringList skipped;
@@ -2149,4 +2169,13 @@ void MainWindow::showAnnotationsFolder() {
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(folder))) {
         QMessageBox::warning(this, tr("Go To Annotations Folder"), tr("Could not open %1.").arg(folder));
     }
+}
+
+void MainWindow::refreshMagLockAction() {
+    const auto & lock = Annotation::singleton().magLock;
+    magLockAction->setChecked(lock.has_value());
+    magLockAction->setText(lock ? tr("Painting Locked to Magnification %1").arg(magFromIndex(*lock))
+                                : tr("Lock Painting to Magnification"));
+    magLockAction->setToolTip(tr("Refuse brush strokes and fills at any other magnification. "
+                                 "Stored with the annotation, so it survives a reload."));
 }

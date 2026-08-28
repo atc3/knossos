@@ -926,6 +926,14 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
     return true;
 }
 
+std::size_t magFromIndex(const std::size_t magIndex) {
+    return Dataset::current().api == Dataset::API::PyKnossos ? magIndex + 1 : static_cast<std::size_t>(std::pow(2, magIndex));
+}
+
+QString ShapeInterpolation::magName() const {
+    return QString::number(magFromIndex(magIndex));
+}
+
 QString ShapeInterpolation::planeName() const {
     return view == brush_t::view_t::xy ? QStringLiteral("xy") : view == brush_t::view_t::xz ? QStringLiteral("xz") : QStringLiteral("zy");
 }
@@ -939,8 +947,9 @@ QString ShapeInterpolation::summary() const {
         return QObject::tr("Shape interpolation: %1 plane · 1 key slice at %2 %3 · paint another slice to interpolate")
                    .arg(planeName()).arg(axisName).arg(std::begin(slices)->first);
     }
-    return QObject::tr("Shape interpolation: %1 plane · %2 key slices · %3 %4–%5%6")
+    return QObject::tr("Shape interpolation: %1 plane · mag %2 · %3 key slices · %4 %5–%6%7")
                .arg(planeName())
+               .arg(magName())
                .arg(slices.size())
                .arg(axisName)
                .arg(std::begin(slices)->first)
