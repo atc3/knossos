@@ -168,13 +168,40 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                         }
                     }
                 }
-                writeVoxels(coord, soid, brush);
-                if (shapeInterpolation) {
-                    QString reason;
-                    if (!ShapeInterpolation::singleton().absorbStamp(coord, brush, soid, reason)) {
-                        state->viewer->mainWindow.warnShapeInterpolation(reason);
+
+                const auto stamp = [&](const Coordinate & at){
+                    writeVoxels(at, soid, brush);
+                    if (shapeInterpolation) {
+                        QString reason;
+                        if (!ShapeInterpolation::singleton().absorbStamp(at, brush, soid, reason)) {
+                            state->viewer->mainWindow.warnShapeInterpolation(reason);
+                        }
+                    }
+                };
+
+                /* Fill in the gap since the last stamp.
+                 *
+                 * Mouse move events arrive far more slowly than a hand moves, so stamping
+                 * only where the cursor was reported leaves a line of separate discs on a
+                 * quick stroke. Walking the segment at half a brush radius closes it, and
+                 * costs nothing on a slow stroke where consecutive samples are adjacent. */
+                if (vp.lastBrushStamp) {
+                    const auto from = vp.lastBrushStamp.get();
+                    const floatCoordinate delta{static_cast<float>(coord.x - from.x), static_cast<float>(coord.y - from.y), static_cast<float>(coord.z - from.z)};
+                    const auto & scale = Dataset::current().scales[0];
+                    const auto radiusInVoxels = brush.radius / std::min({scale.x, scale.y, scale.z});
+                    const auto stride = std::max(1.0, radiusInVoxels * 0.5);
+                    // capped so a jump across the dataset can’t stall the stroke
+                    const auto steps = std::min(256, static_cast<int>(std::ceil(delta.length() / stride)));
+                    for (int i = 1; i < steps; ++i) {
+                        const auto t = static_cast<float>(i) / steps;
+                        stamp({from.x + static_cast<int>(std::lround(delta.x * t)),
+                               from.y + static_cast<int>(std::lround(delta.y * t)),
+                               from.z + static_cast<int>(std::lround(delta.z * t))});
                     }
                 }
+                stamp(coord);
+                vp.lastBrushStamp = coord;
             }
         }
     }

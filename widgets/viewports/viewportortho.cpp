@@ -96,6 +96,7 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     // One scope for the whole drag: a stroke is dozens of stamps, and undoing them one at
     // a time would be useless.
     magWarningShownThisStroke = false;
+    lastBrushStamp = boost::none;// a fresh stroke starts with a single stamp
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         paintUndoScope = std::make_unique<UndoScope>(Segmentation::singleton().brush.isInverse() ? tr("Erase") : tr("Brush stroke"));
     }
@@ -104,6 +105,7 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
 
 void ViewportOrtho::mouseReleaseEvent(QMouseEvent *event) {
     ViewportBase::mouseReleaseEvent(event);
+    lastBrushStamp = boost::none;
     paintUndoScope.reset();// closes the stroke, committing it as one undo entry
 }
 

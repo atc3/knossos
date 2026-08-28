@@ -301,6 +301,7 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
         slices.erase(depth);
     }
     ++gen;
+    deferPreview();// a stroke is many stamps; recompute once it stops
     emit changed();
     return true;
 }
@@ -579,7 +580,7 @@ const SISlice * ShapeInterpolation::maskAtDepth(const int depth) {
 }
 
 const SISlice * ShapeInterpolation::previewAt(const int depth) {
-    if (!started || !preview || hasSliceAt(depth)) {
+    if (!started || !preview || previewDeferred || hasSliceAt(depth)) {
         return nullptr;// a painted slice is already shown as real overlay voxels
     }
     return maskAtDepth(depth);
@@ -791,6 +792,9 @@ bool ShapeInterpolation::sampleInterpolant(const Interpolant & in, const int dep
  * showing. Costs one evaluation per (depth, position) pair rather than a full mask per
  * depth, and is cached until the crosshair leaves the plane or a slice is edited. */
 bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedCoord) {
+    if (previewDeferred) {
+        return false;// mid-stroke; a cross-section walks every pair and is the worst offender
+    }
     if (crossSectionValid && crossSectionAxis == fixedAxis && crossSectionCoord == fixedCoord && crossSectionGen == gen) {
         return crossSection.count() != 0;
     }
@@ -924,6 +928,21 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
            crossSection.uMin, crossSection.vMin, crossSection.uStep, crossSection.vStep,
            crossSection.uSize, crossSection.vSize, &crossSection.mask, false};
     return true;
+}
+
+ShapeInterpolation::ShapeInterpolation() {
+    previewTimer.setSingleShot(true);
+    QObject::connect(&previewTimer, &QTimer::timeout, this, [this](){
+        previewDeferred = false;
+        ++gen;// drop the cached transforms so the next draw computes them once, from rest
+        emit changed();
+    });
+}
+
+void ShapeInterpolation::deferPreview() {
+    previewDeferred = true;
+    constexpr int SETTLE_MS = 1000;
+    previewTimer.start(SETTLE_MS);
 }
 
 std::size_t magFromIndex(const std::size_t magIndex) {

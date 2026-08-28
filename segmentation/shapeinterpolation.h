@@ -28,6 +28,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 #include <cstdint>
 #include <map>
@@ -142,6 +143,9 @@ public:
     bool planarMaskFor(int viewportType, const Coordinate & pos, PlanarMask & out);
     bool previewEnabled() const { return preview; }
     void setPreviewEnabled(bool enabled);
+    // true once the chain has been still long enough for the interpolation to be worth
+    // computing; see the timer in the constructor
+    bool previewSettled() const { return !previewDeferred; }
     // bumped whenever the slice set changes, so callers can cache derived data
     std::uint64_t generation() const { return gen; }
     QString lastError() const { return error; }
@@ -195,7 +199,13 @@ signals:
     void changed();
 
 private:
-    ShapeInterpolation() = default;
+    ShapeInterpolation();
+    /* Painting bumps the generation on every stamp, and recomputing two signed distance
+     * transforms per stamp is most of what a stroke costs. Nothing about the interpolation
+     * is worth looking at mid-stroke, so it is held off until the brush has been still. */
+    void deferPreview();
+    QTimer previewTimer;
+    bool previewDeferred{false};
     void begin(const brush_t &, std::uint64_t soid);
 
     bool started{false};

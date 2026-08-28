@@ -30,6 +30,8 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+
+#include <boost/optional/optional.hpp>
 #include <vector>
 #include <unordered_set>
 
@@ -41,6 +43,7 @@ class ViewportOrtho : public ViewportBase {
     Q_OBJECT
     // the paint helpers in viewportevents.cpp are part of this class in all but name
     friend bool magBlocksPainting(ViewportOrtho &);
+    friend void segmentation_brush_work(const class QMouseEvent *, ViewportOrtho &);
     QAction zoomResetAction{tr("Reset zoom"), &menuButton};
 
     floatCoordinate handleMovement(const QPoint & pos);
@@ -71,6 +74,8 @@ class ViewportOrtho : public ViewportBase {
     // spans a whole drag, so one stroke is one undo step rather than one per stamp
     std::unique_ptr<class UndoScope> paintUndoScope;
     bool magWarningShownThisStroke{false};// one dialog per drag, not one per stamp
+    // last stamped position, so a fast drag can be filled in rather than left as beads
+    boost::optional<Coordinate> lastBrushStamp;
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;
