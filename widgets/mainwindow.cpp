@@ -133,7 +133,11 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
         const auto scale = Dataset::current().scales[0];
         const auto boundary = Dataset::current().scales[0].componentMul(Dataset::current().boundary);
         widgetContainer.annotationWidget.segmentationTab.updateBrushEditRange(0.5 * std::min({scale.x, scale.y, scale.z}), std::max({boundary.x, boundary.y, boundary.z}));
-        Segmentation::singleton().brush.setRadius(scale.x * 10);
+        // Pick up the brush size from last time rather than resetting it on every dataset
+        // load, which is what used to discard it. An annotation carrying its own radius
+        // overrides this, since loadXmlSkeleton runs after the dataset is in place.
+        const auto remembered = QSettings{}.value(SEGMENTATION_BRUSH_RADIUS, 0.0).toDouble();
+        Segmentation::singleton().brush.setRadius(remembered > 0 ? remembered : scale.x * 10);
         updateTitlebar();
     });
     QObject::connect(&widgetContainer.datasetLoadWidget, &DatasetLoadWidget::updateDatasetCompression,  this, &MainWindow::updateCompressionRatioDisplay);
@@ -1582,6 +1586,7 @@ void MainWindow::saveSettings() {
     widgetContainer.pythonPropertyWidget.saveSettings();
     widgetContainer.snapshotWidget.saveSettings();
     ViewportLayouts::singleton().saveSettings();
+    settings.setValue(SEGMENTATION_BRUSH_RADIUS, Segmentation::singleton().brush.getRadius());
     settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();
     widgetContainer.zoomWidget.saveSettings();

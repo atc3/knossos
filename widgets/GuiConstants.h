@@ -39,6 +39,7 @@ const QString SNAPSHOT_WIDGET = "snapshot_widget";
 const QString SHAPE_INTERPOLATION_WIDGET = "shape_interpolation_widget";
 const QString HISTORY_WIDGET = "history_widget";
 const QString VIEWPORT_LAYOUTS = "viewport_layouts";
+const QString SEGMENTATION_BRUSH_RADIUS = "segmentation_brush_radius";// nm, remembered across launches
 const QString VIEWPORT_LAYOUTS_FILE = "viewport_layouts.json";// entry name inside the .k.zip
 const QString VIEWER = "viewer";
 const QString ZOOM_WIDGET = "zoom_and_multires_widget";

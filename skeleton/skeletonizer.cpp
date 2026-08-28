@@ -330,6 +330,7 @@ void Skeletonizer::saveXmlSkeleton(QXmlStreamWriter & xml, const bool onlySelect
     xml.writeAttribute("lockNewObjects", QString::number(Segmentation::singleton().getLockNewObjects()));
     xml.writeAttribute("defaultMergeClass", Segmentation::singleton().getDefaultMergeClass());
     xml.writeAttribute("maxId", QString::number(Segmentation::singleton().getMaxId()));
+    xml.writeAttribute("brushRadius", QString::number(Segmentation::singleton().brush.getRadius()));
     xml.writeEndElement();
 
     xml.writeStartElement("editPosition");
@@ -549,6 +550,9 @@ std::unordered_map<decltype(treeListElement::treeID), std::reference_wrapper<tre
                     }
                     if (attributes.hasAttribute("maxId")) {// absent in annotations written before this existed
                         Segmentation::singleton().setMaxId(attributes.value("maxId").toULongLong());
+                    }
+                    if (attributes.hasAttribute("brushRadius")) {
+                        Segmentation::singleton().brush.setRadius(attributes.value("brushRadius").toDouble());
                     }
                 } else if(xml.name() == "editPosition") {
                     loadedPosition = floatCoordinate(attributes.value("x").toDouble(), attributes.value("y").toDouble(), attributes.value("z").toDouble());
