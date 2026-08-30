@@ -87,6 +87,7 @@ void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoi
     soid = newSoid;
     slices.clear();
     started = true;
+    wasEdited = false;
 }
 
 void ShapeInterpolation::beginAt(const brush_t::view_t newView, const std::uint64_t newSoid) {
@@ -318,13 +319,14 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
     if (slice.empty()) {
         slices.erase(depth);
     }
+    wasEdited = true;
     ++gen;
     deferPreview();// a stroke is many stamps; recompute once it stops
     emit changed();
     return true;
 }
 
-bool ShapeInterpolation::absorbRegion(const Coordinate & first, const Coordinate & last, const int depth, const std::uint64_t regionSoid, QString & reason) {
+bool ShapeInterpolation::absorbRegion(const Coordinate & seed, const Coordinate & first, const Coordinate & last, const int depth, const std::uint64_t regionSoid, QString & reason) {
     if (!started) {
         reason = QObject::tr("Shape interpolation: paint a slice first, then fill.");
         return false;
@@ -336,6 +338,23 @@ bool ShapeInterpolation::absorbRegion(const Coordinate & first, const Coordinate
 
     auto & slice = slices[depth];
     if (slice.uSize == 0) {
+        /* A fill onto a depth with no key slice yet takes the whole outline on that plane,
+         * exactly as a right click does — not merely the box the fill happened to cover.
+         *
+         * Bounding the fresh slice by the filled region instead left a rectangular seam
+         * wherever the object ran past it: everything inside the box was in the key slice
+         * and everything outside was not, so the interpolation stopped dead at the box
+         * edge in the middle of the object. */
+        auto planeSeed = seed;
+        axisSet(planeSeed, axis, depth);
+        PlaneScan scan;
+        seedSliceFromPlane(slice, planeSeed, scan, false);
+        slice.depth = depth;
+    }
+    if (slice.uSize == 0) {
+        // nothing of the chain's object on this plane — an erase, normally. Fall back to
+        // the filled box so the read-back below has a lattice to index into; it will come
+        // out empty and the slice is dropped.
         slice.depth = depth;
         slice.uStep = axisGet(step, uAxisIdx);
         slice.vStep = axisGet(step, vAxisIdx);
@@ -353,6 +372,7 @@ bool ShapeInterpolation::absorbRegion(const Coordinate & first, const Coordinate
     if (slice.empty()) {
         slices.erase(depth);
     }
+    wasEdited = true;
     ++gen;
     emit changed();
     return true;
@@ -387,6 +407,7 @@ bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
     }, soid, true);
 
     slices[depth] = std::move(baked);
+    wasEdited = true;
     previewValid = false;
     ++gen;
     emit changed();
@@ -430,17 +451,19 @@ bool ShapeInterpolation::removeSliceAt(const int depth) {
     if (slices.erase(depth) == 0) {
         return false;
     }
+    wasEdited = true;
     ++gen;
     emit changed();
     return true;
 }
 
 ShapeInterpolation::State ShapeInterpolation::saveState() const {
-    return {started, view, axis, uAxisIdx, vAxisIdx, step, magIndex, layerId, soid, slices};
+    return {started, wasEdited, view, axis, uAxisIdx, vAxisIdx, step, magIndex, layerId, soid, slices};
 }
 
 void ShapeInterpolation::restoreState(const State & state) {
     started = state.started;
+    wasEdited = state.wasEdited;
     view = state.view;
     axis = state.axis;
     uAxisIdx = state.uAxisIdx;
@@ -463,6 +486,7 @@ void ShapeInterpolation::reset() {
     }
     slices.clear();
     started = false;
+    wasEdited = false;
     soid = 0;
     interpolants.clear();
     crossSectionValid = false;
@@ -608,6 +632,7 @@ void ShapeInterpolation::setCentroidAlignment(const bool enabled) {
     if (alignCentroids != enabled) {
         alignCentroids = enabled;
         previewValid = false;
+        emit centroidAlignmentChanged(alignCentroids);
         emit changed();
     }
 }

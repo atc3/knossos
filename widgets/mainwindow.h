@@ -129,6 +129,7 @@ class MainWindow : public QMainWindow {
     class QToolButton *paintTargetButton{};
     QAction *paintTargetAction{};
     QAction *paintBackgroundAction{};// checkable: paint/fill with id 0, i.e. erase
+    QAction *fillEdgeGuardAction{};// checkable: keep fills out of the dataset's outer voxel shell
     class QMenu *paintTargetMenu{};
     void rebuildPaintTargetMenu();
     class QToolButton *viewportLayoutButton{};
@@ -315,6 +316,9 @@ public slots:
     void warnShapeInterpolation(const QString & message);
     // false when the user declined to discard a running chain
     bool confirmLeavingShapeInterpolation();
+    // Offers to write a running interpolation before the annotation goes to disk.
+    // Returns false if the user cancelled the save entirely.
+    bool settleShapeInterpolationBeforeSaving();
     void clearSkeletonSlot();
 
     /* preferences menu */

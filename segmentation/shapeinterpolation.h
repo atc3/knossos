@@ -62,6 +62,10 @@ public:
 
     bool active() const { return started; }
     std::size_t sliceCount() const { return slices.size(); }
+    /* Whether anything has been done to the chain beyond picking up slices that were
+     * already painted. Adopting an existing outline is free to undo — click it again — so
+     * a chain that has only ever adopted has nothing to confirm before it is discarded. */
+    bool edited() const { return wasEdited; }
     const std::map<int, SISlice> & sliceMap() const { return slices; }
     int normalAxis() const { return axis; }
     // ViewportType the session is pinned to; VIEWPORT_XY/XZ/ZY map onto brush_t::view_t
@@ -82,10 +86,14 @@ public:
     // Start a chain without painting first, so an existing slice can simply be clicked.
     void beginAt(brush_t::view_t view, std::uint64_t soid);
 
-    // Same idea for a flood fill, which covers a region rather than a brush footprint.
-    // Only the plane at `depth` is absorbed: a key slice is by definition planar, so a 3D
-    // fill contributes just its intersection with the current slice.
-    bool absorbRegion(const Coordinate & first, const Coordinate & last, int depth, std::uint64_t soid, QString & reason);
+    /* Same idea for a flood fill, which covers a region rather than a brush footprint.
+     *
+     * Only the plane at `depth` is absorbed: a key slice is by definition planar, so a 3D
+     * fill contributes just its intersection with the current slice. `seed` is the voxel
+     * the fill started from, and a depth with no key slice yet is seeded from the whole
+     * plane through it — a fill has to add the same outline a right click would, not just
+     * the box the fill happened to cover. */
+    bool absorbRegion(const Coordinate & seed, const Coordinate & first, const Coordinate & last, int depth, std::uint64_t soid, QString & reason);
 
     // Turn the interpolated preview at `depth` into a real painted key slice: write its
     // voxels into the overlay and add it to the chain. Called the moment the user starts
@@ -183,6 +191,7 @@ public:
      * them leaves the preview drawing an object that is no longer there. */
     struct State {
         bool started{false};
+        bool wasEdited{false};
         brush_t::view_t view{brush_t::view_t::xy};
         int axis{2}, uAxisIdx{0}, vAxisIdx{1};
         Coordinate step{1, 1, 1};
@@ -197,6 +206,7 @@ public:
 
 signals:
     void changed();
+    void centroidAlignmentChanged(bool enabled);
 
 private:
     ShapeInterpolation();
@@ -209,6 +219,7 @@ private:
     void begin(const brush_t &, std::uint64_t soid);
 
     bool started{false};
+    bool wasEdited{false};          // painted, filled, baked or deleted — see edited()
     brush_t::view_t view{brush_t::view_t::xy};
     int axis{2};                    // index of the slice normal: 0=x, 1=y, 2=z
     int uAxisIdx{0}, vAxisIdx{1};   // the two in-plane axes, in increasing index order

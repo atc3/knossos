@@ -106,6 +106,39 @@ void UndoStack::restoreGraph(const UndoEntry & entry) {
     Segmentation::Object::highestIndex = entry.objectHighestIndex;
 }
 
+/* Undo rolls back voxels; it must not also move the brush.
+ *
+ * restoreGraph() re-selects whatever was selected when the edit was *made*, which is right
+ * for the object graph — objects have to come back selected as they were — but wrong for
+ * the brush: whichever id the user was painting with when they pressed Ctrl+Z is still the
+ * one they mean to paint with, and jumping them onto some earlier object means the next
+ * stroke lands on the wrong label without any of that being visible.
+ *
+ * The one case where the earlier selection has to stand is an undo that removed the very
+ * object the brush was pointing at — there is nothing to go back to then. */
+void UndoStack::reinstatePaintTarget(const bool background, const std::vector<std::uint64_t> & objectIds) {
+    auto & seg = Segmentation::singleton();
+    if (background) {
+        seg.setPaintingBackground(true);
+        return;
+    }
+    std::vector<std::uint64_t> indices;
+    for (const auto id : objectIds) {
+        if (const auto it = seg.objectIdToIndex.find(id); it != std::end(seg.objectIdToIndex)) {
+            indices.push_back(it->second);
+        }
+    }
+    if (indices.empty()) {
+        return;// the object the brush was on is gone; leave the entry's own selection
+    }
+    seg.bulkOperation([&seg, &indices](){
+        seg.clearObjectSelection();
+        for (const auto index : indices) {
+            seg.selectObject(index);
+        }
+    });
+}
+
 std::size_t UndoStack::totalBytes() const {
     std::size_t bytes{0};
     for (const auto * stack : {&past, &future}) {
@@ -200,6 +233,13 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
     inverse.objectHighestId = Segmentation::Object::highestId;
     inverse.objectHighestIndex = Segmentation::Object::highestIndex;
     inverse.shapeInterpolation = ShapeInterpolation::singleton().saveState();
+    /* What the brush is pointing at right now, to be put back after the graph is restored.
+     *
+     * Read live rather than from cachedSelection: that only refreshes when graphRevision
+     * moves, and adding to a selection with Ctrl + click emits changedRowSelection, which
+     * does not move it. */
+    const bool paintingBackground = seg.paintingBackground();
+    const auto paintSelection = selectedObjectIds();
 
     // Cubes that are still in memory are restored in place, which is instant and covers
     // the common case of undoing what you are looking at. Everything else goes through the
@@ -248,6 +288,7 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
         // the object graph rides along, otherwise objects whose voxels just vanished stay
         // in the segmentation table
         restoreGraph(entry);
+        reinstatePaintTarget(paintingBackground, paintSelection);
         ShapeInterpolation::singleton().restoreState(entry.shapeInterpolation);
         cachedRevision = std::numeric_limits<std::uint64_t>::max();// force a re-snapshot
     }

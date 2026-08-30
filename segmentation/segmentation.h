@@ -211,6 +211,15 @@ public:
     // the user was looking at, and on a connected region can walk a very long way.
     // 2D fills only — a 3D fill is always confined to the resident blocks.
     bool floodFillMayLoadCubes{false};
+    /* Whether a fill is kept out of the dataset's outermost voxel shell.
+     *
+     * EM volumes routinely carry a one-voxel rind of background at the boundary, left by
+     * however the volume was cropped. Because it wraps the whole dataset it connects every
+     * unlabelled region to every other one, so a fill that reaches it escapes the object
+     * entirely and runs until the safety cap stops it. Nothing worth labelling lives in
+     * that shell, so it is excluded by default; the toggle is there because "by default"
+     * is not "always". */
+    bool floodFillAvoidsDatasetEdge{true};
     // for mode in which edges are online highlighted for objects when selected and being hovered over by mouse
     bool hoverVersion{false};
     uint64_t mouseFocusedObjectId{0};

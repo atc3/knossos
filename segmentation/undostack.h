@@ -105,6 +105,8 @@ private:
     static std::vector<std::uint64_t> selectedObjectIds();
     static void refreshGraphSnapshot();
     static void restoreGraph(const UndoEntry &);
+    // Put the brush back on the id it was on before the undo, if that id still exists.
+    static void reinstatePaintTarget(bool background, const std::vector<std::uint64_t> & objectIds);
     void enforceBudget();
 
     std::deque<UndoEntry> past, future;

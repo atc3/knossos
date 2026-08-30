@@ -57,12 +57,42 @@ bool awaitLoader(QProgressDialog & progress) {
 
 FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const parent) {
     FloodFillReport report;
-    const auto & areaMin = Annotation::singleton().movementAreaMin;
-    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    auto areaMin = Annotation::singleton().movementAreaMin;
+    /* movementAreaMax is exclusive — outsideMag1MovementArea() and updateMovementArea()
+     * both treat it that way — but floodFillFrom() tests its bound with `>`, so passing it
+     * through unchanged let every fill run one voxel past the movement area, and past the
+     * dataset boundary in the default case where the two coincide. That plane sits inside
+     * the last cube, so it reads as whatever the cube holds beyond the data: background,
+     * everywhere, wrapping the volume. Hence fills escaping along the edge. */
+    auto areaMax = Annotation::singleton().movementAreaMax - 1;
 
     if (Annotation::singleton().outsideMovementArea(request.seed)) {
         report.message = QObject::tr("Fill: the seed is outside the movement area.");
         return report;
+    }
+
+    /* And hold the fill off the outermost voxel shell of the dataset proper — see
+     * Segmentation::floodFillAvoidsDatasetEdge for why that shell leaks too.
+     *
+     * Inset by one voxel *of the current magnification*, which is the granularity the walk
+     * steps at; at mag 1 that is the single outermost plane. A seed placed in the shell on
+     * purpose is exempt, so a deliberate click there still does what it looks like it will
+     * instead of silently filling nothing. */
+    if (Segmentation::singleton().floodFillAvoidsDatasetEdge) {
+        const auto & scaleFactor = Dataset::current().scaleFactor;
+        const Coordinate inset{std::max(1, static_cast<int>(scaleFactor.x)),
+                               std::max(1, static_cast<int>(scaleFactor.y)),
+                               std::max(1, static_cast<int>(scaleFactor.z))};
+        // boundary is the extent, so the last valid voxel is boundary - 1 and the shell to
+        // keep out of is that plane and the one at 0
+        const auto edgeMin = inset;
+        const auto edgeMax = Dataset::current().boundary - Coordinate{1, 1, 1} - inset;
+        const auto seedInShell = request.seed.x < edgeMin.x || request.seed.y < edgeMin.y || request.seed.z < edgeMin.z
+                              || request.seed.x > edgeMax.x || request.seed.y > edgeMax.y || request.seed.z > edgeMax.z;
+        if (!seedInShell) {
+            areaMin = {std::max(areaMin.x, edgeMin.x), std::max(areaMin.y, edgeMin.y), std::max(areaMin.z, edgeMin.z)};
+            areaMax = {std::min(areaMax.x, edgeMax.x), std::min(areaMax.y, edgeMax.y), std::min(areaMax.z, edgeMax.z)};
+        }
     }
 
     // writing the background id is an erase, not a fill, and the History window should say so

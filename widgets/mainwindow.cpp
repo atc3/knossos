@@ -860,6 +860,15 @@ void MainWindow::createMenus() {
     fillMayLoadAction->setToolTip(tr("A fill normally stops at the edge of the blocks already in memory. With this on, a 2D fill "
                                      "will pull the loader along and carry on — which moves the view and evicts what you were "
                                      "looking at. 3D fills always stop at the boundary regardless."));
+    fillEdgeGuardAction = actionMenu.addAction(tr("Keep Fills Off the Dataset Edge"), [this]() {
+        Segmentation::singleton().floodFillAvoidsDatasetEdge = fillEdgeGuardAction->isChecked();
+    });
+    fillEdgeGuardAction->setCheckable(true);
+    fillEdgeGuardAction->setChecked(Segmentation::singleton().floodFillAvoidsDatasetEdge);
+    fillEdgeGuardAction->setToolTip(tr("Datasets often carry a one-voxel rind of background at their boundary, and because it "
+                                       "wraps the whole volume a fill that reaches it escapes the object and runs to the safety "
+                                       "limit. With this on the outermost voxel is excluded, unless you seed the fill there "
+                                       "yourself."));
 
     /* Selecting the background as the paint id, so the brush and the fills erase.
      *
@@ -928,10 +937,17 @@ void MainWindow::createMenus() {
         state->viewer->run();
     });
     shapeInterpolationAlignAction->setCheckable(true);
+    // last session's choice; an annotation carrying its own value overrides it on load
+    ShapeInterpolation::singleton().setCentroidAlignment(
+        QSettings{}.value(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment()).toBool());
     shapeInterpolationAlignAction->setChecked(ShapeInterpolation::singleton().centroidAlignment());
     shapeInterpolationAlignAction->setToolTip(tr("Shift the two key slices onto a common centre before interpolating. "
                                                  "Without this a structure that drifts sideways between slices pinches, and "
                                                  "disappears entirely once the two outlines no longer overlap."));
+    // the setting is stored per annotation, so loading one moves the tick without going
+    // through this action
+    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::centroidAlignmentChanged,
+                     shapeInterpolationAlignAction, &QAction::setChecked);
     shapeInterpolationDiscardAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), tr("Discard Painted Slices"), [this]() {
         auto & si = ShapeInterpolation::singleton();
         if (si.sliceCount() == 0) {
@@ -1278,6 +1294,9 @@ void MainWindow::openSlot() {
 }
 
 void MainWindow::saveSlot() {
+    if (!settleShapeInterpolationBeforeSaving()) {
+        return;
+    }
     auto annotationFilename = Annotation::singleton().annotationFilename;
     if (annotationFilename.isEmpty()) {
         saveAsSlot();
@@ -1287,7 +1306,54 @@ void MainWindow::saveSlot() {
 }
 
 void MainWindow::saveAsSlotWrap() {
+    if (!settleShapeInterpolationBeforeSaving()) {
+        return;
+    }
     saveAsSlot(false);
+}
+
+/* An interpolation in progress is not in the annotation.
+ *
+ * Key slices are painted voxels and go to disk with everything else, but the volume
+ * *between* them exists only as a preview until the chain is accepted — so a save taken
+ * mid-chain writes an annotation with the ends of an object and nothing in the middle, and
+ * looks complete when it is reopened. Offer to write it first.
+ *
+ * Deliberately hung off the explicit save paths rather than save() itself: autosave also
+ * lands in save(), and a modal question arriving on a timer, while the user is painting, is
+ * worse than the problem it solves. Autosaves keep writing key slices only, and the next
+ * manual save asks. */
+bool MainWindow::settleShapeInterpolationBeforeSaving() {
+    auto & si = ShapeInterpolation::singleton();
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation) || si.sliceCount() < 2) {
+        return true;// nothing interpolated, so nothing the save would miss
+    }
+    QMessageBox prompt{this};
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setText(tr("Accept the interpolated shape before saving?"));
+    prompt.setInformativeText(tr("The chain has %n key slice(s). The slices themselves are saved either way, but the "
+                                 "interpolated volume between them is only a preview until it is accepted — save without "
+                                 "accepting and the annotation holds the key slices alone.",
+                                 "", static_cast<int>(si.sliceCount())));
+    auto * accept = prompt.addButton(tr("Accept, then save"), QMessageBox::AcceptRole);
+    auto * plain = prompt.addButton(tr("Save without accepting"), QMessageBox::DestructiveRole);
+    prompt.addButton(tr("Cancel"), QMessageBox::RejectRole);
+    prompt.setDefaultButton(accept);
+    state->viewer->suspend([&prompt]{ return prompt.exec(); });
+    if (prompt.clickedButton() == plain) {
+        return true;
+    }
+    if (prompt.clickedButton() != accept) {
+        return false;
+    }
+    const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().commit(this); });
+    statusBar()->showMessage(result.message, 8000);
+    if (result.cancelled) {
+        return false;// they backed out of the write; don't then save behind their back
+    }
+    si.reset();
+    state->viewer->run();
+    return true;
 }
 
 void MainWindow::saveAsSlot(const bool onlySelectedTrees, const bool saveTime, const bool saveDatasetPath) {
@@ -1651,6 +1717,7 @@ void MainWindow::saveSettings() {
     widgetContainer.snapshotWidget.saveSettings();
     ViewportLayouts::singleton().saveSettings();
     settings.setValue(SEGMENTATION_BRUSH_RADIUS, Segmentation::singleton().brush.getRadius());
+    settings.setValue(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment());
     settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();
     widgetContainer.zoomWidget.saveSettings();
@@ -2176,10 +2243,19 @@ void MainWindow::warnShapeInterpolation(const QString & message) {
 
 /* Leaving the mode throws the chain away, and both routes out of it — the work-mode combo
  * and the S shortcut — are easy to hit by accident. Confirm only when there is something
- * to lose; the painted voxels survive regardless, it is the chain that does not. */
+ * to lose; the painted voxels survive regardless, it is the chain that does not.
+ *
+ * A single adopted slice is nothing to lose. There is no interpolation with one slice, and
+ * a slice that has only ever been clicked into the chain is one click away from being
+ * clicked back in — so asking about it is a prompt whose only honest answer is "yes". Once
+ * anything has been painted, filled, baked or deleted, the chain has state that a click
+ * will not reproduce, and the prompt earns its place. */
 bool MainWindow::confirmLeavingShapeInterpolation() {
     auto & si = ShapeInterpolation::singleton();
     if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation) || si.sliceCount() == 0) {
+        return true;
+    }
+    if (si.sliceCount() == 1 && !si.edited()) {
         return true;
     }
     QMessageBox prompt{this};

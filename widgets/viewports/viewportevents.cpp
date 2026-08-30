@@ -239,9 +239,13 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
     }
     /* Filling with the background id is an erase: the connected region the seed lands in
      * is replaced with background rather than with a label, which is how a chunk of a label
-     * gets rubbed out in one gesture. Two ways in — holding Shift, KNOSSOS's transient erase
-     * modifier, or selecting background as the paint id, which is the standing form. */
-    const bool erasing = seg.brush.isInverse() || seg.paintingBackground();
+     * gets rubbed out in one gesture.
+     *
+     * Deliberately *not* keyed off brush.inverse. Shift already means "3D" for a fill, and
+     * it sets the brush's inverse flag at the same time, so Shift + G was a 3D erase and
+     * there was no way to ask for a 3D fill at all. Erasing has its own standing selector
+     * now — the background paint id — which leaves Shift free to mean one thing. */
+    const bool erasing = seg.paintingBackground();
     if (!erasing) {
         if (seg.createPaintObject && seg.selectedObjectsCount() == 0) {
             seg.createAndSelectObject(coord);
@@ -283,7 +287,7 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
             for (auto depth = first; depth <= last; depth += depthStep) {
                 if (depth == seedDepth || si.hasSliceAt(depth)) {
                     QString reason;
-                    if (!si.absorbRegion(report.filledMin, report.filledMax, depth, soid, reason)) {
+                    if (!si.absorbRegion(coord, report.filledMin, report.filledMax, depth, soid, reason)) {
                         message += " " + reason;
                         break;// they would all fail the same way
                     }
@@ -920,9 +924,14 @@ bool ViewportOrtho::handleShapeInterpolationKey(const QKeyEvent *event) {
         }
         return true;
     case Qt::Key_Escape:
-        // Esc is far more often a slip than a deliberate discard, so confirm — but only
-        // when there is a chain to lose; an empty one just exits.
-        if (si.sliceCount() != 0) {
+        /* Esc is far more often a slip than a deliberate discard, so confirm — but only
+         * when there is a chain to lose.
+         *
+         * An empty one just exits, and so does a single slice that has only ever been
+         * clicked into the chain: one slice interpolates nothing, and re-adopting it is the
+         * same one click that put it there. The prompt starts earning its place once
+         * something has been painted, filled, baked or deleted. */
+        if (si.sliceCount() != 0 && !(si.sliceCount() == 1 && !si.edited())) {
             QMessageBox prompt{QApplication::activeWindow()};
             prompt.setIcon(QMessageBox::Question);
             prompt.setText(tr("End this shape interpolation chain?"));
