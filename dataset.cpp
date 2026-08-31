@@ -323,6 +323,9 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
         info.allocationEnabled = info.loadingEnabled = info.renderSettings.visible = toml::find_or(vit, "Visible", true);
         info.renderSettings.color = QColor{QString::fromStdString(toml::find_or(vit, "Color", "white"))};
         info.token = QString::fromStdString(toml::find_or(vit, "AdditionalQuery", std::string{}));
+        // a segmentation layer can declare the highest id already in its data, so a fresh
+        // annotation on a pre-segmented volume doesn't hand out ids that are already taken
+        info.maxId = static_cast<std::uint64_t>(toml::find_or<std::int64_t>(vit, "MaxId", 0));
 
         if (info.url.scheme() == "https" && !failfast) {
             QUrl authurl;

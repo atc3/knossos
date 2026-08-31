@@ -78,6 +78,15 @@ struct Dataset {
     CubeType type{CubeType::RAW_UNCOMPRESSED};
     // Edge length of the current data set in data pixels.
     Coordinate boundary{1000, 1000, 1000};
+    /* Highest subobject id already present in this layer's data, declared by the dataset
+     * rather than discovered.
+     *
+     * Only meaningful on a segmentation layer, and only as a floor: SubObject::highestId
+     * climbs only when KNOSSOS *constructs* a subobject, and the loader never tells
+     * Segmentation anything, so on a pre-segmented volume with no mergelist it stays 0 and
+     * the first new object takes id 1 — aliasing whatever already owns it in the data.
+     * 0 means undeclared. `MaxId` in a .k.toml [[Layer]] table. */
+    std::uint64_t maxId{0};
     // pixel-to-nanometer scale
     floatCoordinate scale{1.f, 1.f, 1.f};
     boost::container::small_vector<floatCoordinate, 4> scales;

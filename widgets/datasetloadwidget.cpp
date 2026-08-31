@@ -610,6 +610,16 @@ bool DatasetLoadWidget::loadDataset(QString data, const boost::optional<bool> lo
     for (std::size_t i = 0; i < layers.size(); ++i) {// determine segmentation layer
         if (layers[i].isOverlay()) {
             Segmentation::singleton().layerId = i;
+            /* Adopt the layer's declared max id — see Dataset::maxId.
+             *
+             * Raised, never lowered: the value is a floor below which ids are unsafe to
+             * hand out, so the largest claim wins whether it came from the dataset, an
+             * annotation, or objects made this session. Typing a value in the Layers panel
+             * still sets it outright, which is the one place lowering it is deliberate. */
+            if (layers[i].maxId != 0) {
+                auto & seg = Segmentation::singleton();
+                seg.setMaxId(std::max(seg.getMaxId(), layers[i].maxId));
+            }
             break;// only enable the first overlay layer by default
         }
     }

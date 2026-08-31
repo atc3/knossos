@@ -57,3 +57,18 @@ would have jumped to the wrong state whenever more than one redo was available.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/undohistory_test undohistory_test.cpp && /tmp/undohistory_test
 ```
+
+## datasetmaxid_test
+
+Pins the `MaxId` key a `.k.toml` `[[Layer]]` table may declare (`Dataset::maxId`, read in
+`dataset.cpp`). Checks that an absent key reads as 0 — the sentinel for "undeclared", which
+is what stops a plain image layer from claiming a max id — and that a declared one reads
+back exactly, including a value past 32 bits, since subobject ids are 64 bit and truncating
+one would silently hand out ids that are already taken.
+
+Needs toml11, which the build fetches; the path below is where CMake's FetchContent puts it.
+
+```bash
+c++ -std=c++17 -O2 -I ../../knossos-build/_deps/toml11-src/single_include \
+    -o /tmp/datasetmaxid_test datasetmaxid_test.cpp && /tmp/datasetmaxid_test
+```

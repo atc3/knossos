@@ -551,7 +551,10 @@ std::unordered_map<decltype(treeListElement::treeID), std::reference_wrapper<tre
                         Segmentation::singleton().setDefaultMergeClass(attributes.value("defaultMergeClass").toString());
                     }
                     if (attributes.hasAttribute("maxId")) {// absent in annotations written before this existed
-                        Segmentation::singleton().setMaxId(attributes.value("maxId").toULongLong());
+                        // raised, not set: a dataset that declares its own max id (Dataset::maxId)
+                        // has already been applied, and an annotation must not lower that floor
+                        auto & seg = Segmentation::singleton();
+                        seg.setMaxId(std::max(seg.getMaxId(), attributes.value("maxId").toULongLong()));
                     }
                     if (attributes.hasAttribute("brushRadius")) {
                         Segmentation::singleton().brush.setRadius(attributes.value("brushRadius").toDouble());
