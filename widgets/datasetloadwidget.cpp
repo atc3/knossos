@@ -398,6 +398,17 @@ void DatasetLoadWidget::adaptMemoryConsumption(boost::optional<Coordinate> cubeS
     mebibytes += infos.size() * std::pow(std::pow(2, std::ceil(std::log2(fov + cubeEdgeSpin.value()))), 2) *4./*RGBA*/*2/*cpu+gpu*/*3/*vps*//(1<<20);
     auto text = QString("FOV per dimension (%1 MiB memory)").arg(mebibytes);
     superCubeSizeLabel.setText(text);
+    /* Worth spelling out, because this is also the zoom control people go looking for and
+     * do not find: the viewport holds exactly this many voxels at full zoom-out, since
+     * nothing beyond it is loaded — so this value *is* the point at which zooming out
+     * drops to a coarser magnification. */
+    const auto hint = tr("<b>How much data is held around the cursor, per axis.</b><br/>"
+                         "This is also where zooming out switches to a coarser magnification: the switch happens when "
+                         "this much data fills the viewport, because nothing beyond it is loaded. Raise it to stay at a "
+                         "fine magnification while zoomed further out — currently %1 voxels, for the memory shown.")
+                          .arg(fov);
+    superCubeSizeLabel.setToolTip(hint);
+    fovSpin.setToolTip(hint);
 }
 
 void DatasetLoadWidget::processButtonClicked() {
@@ -599,6 +610,16 @@ bool DatasetLoadWidget::loadDataset(QString data, const boost::optional<bool> lo
     for (std::size_t i = 0; i < layers.size(); ++i) {// determine segmentation layer
         if (layers[i].isOverlay()) {
             Segmentation::singleton().layerId = i;
+            /* Adopt the layer's declared max id — see Dataset::maxId.
+             *
+             * Raised, never lowered: the value is a floor below which ids are unsafe to
+             * hand out, so the largest claim wins whether it came from the dataset, an
+             * annotation, or objects made this session. Typing a value in the Layers panel
+             * still sets it outright, which is the one place lowering it is deliberate. */
+            if (layers[i].maxId != 0) {
+                auto & seg = Segmentation::singleton();
+                seg.setMaxId(std::max(seg.getMaxId(), layers[i].maxId));
+            }
             break;// only enable the first overlay layer by default
         }
     }

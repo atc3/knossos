@@ -29,6 +29,7 @@
 #include "mesh/mesh.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/shapeinterpolation.h"
 #include "skeleton/node.h"
 #include "skeleton/skeleton_dfs.h"
 #include "skeleton/tree.h"
@@ -329,6 +330,9 @@ void Skeletonizer::saveXmlSkeleton(QXmlStreamWriter & xml, const bool onlySelect
     xml.writeAttribute("backgroundId", QString::number(Segmentation::singleton().getBackgroundId()));
     xml.writeAttribute("lockNewObjects", QString::number(Segmentation::singleton().getLockNewObjects()));
     xml.writeAttribute("defaultMergeClass", Segmentation::singleton().getDefaultMergeClass());
+    xml.writeAttribute("maxId", QString::number(Segmentation::singleton().getMaxId()));
+    xml.writeAttribute("brushRadius", QString::number(Segmentation::singleton().brush.getRadius()));
+    xml.writeAttribute("interpolationAlignCentroids", QString::number(ShapeInterpolation::singleton().centroidAlignment()));
     xml.writeEndElement();
 
     xml.writeStartElement("editPosition");
@@ -545,6 +549,18 @@ std::unordered_map<decltype(treeListElement::treeID), std::reference_wrapper<tre
                     Segmentation::singleton().setLockNewObjects(attributes.hasAttribute("lockNewObjects") ? static_cast<bool>(attributes.value("lockNewObjects").toInt()) : false);
                     if (attributes.hasAttribute("defaultMergeClass")) {
                         Segmentation::singleton().setDefaultMergeClass(attributes.value("defaultMergeClass").toString());
+                    }
+                    if (attributes.hasAttribute("maxId")) {// absent in annotations written before this existed
+                        // raised, not set: a dataset that declares its own max id (Dataset::maxId)
+                        // has already been applied, and an annotation must not lower that floor
+                        auto & seg = Segmentation::singleton();
+                        seg.setMaxId(std::max(seg.getMaxId(), attributes.value("maxId").toULongLong()));
+                    }
+                    if (attributes.hasAttribute("brushRadius")) {
+                        Segmentation::singleton().brush.setRadius(attributes.value("brushRadius").toDouble());
+                    }
+                    if (attributes.hasAttribute("interpolationAlignCentroids")) {
+                        ShapeInterpolation::singleton().setCentroidAlignment(attributes.value("interpolationAlignCentroids").toInt() != 0);
                     }
                 } else if(xml.name() == "editPosition") {
                     loadedPosition = floatCoordinate(attributes.value("x").toDouble(), attributes.value("y").toDouble(), attributes.value("z").toDouble());

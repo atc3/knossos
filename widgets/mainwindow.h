@@ -31,7 +31,10 @@
 #include "viewports/viewport3d.h"
 #include "widgetcontainer.h"
 #include "widgets/coordinatespins.h"
+#include "widgets/subobjectidedit.h"
+#include "widgets/viewportlayouts.h"
 
+#include <QTimer>
 #include <QComboBox>
 #include <QDropEvent>
 #include <QList>
@@ -116,8 +119,22 @@ class MainWindow : public QMainWindow {
                                                  {AnnotationMode::Mode_Paint, tr("Segmentation Paint")},
                                                  {AnnotationMode::Mode_OverPaint, tr("Segmentation Overpaint")},
                                                  {AnnotationMode::Mode_CellSegmentation, tr("Segmentation Cell Painting")},
+                                                 {AnnotationMode::Mode_ShapeInterpolation, tr("Segmentation Shape Interpolation")},
                                                  {AnnotationMode::Mode_Selection, tr("Review")},
                                                };
+    SubobjectIdEdit subobjectIdEdit;
+    QAction *subobjectIdAction{};// so the toolbar entry can be hidden outside segmentation modes
+    QLabel subobjectIdLabel{tr(" id: ")};
+    QAction *subobjectIdLabelAction{};
+    class QToolButton *paintTargetButton{};
+    QAction *paintTargetAction{};
+    QAction *paintBackgroundAction{};// checkable: paint/fill with id 0, i.e. erase
+    QAction *fillEdgeGuardAction{};// checkable: keep fills out of the dataset's outer voxel shell
+    class QMenu *paintTargetMenu{};
+    void rebuildPaintTargetMenu();
+    class QToolButton *viewportLayoutButton{};
+    class QMenu *viewportLayoutMenu{};
+    QString activeViewportLayout;
     WorkModeModel workModeModel;
     QComboBox modeCombo;
     QAction *cheatsheetAction;
@@ -144,6 +161,23 @@ class MainWindow : public QMainWindow {
     QAction *modeSwitchSeparator{nullptr};
     QAction *setMergeModeAction{nullptr};
     QAction *setPaintModeAction{nullptr};
+    // flood fill
+    QAction *fill2dAction{};
+    QAction *fill3dAction{};
+    QAction *fillMayLoadAction{};
+    // shape interpolation
+    QAction *shapeInterpolationAcceptAction{};
+    QAction *shapeInterpolationPreviewAction{};
+    QAction *shapeInterpolationAlignAction{};
+    QAction *shapeInterpolationDiscardAction{};
+    QAction *shapeInterpolationToggleModeAction{};
+    QAction *jumpToActiveNodeAction{};// held so its `S` shortcut can yield in paint modes
+    QAction *nextNodeInTableAction{};// held so its `N` shortcut can yield in paint modes
+    QAction *magLockAction{};
+    void refreshMagLockAction();
+    QAction *undoAction{};
+    QAction *redoAction{};
+    class QToolButton *shapeInterpolationButton{};
     // cell mode
     QAction *cytoAction{};
     QAction *plusNucAction{};
@@ -183,6 +217,9 @@ class MainWindow : public QMainWindow {
     QLabel cubePositionLabel;
     QLabel hoverLabel;
     QLabel GUIModeLabel{""};
+    QLabel shapeInterpolationLabel;// persistent chain state: plane, key slices, span
+    QString shapeInterpolationWarning;// shown in that label, in place of the summary
+    QTimer shapeInterpolationWarningTimer;
     QLabel nodeLockingLabel;
     QLabel segmentStateLabel;
     QLabel synapseStateLabel;
@@ -274,6 +311,14 @@ public slots:
 
     /* edit skeleton menu*/
     void setWorkMode(AnnotationMode workMode);
+    void updateShapeInterpolationLabel();
+    void showAnnotationsFolder();
+    void warnShapeInterpolation(const QString & message);
+    // false when the user declined to discard a running chain
+    bool confirmLeavingShapeInterpolation();
+    // Offers to write a running interpolation before the annotation goes to disk.
+    // Returns false if the user cancelled the save entirely.
+    bool settleShapeInterpolationBeforeSaving();
     void clearSkeletonSlot();
 
     /* preferences menu */
@@ -286,6 +331,11 @@ public slots:
     void updateCoordinateBar(const Coordinate & pos);
     // viewports
     void defaultViewports();
+    void applyViewportLayout(const QString & name);
+    ViewportLayout captureViewportLayout(const QString & name);
+    bool viewportsMatchLayout(const ViewportLayout & layout);
+    void rebuildViewportLayoutMenu();
+    void saveCurrentViewportLayout();
     void adjustViewports();
 
     // from the event handler

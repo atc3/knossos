@@ -33,6 +33,8 @@
 #include "segmentation/cubeloader.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/segmentationsplit.h"
+#include "segmentation/floodfill.h"
+#include "segmentation/shapeinterpolation.h"
 #include "skeleton/skeletonizer.h"
 #include "skeleton/tree.h"
 #include "stateInfo.h"
@@ -42,6 +44,9 @@
 
 #include <QApplication>
 #include <QMessageBox>
+#include <QStatusBar>
+
+#include <optional>
 
 #include <boost/optional.hpp>
 
@@ -91,8 +96,47 @@ void merging(const QMouseEvent *event, ViewportOrtho & vp) {
     }
 }
 
+/* Refuses a paint at the wrong magnification, and offers to fix it.
+ *
+ * KNOSSOS already refused this — both for the annotation-wide brush lock and for a running
+ * interpolation chain — but silently, so the brush simply did nothing and there was no way
+ * to tell why. Offering the switch turns it into one click rather than an error. The
+ * dialog is shown once per drag; a stroke is dozens of stamps. */
+bool magBlocksPainting(ViewportOrtho & vp) {
+    const auto currentMag = Dataset::datasets[Segmentation::singleton().layerId].magIndex;
+    auto & si = ShapeInterpolation::singleton();
+    std::optional<std::size_t> wanted;
+    QString reason;
+    if (Annotation::singleton().magLock && currentMag != Annotation::singleton().magLock.value()) {
+        wanted = Annotation::singleton().magLock.value();
+        reason = QObject::tr("Painting is locked to magnification %1.").arg(magFromIndex(*wanted));
+    } else if (si.active() && currentMag != si.magnificationIndex()) {
+        wanted = si.magnificationIndex();
+        reason = QObject::tr("This interpolation chain was started at magnification %1.").arg(magFromIndex(*wanted));
+    }
+    if (!wanted) {
+        return false;
+    }
+    if (!vp.magWarningShownThisStroke) {
+        vp.magWarningShownThisStroke = true;
+        state->viewer->mainWindow.warnShapeInterpolation(reason);
+        QMessageBox prompt{QApplication::activeWindow()};
+        prompt.setIcon(QMessageBox::Warning);
+        prompt.setText(reason);
+        prompt.setInformativeText(QObject::tr("You are viewing magnification %1, so nothing was painted.")
+                                      .arg(magFromIndex(currentMag)));
+        auto * confirm = prompt.addButton(QObject::tr("Switch to mag %1").arg(magFromIndex(*wanted)), QMessageBox::AcceptRole);
+        prompt.addButton(QObject::tr("Stay here"), QMessageBox::RejectRole);
+        state->viewer->suspend([&prompt]{ return prompt.exec(); });
+        if (prompt.clickedButton() == confirm) {
+            state->viewer->updateDatasetMag(static_cast<int>(magFromIndex(*wanted)));
+        }
+    }
+    return true;
+}
+
 void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
-    if (Annotation::singleton().magLock && Dataset::datasets[Segmentation::singleton().layerId].magIndex != Annotation::singleton().magLock.value()) {
+    if (magBlocksPainting(vp)) {
         return;
     }
     const Coordinate coord = getCoordinateFromOrthogonalClick(event->pos(), vp);
@@ -104,15 +148,155 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
         if (event->modifiers().testFlag(Qt::AltModifier)) {
             merging(event, vp);
         } else {
-            if (seg.createPaintObject && !seg.brush.isInverse() && seg.selectedObjectsCount() == 0) {
+            /* Background selected as the paint id means the stroke erases, with nothing
+             * held down — the standing counterpart to Shift. */
+            const bool eraseBackground = seg.paintingBackground();
+            if (seg.createPaintObject && !seg.brush.isInverse() && !eraseBackground && seg.selectedObjectsCount() == 0) {
                 seg.createAndSelectObject(coord);
             }
-            if (seg.selectedObjectsCount() > 0) {
-                uint64_t soid = seg.subobjectIdOfFirstSelectedObject(coord);
-                writeVoxels(coord, soid, seg.brush.value());
+            if (eraseBackground || seg.selectedObjectsCount() > 0) {
+                uint64_t soid = eraseBackground ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+                auto brush = seg.brush.value();
+                if (eraseBackground) {
+                    // brush.inverse means "erase only what is selected", and nothing is —
+                    // writing background outright is what selecting background asked for
+                    brush.inverse = false;
+                }
+                const bool shapeInterpolation = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+                if (shapeInterpolation) {
+                    brush.mode = brush_t::mode_t::two_dim;// key slices are strictly planar
+                    // Touching a previewed slice bakes it first, so the stroke edits a real
+                    // outline instead of being the only thing on an otherwise empty slice.
+                    // Must happen before the stroke, or an erase would be undone by the bake.
+                    auto & si = ShapeInterpolation::singleton();
+                    if (si.active() && si.normalAxisViewport() == static_cast<int>(vp.viewportType)) {
+                        QString note;
+                        if (si.materializeAt(axisGet(coord, si.normalAxis()), note)) {
+                            state->viewer->mainWindow.warnShapeInterpolation(note);
+                        }
+                    }
+                }
+
+                const auto stamp = [&](const Coordinate & at){
+                    writeVoxels(at, soid, brush);
+                    if (shapeInterpolation) {
+                        auto & si = ShapeInterpolation::singleton();
+                        // An erase is absorbed against the chain's own id: absorbStamp reads
+                        // the overlay back, so rubbed-out voxels fall out of the key slice.
+                        // With no chain running there is nothing to absorb into — an erase
+                        // must not start one on id 0.
+                        if (!eraseBackground || si.active()) {
+                            QString reason;
+                            if (!si.absorbStamp(at, brush, eraseBackground ? si.subobjectId() : soid, reason)) {
+                                state->viewer->mainWindow.warnShapeInterpolation(reason);
+                            }
+                        }
+                    }
+                };
+
+                /* Fill in the gap since the last stamp.
+                 *
+                 * Mouse move events arrive far more slowly than a hand moves, so stamping
+                 * only where the cursor was reported leaves a line of separate discs on a
+                 * quick stroke. Walking the segment at half a brush radius closes it, and
+                 * costs nothing on a slow stroke where consecutive samples are adjacent. */
+                if (vp.lastBrushStamp) {
+                    const auto from = vp.lastBrushStamp.get();
+                    const floatCoordinate delta{static_cast<float>(coord.x - from.x), static_cast<float>(coord.y - from.y), static_cast<float>(coord.z - from.z)};
+                    const auto & scale = Dataset::current().scales[0];
+                    const auto radiusInVoxels = brush.radius / std::min({scale.x, scale.y, scale.z});
+                    const auto stride = std::max(1.0, radiusInVoxels * 0.5);
+                    // capped so a jump across the dataset can’t stall the stroke
+                    const auto steps = std::min(256, static_cast<int>(std::ceil(delta.length() / stride)));
+                    for (int i = 1; i < steps; ++i) {
+                        const auto t = static_cast<float>(i) / steps;
+                        stamp({from.x + static_cast<int>(std::lround(delta.x * t)),
+                               from.y + static_cast<int>(std::lround(delta.y * t)),
+                               from.z + static_cast<int>(std::lround(delta.z * t))});
+                    }
+                }
+                stamp(coord);
+                vp.lastBrushStamp = coord;
             }
         }
     }
+}
+
+/* 2D/3D flood fill, seeded at `coord`.
+ *
+ * Replaces the old middle-click bucket fill, which was bounded by whatever happened to be
+ * on screen and which spilled into unloaded blocks — where every write was silently
+ * dropped. This one stops at the edge of the loaded blocks and says so. */
+void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const bool threeDimensional) {
+    auto & seg = Segmentation::singleton();
+    if (Annotation::singleton().magLock && Dataset::datasets[seg.layerId].magIndex != Annotation::singleton().magLock.value()) {
+        return;
+    }
+    if (vp.viewportType != VIEWPORT_XY && vp.viewportType != VIEWPORT_XZ && vp.viewportType != VIEWPORT_ZY) {
+        // a 2D fill needs an axis-aligned plane to stay in; the arbitrary viewport has none
+        state->viewer->mainWindow.statusBar()->showMessage(QObject::tr("Fill: use one of the xy/xz/zy viewports."), 5000);
+        return;
+    }
+    /* Filling with the background id is an erase: the connected region the seed lands in
+     * is replaced with background rather than with a label, which is how a chunk of a label
+     * gets rubbed out in one gesture.
+     *
+     * Deliberately *not* keyed off brush.inverse. Shift already means "3D" for a fill, and
+     * it sets the brush's inverse flag at the same time, so Shift + G was a 3D erase and
+     * there was no way to ask for a 3D fill at all. Erasing has its own standing selector
+     * now — the background paint id — which leaves Shift free to mean one thing. */
+    const bool erasing = seg.paintingBackground();
+    if (!erasing) {
+        if (seg.createPaintObject && seg.selectedObjectsCount() == 0) {
+            seg.createAndSelectObject(coord);
+        }
+        if (seg.selectedObjectsCount() == 0) {
+            return;
+        }
+    }
+
+    FloodFillRequest request;
+    request.seed = coord;
+    request.fillsoid = erasing ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+    request.threeDimensional = threeDimensional;
+    request.view = static_cast<brush_t::view_t>(vp.viewportType);
+    request.mayLoadCubes = Segmentation::singleton().floodFillMayLoadCubes;
+
+    const auto report = state->viewer->suspend([&]{ return runFloodFill(request, &state->viewer->mainWindow); });
+    auto message = report.message;
+
+    if (report.didSomething && Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+        auto & si = ShapeInterpolation::singleton();
+        if (!si.active()) {
+            if (!erasing) {// an erase is a cleanup, not the start of anything
+                message += " " + QObject::tr("Paint a stroke first — a fill alone doesn’t start a chain.");
+            }
+        } else {
+            /* absorbRegion() re-reads the overlay, so it takes paint and erase alike as
+             * long as it is handed the chain's own id — the erased voxels simply come back
+             * as "not the chain's id" and drop out of the key slice.
+             *
+             * A 3D fill spans depths, and each key slice it crossed has to be re-read or it
+             * would keep claiming voxels the fill has already changed. Only depths that
+             * actually hold a key slice cost anything. */
+            const auto soid = erasing ? si.subobjectId() : request.fillsoid;
+            const auto seedDepth = axisGet(coord, si.normalAxis());
+            const auto first = axisGet(report.filledMin, si.normalAxis());
+            const auto last = axisGet(report.filledMax, si.normalAxis());
+            const auto depthStep = std::max(1, axisGet(si.voxelStep(), si.normalAxis()));
+            for (auto depth = first; depth <= last; depth += depthStep) {
+                if (depth == seedDepth || si.hasSliceAt(depth)) {
+                    QString reason;
+                    if (!si.absorbRegion(coord, report.filledMin, report.filledMax, depth, soid, reason)) {
+                        message += " " + reason;
+                        break;// they would all fail the same way
+                    }
+                }
+            }
+        }
+    }
+    state->viewer->mainWindow.statusBar()->showMessage(message, 8000);
+    state->viewer->run();
 }
 
 void ViewportOrtho::handleMouseHover(const QMouseEvent *event) {
@@ -170,9 +354,23 @@ void ViewportOrtho::handleMouseButtonMiddle(const QMouseEvent *event) {
     ViewportBase::handleMouseButtonMiddle(event);
 }
 
+/* In shape interpolation the right button adopts slices rather than painting.
+ *
+ * Paintera puts replace on left and add on right, and with Shift+left already painting
+ * there is nothing for a plain right drag to do that Shift+left does not. Shift+right is
+ * left alone as erase — it is the established gesture and removing it would leave the mode
+ * with no way to rub anything out. */
+bool rightButtonAdoptsSlices(const QMouseEvent *event) {
+    return Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            && !event->modifiers().testFlag(Qt::ShiftModifier);
+}
+
 void ViewportOrtho::handleMouseButtonRight(const QMouseEvent *event) {
     const auto & annotationMode = Annotation::singleton().annotationMode;
     if (annotationMode.testFlag(AnnotationMode::Brush)) {
+        if (rightButtonAdoptsSlices(event)) {
+            return;// handled on release, so a drag can still be told from a click
+        }
         Segmentation::singleton().brush.setInverse(event->modifiers().testFlag(Qt::ShiftModifier));
         segmentation_brush_work(event, *this);
         return;
@@ -314,11 +512,106 @@ void Viewport3D::handleMouseMotionLeftHold(const QMouseEvent *event) {
     ViewportBase::handleMouseMotionLeftHold(event);
 }
 
+/* Shift + left is a second paint gesture alongside right drag, for anyone whose hand
+ * expects Paintera's left-button painting. It always paints and never erases: Shift is
+ * KNOSSOS's erase modifier, so the brush's inverse flag is overridden for these strokes.
+ * Erasing stays on Shift + right drag. */
+bool ViewportOrtho::shiftLeftPaint(const QMouseEvent *event) {
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)
+            || !event->modifiers().testFlag(Qt::ShiftModifier)
+            || event->modifiers().testFlag(Qt::ControlModifier)
+            || event->modifiers().testFlag(Qt::AltModifier)) {
+        return false;
+    }
+    auto & brush = Segmentation::singleton().brush;
+    const auto wasInverse = brush.isInverse();
+    brush.setInverse(false);
+    segmentation_brush_work(event, *this);
+    brush.setInverse(wasInverse);
+    return true;
+}
+
 void ViewportOrtho::handleMouseMotionLeftHold(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        return;
+    }
     if (event->modifiers() == Qt::NoModifier) {
         state->viewer->userMove(handleMovement(event->pos()), USERMOVE_HORIZONTAL, n);
     }
     ViewportBase::handleMouseMotionLeftHold(event);
+}
+
+/* Clicking an already-painted slice pulls it into the chain, so slices drawn before
+ * entering the mode — or in a previous session — don't have to be redrawn.
+ *
+ * Plain click adopts the chain's own object. Ctrl+click on a *different* object relabels
+ * that object's voxels in this plane to the chain's id and adopts the result: a
+ * voxel-level steal of the outline, which leaves their object intact everywhere else. */
+bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos, const bool replace) {
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            || Annotation::singleton().outsideMovementArea(clickPos)) {
+        return false;
+    }
+    auto & si = ShapeInterpolation::singleton();
+    auto & seg = Segmentation::singleton();
+    const auto clicked = readVoxel(clickPos);
+    const bool steal = event->modifiers().testFlag(Qt::ControlModifier);
+    if (clicked == seg.getBackgroundId()) {
+        // Interpolated voxels are not in the overlay until the chain is accepted, so they
+        // read as background — but clicking one should still get you back to the object
+        // the chain is building, the same as clicking one of its key slices.
+        if (!steal && si.active() && si.covers(clickPos)) {
+            if (seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != si.subobjectId()) {
+                seg.clearObjectSelection();
+                seg.selectObjectFromSubObject(si.subobjectId(), clickPos);
+                state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(si.subobjectId()));
+                state->viewer->run();
+            }
+            return true;
+        }
+        return false;// clicking empty space still means "deselect", as everywhere else
+    }
+
+    if (!si.active()) {
+        if (steal) {
+            return false;// nothing to steal into yet
+        }
+        // no chain running: adopt the clicked object and start one in this viewport
+        seg.clearObjectSelection();
+        seg.selectObjectFromSubObject(clicked, clickPos);
+        si.beginAt(static_cast<brush_t::view_t>(viewportType), clicked);
+    } else if (!steal && clicked != si.subobjectId()) {
+        return false;// a plain click on someone else's object is still just a selection
+    } else if (!steal && seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != clicked) {
+        // clicking back onto the chain's own object after having selected another one:
+        // switch the brush back to it, which is the only way back without typing the id
+        seg.clearObjectSelection();
+        seg.selectObjectFromSubObject(clicked, clickPos);
+        state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(clicked));
+        state->viewer->run();
+        return true;
+    } else if (si.normalAxisViewport() != static_cast<int>(viewportType)) {
+        state->viewer->mainWindow.warnShapeInterpolation(tr("This chain runs in the %1 plane.").arg(si.planeName()));
+        return true;
+    }
+
+    QString note;
+    // suspended so the viewports don't churn while the loader is walked across blocks
+    const auto adopted = state->viewer->suspend([&]{
+        return si.adoptPlaneAt(clickPos, note, replace, steal ? std::optional<std::uint64_t>{clicked} : std::nullopt, &state->viewer->mainWindow);
+    });
+    state->viewer->mainWindow.warnShapeInterpolation(note);
+    if (adopted) {
+        state->viewer->run();
+    }
+    return true;
+}
+
+void ViewportOrtho::handleMouseButtonLeft(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        return;
+    }
+    ViewportBase::handleMouseButtonLeft(event);
 }
 
 void Viewport3D::handleMouseMotionRightHold(const QMouseEvent *event) {
@@ -331,7 +624,7 @@ void Viewport3D::handleMouseMotionRightHold(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseMotionRightHold(const QMouseEvent *event) {
-    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush) && !rightButtonAdoptsSlices(event)) {
         const bool notOrigin = event->pos() != mouseDown;//don’t do redundant work
         if (notOrigin) {
             segmentation_brush_work(event, *this);
@@ -389,12 +682,37 @@ void ViewportBase::handleMouseReleaseLeft(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
+    if (shiftLeftPaint(event)) {
+        state->viewer->userMoveClear();
+        ViewportBase::handleMouseReleaseLeft(event);
+        return;
+    }
     auto & segmentation = Segmentation::singleton();
     const auto clickPos = getCoordinateFromOrthogonalClick(event->pos(), *this);
+    if (event->pos() == mouseDown && shapeInterpolationAdopt(event, clickPos, true)) {// left replaces
+        ViewportBase::handleMouseReleaseLeft(event);
+        return;
+    }
     if (!Annotation::singleton().outsideMovementArea(clickPos) && Annotation::singleton().annotationMode.testFlag(AnnotationMode::ObjectSelection)) { // in task mode the object should not be switched
         if (event->pos() == mouseDown) {// mouse click
             const auto subobjectId = readVoxel(clickPos);
-            if (subobjectId != segmentation.getBackgroundId()) {// don’t select the unsegmented area as object
+            if (subobjectId == segmentation.getBackgroundId()) {
+                /* Clicking unlabelled data selects the background as the thing being
+                 * painted, so the brush and the fills erase from here on.
+                 *
+                 * It is the only way to pick id 0 with the mouse: 0 is not an object, so
+                 * the empty space itself is the only thing there is to click. Restricted to
+                 * brush modes — with no brush there is no paint id to change and this would
+                 * just be a way to lose a selection by missing. Ctrl is the add-to-selection
+                 * modifier and is left alone. */
+                if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)
+                        && !event->modifiers().testFlag(Qt::ControlModifier)
+                        && !segmentation.paintingBackground()) {
+                    segmentation.setPaintingBackground(true);
+                    state->viewer->mainWindow.statusBar()->showMessage(
+                        tr("Painting background — the brush and the fills now erase. Click a label, or type an id, to paint again."), 8000);
+                }
+            } else {// don’t select the unsegmented area as object
                 auto & subobject = segmentation.subobjectFromId(subobjectId, clickPos);
                 auto objIndex = segmentation.largestObjectContainingSubobject(subobject);
                 Segmentation::singleton().setObjectLocation(objIndex, clickPos);
@@ -420,6 +738,13 @@ void ViewportOrtho::handleMouseReleaseLeft(const QMouseEvent *event) {
 }
 
 void ViewportOrtho::handleMouseReleaseRight(const QMouseEvent *event) {
+    if (rightButtonAdoptsSlices(event)) {
+        if (event->pos() == mouseDown) {// a click, not a drag
+            shapeInterpolationAdopt(event, getCoordinateFromOrthogonalClick(event->pos(), *this), false);// right adds
+        }
+        ViewportBase::handleMouseReleaseRight(event);
+        return;
+    }
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         if (event->pos() != mouseDown) {//merge took already place on mouse down
             segmentation_brush_work(event, *this);
@@ -432,34 +757,10 @@ void ViewportOrtho::handleMouseReleaseMiddle(const QMouseEvent *event) {
     Coordinate clickedCoordinate = getCoordinateFromOrthogonalClick(event->pos(), *this);
     if (!Annotation::singleton().outsideMovementArea(clickedCoordinate)) {
         EmitOnCtorDtor eocd(&SignalRelay::Signal_EventModel_handleMouseReleaseMiddle, state->signalRelay, clickedCoordinate, viewportType, event);
-        auto & seg = Segmentation::singleton();
-        if ((Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_Paint) || Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) && seg.selectedObjectsCount() == 1) {
-            auto brush_copy = seg.brush.value();
-            uint64_t soid = brush_copy.inverse ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(clickedCoordinate);
-            brush_copy.shape = brush_t::shape_t::angular;
-            brush_copy.radius = displayedIsoPx;//set brush to fill visible area
-
-            const auto displayedMag1Px = displayedIsoPx / Dataset::current().scales[0].x;
-            auto areaMin = state->viewerState->currentPosition - displayedMag1Px;
-            auto areaMax = state->viewerState->currentPosition + displayedMag1Px;
-
-            areaMin = areaMin.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
-            areaMax = areaMax.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax) + 1;
-
-            if (false) {
-            if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint) && Dataset::datasets[Segmentation::singleton().layerId].boundary.z > 1) {
-                const bool isAdjacent = (seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate), clickedCoordinate))
-                                        + seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate + n), clickedCoordinate + n))
-                                        + seg.isSelected(seg.subobjectFromId(readVoxel(clickedCoordinate - n), clickedCoordinate - n))) > 1;
-                if (!brush_copy.inverse && brush_copy.mode == brush_t::mode_t::two_dim && isAdjacent) {
-                    auto brush_copy2 = brush_copy;
-                    brush_copy2.inverse = true;
-                    subobjectBucketFill(clickedCoordinate, seg.getBackgroundId(), brush_copy2, areaMin, areaMax);
-
-                    brush_copy.mode = brush_t::mode_t::adjacent;
-                }
-            }}
-            subobjectBucketFill(clickedCoordinate, soid, brush_copy, areaMin, areaMax);
+        const auto & mode = Annotation::singleton().annotationMode;
+        if (mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint)) {
+            // Shift picks the 3D fill; plain middle click is the 2D one
+            segmentation_flood_fill(clickedCoordinate, *this, event->modifiers().testFlag(Qt::ShiftModifier));
         }
     }
     //finish node drag
@@ -597,7 +898,71 @@ void ViewportBase::handleKeyPress(const QKeyEvent *event) {
     }
 }
 
+/* While a shape-interpolation chain is running, the arrow keys jump between painted key
+ * slices instead of panning in-plane, matching Paintera's bindings. D/F/E/R and the mouse
+ * wheel keep stepping through slices freely, so nothing is actually lost. */
+bool ViewportOrtho::handleShapeInterpolationKey(const QKeyEvent *event) {
+    auto & si = ShapeInterpolation::singleton();
+    if (!si.active() || static_cast<int>(viewportType) != si.normalAxisViewport()) {
+        return false;
+    }
+    const auto shift = event->modifiers().testFlag(Qt::ShiftModifier);
+    const auto depth = axisGet(state->viewerState->currentPosition, si.normalAxis());
+    std::optional<int> target;
+    switch (event->key()) {
+    case Qt::Key_Left:
+        target = shift ? si.firstDepth() : si.prevDepth(depth);
+        break;
+    case Qt::Key_Right:
+        target = shift ? si.lastDepth() : si.nextDepth(depth);
+        break;
+    case Qt::Key_Delete:
+    case Qt::Key_Backspace:
+        if (si.removeSliceAt(depth)) {
+            state->viewer->mainWindow.warnShapeInterpolation(tr("Removed the key slice at %1. Its painted voxels are still there — erase them if you don’t want them.").arg(depth));
+            state->viewer->run();
+        }
+        return true;
+    case Qt::Key_Escape:
+        /* Esc is far more often a slip than a deliberate discard, so confirm — but only
+         * when there is a chain to lose.
+         *
+         * An empty one just exits, and so does a single slice that has only ever been
+         * clicked into the chain: one slice interpolates nothing, and re-adopting it is the
+         * same one click that put it there. The prompt starts earning its place once
+         * something has been painted, filled, baked or deleted. */
+        if (si.sliceCount() != 0 && !(si.sliceCount() == 1 && !si.edited())) {
+            QMessageBox prompt{QApplication::activeWindow()};
+            prompt.setIcon(QMessageBox::Question);
+            prompt.setText(tr("End this shape interpolation chain?"));
+            prompt.setInformativeText(tr("It has %n key slice(s). The painted voxels are kept either way — only the chain and its interpolations are discarded.", "", static_cast<int>(si.sliceCount())));
+            auto * confirm = prompt.addButton(tr("End chain"), QMessageBox::AcceptRole);
+            prompt.addButton(tr("Keep going"), QMessageBox::RejectRole);
+            state->viewer->suspend([&prompt]{ return prompt.exec(); });
+            if (prompt.clickedButton() != confirm) {
+                return true;
+            }
+        }
+        si.reset();
+        state->viewer->mainWindow.warnShapeInterpolation(tr("Chain ended. Painted slices are kept."));
+        state->viewer->run();
+        return true;
+    default:
+        return false;
+    }
+    if (target) {
+        auto pos = state->viewerState->currentPosition;
+        axisSet(pos, si.normalAxis(), *target);
+        state->viewer->setPosition(pos, USERMOVE_DRILL, n);
+    }
+    return true;// arrows mean slice navigation in this mode, even at the ends of the chain
+}
+
 void ViewportOrtho::handleKeyPress(const QKeyEvent *event) {
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            && !event->isAutoRepeat() && handleShapeInterpolationKey(event)) {
+        return;
+    }
     //events
     //↓          #   #   #   #   #   #   #   # ↑  ↓          #  #  #…
     //^ os delay ^       ^---^ os key repeat
@@ -615,6 +980,12 @@ void ViewportOrtho::handleKeyPress(const QKeyEvent *event) {
     const bool keyDown = event->key() == Qt::Key_Down;
     const auto singleVoxelKey = keyD || keyF || keyLeft || keyRight || keyUp || keyDown;
     const bool keyE = event->key() == Qt::Key_E;
+    // Ctrl/Cmd/Alt combinations belong to shortcuts, not to slice stepping — otherwise a
+    // binding like Ctrl+F silently moves a slice as well as (or instead of) firing
+    if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::AltModifier) || event->modifiers().testFlag(Qt::MetaModifier)) {
+        ViewportBase::handleKeyPress(event);
+        return;
+    }
     if (!event->isAutoRepeat()) {
         const int shiftMultiplier = event->modifiers().testFlag(Qt::ShiftModifier) ? 10 : 1;
         const auto direction = (n * -1).dot(state->viewerState->tracingDirection) >= 0 ? 1 : -1;// reverse n into the frame

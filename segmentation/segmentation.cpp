@@ -21,6 +21,7 @@
  */
 
 #include "segmentation.h"
+#include "undostack.h"
 
 #include "annotation/annotation.h"
 #include "annotation/file_io.h"
@@ -97,6 +98,14 @@ Segmentation & Segmentation::singleton() {
 
 Segmentation::Segmentation() {
     loadOverlayLutFromFile();
+    // every signal that means "the object graph is not what it was"
+    for (const auto signal : {&Segmentation::appendedRow, &Segmentation::removedRow, &Segmentation::resetData,
+                              &Segmentation::resetSelection, &Segmentation::categoriesChanged}) {
+        QObject::connect(this, signal, this, [this](){ ++graphRevision; });
+    }
+    QObject::connect(this, &Segmentation::changedRow, this, [this](int){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; });
 }
 
 bool Segmentation::hasSegData() const {
@@ -104,6 +113,10 @@ bool Segmentation::hasSegData() const {
 }
 
 void Segmentation::clear() {
+    // This throws away every overlay edit wholesale, which no cube snapshot can put back —
+    // so the history is meaningless afterwards and saying so beats offering an undo that
+    // would silently restore nothing.
+    UndoStack::singleton().clear();
     //dispatch to loader thread, original cubes are reloaded automatically
     QTimer::singleShot(0, Loader::Controller::singleton().worker.get(), &Loader::Worker::snappyCacheClear);
     mergelistClear();
@@ -123,9 +136,15 @@ bool Segmentation::hasObjects() const {
     return !this->objects.empty();
 }
 
+std::uint64_t Segmentation::nextFreeSubobjectId() {
+    const auto id = std::max(SubObject::highestId, maxId) + 1;
+    maxId = id;// remember it, so successive calls keep climbing even before the object exists
+    return id;
+}
+
 void Segmentation::createAndSelectObject(const Coordinate & position, const QString & category) {
     clearObjectSelection();
-    auto & newObject = createObjectFromSubobjectId(SubObject::highestId + 1, position);
+    auto & newObject = createObjectFromSubobjectId(nextFreeSubobjectId(), position);
     newObject.category = category;
     newObject.immutable = Segmentation::singleton().lockNewObjects;
     selectObject(newObject);
@@ -225,6 +244,23 @@ void Segmentation::setBackgroundId(decltype(backgroundId) newBackgroundId) {
     emit backgroundIdChanged(backgroundId = newBackgroundId);
 }
 
+/* Select background as the thing being painted, so the brush and the fills erase.
+ *
+ * There is no object to select for the background id — it is the absence of a label — so
+ * this is a flag rather than a selection, and the two are alternatives: arming it drops
+ * the object selection, and selectObject() below drops it again the moment a real object
+ * is picked. */
+void Segmentation::setPaintingBackground(const bool paint) {
+    if (paintsBackground == paint) {
+        return;
+    }
+    paintsBackground = paint;
+    if (paint) {
+        clearObjectSelection();
+    }
+    emit paintingBackgroundChanged(paintsBackground);
+}
+
 decltype(Segmentation::lockNewObjects) Segmentation::getLockNewObjects() const {
     return lockNewObjects;
 }
@@ -305,6 +341,17 @@ bool Segmentation::subobjectExists(const uint64_t & subobjectId) const {
 
 uint64_t Segmentation::oid(const uint64_t oidx) const {
     return objects[oidx].id;
+}
+
+std::optional<uint64_t> Segmentation::currentPaintSubobjectId() const {
+    if (paintsBackground) {
+        return backgroundId;// a deliberate choice, unlike "nothing is selected"
+    }
+    if (selectedObjectIndices.empty()) {
+        return std::nullopt;
+    }
+    const auto & obj = objects[selectedObjectIndices.front()];
+    return obj.subobjects.empty() ? std::nullopt : std::optional<uint64_t>{obj.subobjects.front().get().id};
 }
 
 uint64_t Segmentation::subobjectIdOfFirstSelectedObject(const Coordinate & newLocation) {
@@ -426,6 +473,10 @@ void Segmentation::clearObjectSelection() {
 }
 
 void Segmentation::selectObject(Object & object) {
+    if (paintsBackground) {// picking a real object ends "painting background"
+        paintsBackground = false;
+        emit paintingBackgroundChanged(false);
+    }
     if (object.selected) {
         return;
     }
@@ -592,6 +643,10 @@ void Segmentation::mergelistClear() {
     SubObject::highestId = 0;
     subobjects.clear();
     backgroundId = 0;
+    if (paintsBackground) {// nothing left to erase; also un-checks the menu entry
+        paintsBackground = false;
+        emit paintingBackgroundChanged(false);
+    }
     hovered_subobject_id = 0;
     touched_subobject_id = 0;
     lastTodoObject_id = 0;
@@ -823,7 +878,7 @@ void Segmentation::toggleVolumeRender(const bool render) {
 
 void Segmentation::cell(bool cyto) {
     clearObjectSelection();
-    const auto id = SubObject::highestId + 1;
+    const auto id = nextFreeSubobjectId();
     const Coordinate nopos{-1,-1,-1};
     auto cellidx = createObjectFromSubobjectId(id, nopos).index;
     objects[cellidx].category = "cell";
@@ -857,7 +912,7 @@ void Segmentation::plusNuc() {
             if (auto cell = mesh.find("cell"); cell != std::end(mesh)) {
                 const auto oidx = cell->second;
                 const Coordinate nopos{-1,-1,-1};
-                const auto id = SubObject::highestId + 1;
+                const auto id = nextFreeSubobjectId();
                 auto & nuc = createObjectFromSubobjectId(id, nopos);
                 nuc.category = "nucleus";
                 nuc.immutable = true;

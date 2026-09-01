@@ -28,10 +28,22 @@
 #include "viewportbase.h"
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <vector>
 #include <unordered_set>
+
+class ViewportOrtho;
+// 2D/3D flood fill seeded at `coord`, bounded by the blocks currently in memory.
+void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, bool threeDimensional);
 
 class ViewportOrtho : public ViewportBase {
     Q_OBJECT
+    // the paint helpers in viewportevents.cpp are part of this class in all but name
+    friend bool magBlocksPainting(ViewportOrtho &);
+    friend void segmentation_brush_work(const class QMouseEvent *, ViewportOrtho &);
     QAction zoomResetAction{tr("Reset zoom"), &menuButton};
 
     floatCoordinate handleMovement(const QPoint & pos);
@@ -45,16 +57,35 @@ class ViewportOrtho : public ViewportBase {
     void renderSegPlaneIntersection(const segmentListElement & segment);
     virtual void renderNode(const nodeListElement & node, const RenderOptions & options = RenderOptions()) override;
     void renderBrush(const Coordinate coord);
+    void renderShapeInterpolationPreview();
+    // preview texture, created lazily because it needs a current GL context
+    std::unique_ptr<QOpenGLTexture> interpolationPreviewTex;
+    std::uint64_t interpolationPreviewKey{~0ull};
+    std::uint64_t interpolationPreviewGen{0};
+    int interpolationPreviewUSize{0}, interpolationPreviewVSize{0};
+    std::vector<std::uint8_t> interpolationPreviewRGBA;
     virtual void renderViewportFrontFace() override;
 
     floatCoordinate arbNodeDragCache = {};
     class nodeListElement *draggedNode = nullptr;
 
     virtual void mousePressEvent(QMouseEvent *event) override;
+    virtual void mouseReleaseEvent(QMouseEvent *event) override;
+    // spans a whole drag, so one stroke is one undo step rather than one per stamp
+    std::unique_ptr<class UndoScope> paintUndoScope;
+    bool magWarningShownThisStroke{false};// one dialog per drag, not one per stamp
+    // last stamped position, so a fast drag can be filled in rather than left as beads
+    boost::optional<Coordinate> lastBrushStamp;
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;
+    // returns true when the key was consumed by an active shape-interpolation session
+    bool handleShapeInterpolationKey(const QKeyEvent *event);
     virtual void handleMouseHover(const QMouseEvent *event) override;
+    virtual void handleMouseButtonLeft(const QMouseEvent *event) override;
+    bool shiftLeftPaint(const QMouseEvent *event);
+    // returns true when the click was consumed as a shape-interpolation slice adoption
+    bool shapeInterpolationAdopt(const QMouseEvent *event, const Coordinate & clickPos, bool replace);
     virtual void handleMouseReleaseLeft(const QMouseEvent *event) override;
     virtual void handleMouseMotionLeftHold(const QMouseEvent *event) override;
     virtual void handleMouseButtonRight(const QMouseEvent *event) override;

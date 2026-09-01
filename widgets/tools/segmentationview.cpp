@@ -474,7 +474,7 @@ SegmentationView::SegmentationView(QWidget * const parent) : QWidget(parent), ca
         });
         QObject::connect(contextMenu.addAction("Assign new data id"), &QAction::triggered, [](){
             state->viewer->suspend([](){
-                const auto defaultValue = QString::number(Segmentation::singleton().highestSubobjectId()+1);
+                const auto defaultValue = QString::number(Segmentation::singleton().nextFreeSubobjectId());
                 bool ok;
                 const auto newid = QInputDialog::getText(QApplication::activeWindow(), "", "", QLineEdit::Normal, defaultValue).toULongLong(&ok);
                 if (ok) {
@@ -667,7 +667,7 @@ QString SegmentationView::getCategory(const int idx) const {
 bool SegmentationView::addObjectWithCategory(const int idx) {
     if (idx < categoryFilter.count()) {
         const Coordinate nopos{-1,-1,-1};
-        const auto id = Segmentation::singleton().highestSubobjectId() + 1;
+        const auto id = Segmentation::singleton().nextFreeSubobjectId();
         auto & obj = Segmentation::singleton().createObjectFromSubobjectId(id, nopos);
         obj.category = categoryFilter.itemText(idx);
         obj.immutable = Segmentation::singleton().lockNewObjects;

@@ -32,6 +32,7 @@
 #include "profiler.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/shapeinterpolation.h"
 #include "skeleton/node.h"
 #include "skeleton/skeletonizer.h"
 #include "skeleton/tree.h"
@@ -848,6 +849,12 @@ void ViewportOrtho::renderViewport(const RenderOptions &options) {
 
         glDisable(GL_TEXTURE_2D);
     }
+    if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+        glPushMatrix();
+        view();
+        renderShapeInterpolationPreview();
+        glPopMatrix();
+    }
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush) && hasCursor) {
         glPushMatrix();
         view();
@@ -1575,6 +1582,99 @@ void Viewport3D::renderSkeletonVP(const RenderOptions &options) {
     glLoadIdentity();
 }
 
+/* Draws the shape-interpolation preview as a translucent overlay.
+ *
+ * The mask is transient — it lives only in the ShapeInterpolation controller and is never
+ * written into an overlay cube until the user accepts — so it cannot go through
+ * vpGenerateTexture()/ocSliceExtract() like real segmentation does. Instead it is uploaded
+ * as its own small texture covering exactly the mask's bounding box and drawn as one quad,
+ * using the same nanometre vertex convention as renderArbitrarySlicePane().
+ *
+ * The controller hands back an axis-aligned PlanarMask for whichever ortho viewport asks,
+ * so the two planes the chain does not live in show a cross-section through the whole
+ * volume and the shape is visible from the side while it is being built. */
+void ViewportOrtho::renderShapeInterpolationPreview() {
+    if (viewportType != VIEWPORT_XY && viewportType != VIEWPORT_XZ && viewportType != VIEWPORT_ZY) {
+        return;
+    }
+    if (state->viewerState->showOnlyRawData) {
+        return;// holding space means "show me the image data", and this is not that
+    }
+    auto & si = ShapeInterpolation::singleton();
+    ShapeInterpolation::PlanarMask plane;
+    if (!si.planarMaskFor(static_cast<int>(viewportType), state->viewerState->currentPosition, plane)) {
+        return;
+    }
+
+    if (interpolationPreviewTex == nullptr) {
+        interpolationPreviewTex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+    }
+    const bool resized = plane.uSize != interpolationPreviewUSize || plane.vSize != interpolationPreviewVSize;
+    const auto key = static_cast<std::uint64_t>(plane.fixedCoord) * 4 + static_cast<std::uint64_t>(viewportType);
+    const bool stale = resized || key != interpolationPreviewKey || si.generation() != interpolationPreviewGen;
+    if (stale) {
+        if (resized) {
+            // RGBA8 rather than a single-channel format: the GL context is 2.0 compatibility
+            // (main.cpp), where GL_R8 is not available as an internal format
+            interpolationPreviewTex->destroy();
+            interpolationPreviewTex->setSize(plane.uSize, plane.vSize);
+            interpolationPreviewTex->setFormat(QOpenGLTexture::RGBA8_UNorm);
+            interpolationPreviewTex->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+            interpolationPreviewTex->setWrapMode(QOpenGLTexture::ClampToEdge);
+            interpolationPreviewTex->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt8);
+            interpolationPreviewUSize = plane.uSize;
+            interpolationPreviewVSize = plane.vSize;
+        }
+        constexpr std::array<std::uint8_t, 4> interpolatedColor{{38, 217, 242, 115}};// cyan, ~45% alpha
+        constexpr std::array<std::uint8_t, 4> keySliceColor{{255, 176, 32, 130}};// amber: painted, not inferred
+        interpolationPreviewRGBA.assign(plane.mask->size() * 4, 0);
+        for (std::size_t i = 0; i < plane.mask->size(); ++i) {
+            const auto value = (*plane.mask)[i];
+            if (value != 0) {
+                const auto & color = (plane.keySlice || value == 2) ? keySliceColor : interpolatedColor;
+                std::copy(std::begin(color), std::end(color), std::begin(interpolationPreviewRGBA) + 4 * i);
+            }
+        }
+        interpolationPreviewTex->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, interpolationPreviewRGBA.data());
+        interpolationPreviewKey = key;
+        interpolationPreviewGen = si.generation();
+    }
+
+    // corners of the mask bounding box, in dataset coordinates then in nanometres
+    const auto corner = [&](const int u, const int v){
+        Coordinate c;
+        axisSet(c, plane.fixedAxis, plane.fixedCoord);
+        axisSet(c, plane.uAxis, plane.uMin + u * plane.uStep);
+        axisSet(c, plane.vAxis, plane.vMin + v * plane.vStep);
+        return Dataset::current().scales[0].componentMul(c);
+    };
+    const std::vector<floatCoordinate> vertices{
+        corner(0, 0), corner(plane.uSize, 0), corner(plane.uSize, plane.vSize), corner(0, plane.vSize)
+    };
+    const std::vector<float> texCoords{0, 0, 1, 0, 1, 1, 0, 1};
+
+    glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    // Modulate rather than replace, so the overlay opacity keys (+/-) reach this too — it
+    // is drawn on top of the segmentation and would otherwise ignore them, which makes the
+    // key slices look pinned at full strength while everything under them fades.
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(1.f, 1.f, 1.f, Segmentation::singleton().alpha / 255.f);
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    interpolationPreviewTex->bind();
+    glVertexPointer(3, GL_FLOAT, 0, vertices.data());
+    glTexCoordPointer(2, GL_FLOAT, 0, texCoords.data());
+    glDrawArrays(GL_QUADS, 0, 4);
+    interpolationPreviewTex->release();
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glPopAttrib();
+}
+
 void ViewportOrtho::renderBrush(const Coordinate coord) {
     glPushMatrix();
     glLineWidth(2.0f);
@@ -1698,7 +1798,8 @@ void ViewportOrtho::renderBrush(const Coordinate coord) {
 
     };
     const auto objColor = seg.colorOfSelectedObject();
-    if (seg.brush.isInverse()) {
+    // red for an erase, whether that is Shift held down or background selected as the id
+    if (seg.brush.isInverse() || seg.paintingBackground()) {
         drawCursor(1.f, 0.f, 0.f);
     } else {
         drawCursor(std::get<0>(objColor)/255., std::get<1>(objColor)/255., std::get<2>(objColor)/255.);

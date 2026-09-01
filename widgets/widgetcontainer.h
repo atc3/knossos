@@ -30,6 +30,8 @@
 #include "preferenceswidget.h"
 #include "pythoninterpreterwidget.h"
 #include "pythonpropertywidget.h"
+#include "historywidget.h"
+#include "shapeinterpolationwidget.h"
 #include "snapshotwidget.h"
 #include "task/taskloginwidget.h"
 #include "task/taskmanagementwidget.h"
@@ -42,7 +44,7 @@ struct WidgetContainer {
     WidgetContainer(QWidget * parent)
         : aboutDialog(parent), annotationWidget(parent), datasetBrowser(parent), datasetLoadWidget(parent), layerDialogWidget(parent)
         , preferencesWidget(parent), pythonInterpreterWidget(parent), pythonPropertyWidget(parent)
-        , snapshotWidget(parent), taskManagementWidget(parent), zoomWidget(parent, &datasetLoadWidget)
+        , historyWidget(parent), shapeInterpolationWidget(parent), snapshotWidget(parent), taskManagementWidget(parent), zoomWidget(parent, &datasetLoadWidget)
     {
         QObject::connect(&datasetLoadWidget, &DatasetLoadWidget::datasetSwitchZoomDefaults, &zoomWidget, &ZoomWidget::zoomDefaultsClicked);
         QObject::connect(&preferencesWidget.viewportTab.addArbVPCheckBox, &QCheckBox::toggled, &snapshotWidget.vpArbRadio, &QRadioButton::setVisible);
@@ -56,6 +58,8 @@ struct WidgetContainer {
     PreferencesWidget preferencesWidget;
     PythonInterpreterWidget pythonInterpreterWidget;
     PythonPropertyWidget pythonPropertyWidget;
+    HistoryWidget historyWidget;
+    ShapeInterpolationWidget shapeInterpolationWidget;
     SnapshotWidget snapshotWidget;
     TaskManagementWidget taskManagementWidget;
     ZoomWidget zoomWidget;
@@ -68,12 +72,14 @@ struct WidgetContainer {
         preferencesWidget.setVisible(settings.value(PREFERENCES_WIDGET + '/' + VISIBLE, false).toBool());
         pythonInterpreterWidget.setVisible(settings.value(PYTHON_TERMINAL_WIDGET + '/' + VISIBLE, false).toBool());
         pythonPropertyWidget.setVisible(settings.value(PYTHON_PROPERTY_WIDGET + '/' + VISIBLE, false).toBool());
+        historyWidget.setVisible(settings.value(HISTORY_WIDGET + '/' + VISIBLE, false).toBool());
+        shapeInterpolationWidget.setVisible(settings.value(SHAPE_INTERPOLATION_WIDGET + '/' + VISIBLE, false).toBool());
         snapshotWidget.setVisible(settings.value(SNAPSHOT_WIDGET + '/' + VISIBLE, false).toBool());
         zoomWidget.setVisible(settings.value(ZOOM_WIDGET + '/' + VISIBLE, false).toBool());
     }
 
     void hideAll() {
-        for (QWidget * widget : QVector<QWidget*>{&aboutDialog, &annotationWidget, &datasetBrowser, &layerDialogWidget, &preferencesWidget, &pythonPropertyWidget, &pythonInterpreterWidget, &snapshotWidget, &taskManagementWidget, &zoomWidget}) {
+        for (QWidget * widget : QVector<QWidget*>{&aboutDialog, &annotationWidget, &datasetBrowser, &layerDialogWidget, &preferencesWidget, &pythonPropertyWidget, &pythonInterpreterWidget, &historyWidget, &shapeInterpolationWidget, &snapshotWidget, &taskManagementWidget, &zoomWidget}) {
             widget->hide();
         }
     }

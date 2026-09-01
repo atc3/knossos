@@ -21,7 +21,13 @@
         <file>resources/icons/edit-paste.png</file>
         <file>resources/icons/insert-text.png</file>
         <file>resources/icons/knossos.png</file>
+        <file>resources/icons/history.png</file>
+        <file>resources/icons/painttarget-overwrite.png</file>
+        <file>resources/icons/painttarget-nooverwrite.png</file>
+        <file>resources/icons/painttarget-gap.png</file>
         <file>resources/icons/layers.png</file>
+        <file>resources/icons/shapeinterpolation.png</file>
+        <file>resources/icons/viewportlayout.png</file>
         <file>resources/icons/logo.ico</file>
         <file>resources/icons/menubar/about.png</file>
         <file>resources/icons/menubar/annotation.png</file>

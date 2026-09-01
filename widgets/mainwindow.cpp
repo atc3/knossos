@@ -32,6 +32,9 @@
 #include "network.h"
 #include "scriptengine/scripting.h"
 #include "segmentation/cubeloader.h"
+#include "segmentation/floodfill.h"
+#include "segmentation/shapeinterpolation.h"
+#include "segmentation/undostack.h"
 #include "skeleton/swc.h"
 #include "skeleton/node.h"
 #include "skeleton/skeleton_dfs.h"
@@ -43,11 +46,13 @@
 #include "widgets/coordinateimportwidget.h"
 
 #include <QAction>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDesktopWidget>
@@ -60,6 +65,7 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLayout>
+#include <QInputDialog>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -128,7 +134,11 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
         const auto scale = Dataset::current().scales[0];
         const auto boundary = Dataset::current().scales[0].componentMul(Dataset::current().boundary);
         widgetContainer.annotationWidget.segmentationTab.updateBrushEditRange(0.5 * std::min({scale.x, scale.y, scale.z}), std::max({boundary.x, boundary.y, boundary.z}));
-        Segmentation::singleton().brush.setRadius(scale.x * 10);
+        // Pick up the brush size from last time rather than resetting it on every dataset
+        // load, which is what used to discard it. An annotation carrying its own radius
+        // overrides this, since loadXmlSkeleton runs after the dataset is in place.
+        const auto remembered = QSettings{}.value(SEGMENTATION_BRUSH_RADIUS, 0.0).toDouble();
+        Segmentation::singleton().brush.setRadius(remembered > 0 ? remembered : scale.x * 10);
         updateTitlebar();
     });
     QObject::connect(&widgetContainer.datasetLoadWidget, &DatasetLoadWidget::updateDatasetCompression,  this, &MainWindow::updateCompressionRatioDisplay);
@@ -137,6 +147,9 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     QObject::connect(&widgetContainer.snapshotWidget, &SnapshotWidget::snapshotRequest, [this](const SnapshotOptions & o) { viewport(o.vp)->takeSnapshot(o); });
 
     QObject::connect(&Annotation::singleton(), &Annotation::autoSaveSignal, [this](){ save(); });
+    // a different annotation is a different history
+    QObject::connect(&Annotation::singleton(), &Annotation::clearedAnnotation, [](){ UndoStack::singleton().clear(); });
+    QObject::connect(&Annotation::singleton(), &Annotation::clearedAnnotation, this, &MainWindow::refreshMagLockAction);
 
     createToolbars();
     createMenus();
@@ -148,6 +161,20 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
     statusBar()->setSizeGripEnabled(false);
     GUIModeLabel.setVisible(false);
     statusBar()->addWidget(&GUIModeLabel);
+    // Permanent readout of the interpolation chain, so the active plane and how many key
+    // slices are in it are never something you have to remember. addPermanentWidget, not
+    // addWidget: showMessage() hides every non-permanent widget for the length of the
+    // message, and this feature fires transient messages on every brush stroke — the two
+    // were fighting over the same strip. segmentStateLabel below is the same shape.
+    shapeInterpolationLabel.setVisible(false);
+    shapeInterpolationLabel.setMaximumWidth(520);// the permanent zone is shared, don’t crowd it out
+    statusBar()->addPermanentWidget(&shapeInterpolationLabel);
+    shapeInterpolationWarningTimer.setSingleShot(true);
+    QObject::connect(&shapeInterpolationWarningTimer, &QTimer::timeout, this, [this](){
+        shapeInterpolationWarning.clear();
+        updateShapeInterpolationLabel();
+    });
+    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::changed, this, &MainWindow::updateShapeInterpolationLabel);
     networkProgressBar.setVisible(false);
     networkProgressBar.setToolTip("Network progress");
     networkProgressBar.setTextVisible(false); // under windows percentage is shown next to progress bar (instead of on top of it) and is not visible on the dark status bar.
@@ -358,7 +385,14 @@ void MainWindow::createToolbars() {
     modeCombo.setModel(&workModeModel);
     modeCombo.setCurrentIndex(static_cast<int>(AnnotationMode::Mode_Tracing));
     basicToolbar.addWidget(&modeCombo);
-    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), [this](int index) { setWorkMode(workModeModel.at(index).first); });
+    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), [this](int index) {
+        const auto target = workModeModel.at(index).first;
+        if (target != AnnotationMode::Mode_ShapeInterpolation && !confirmLeavingShapeInterpolation()) {
+            modeCombo.setCurrentIndex(workModeModel.indexOf(static_cast<AnnotationMode>(static_cast<int>(Annotation::singleton().annotationMode))));// put it back
+            return;
+        }
+        setWorkMode(target);
+    });
     modeCombo.setToolTip("<b>Select a work mode:</b><br/>"
                          "<b>" + workModes[AnnotationMode::Mode_MergeTracing] + ":</b> Merge segmentation objects by tracing<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_Selection] + ":</b> Skeleton manipulation and segmentation selection<br/>"
@@ -366,12 +400,23 @@ void MainWindow::createToolbars() {
                          "<b>" + workModes[AnnotationMode::Mode_Paint] + ":</b> Segmentation by painting<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_OverPaint] + ":</b> Segmentation by painting only over existing segmentation<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_CellSegmentation] + ":</b>Convenience cell segmentation workflow<br/>"
+                         "<b>" + workModes[AnnotationMode::Mode_ShapeInterpolation] + ":</b> Paint a few slices and interpolate the shape between them<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_Tracing] + ":</b> Skeletonization on one tree<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_TracingAdvanced] + ":</b> Unrestricted skeletonization<br/>");
     basicToolbar.addSeparator();
     basicToolbar.addWidget(&currentPosSpins.copyButton);
     basicToolbar.addWidget(&currentPosSpins.pasteButton);
     QObject::connect(&currentPosSpins, &CoordinateSpins::coordinatesChanged, this, &MainWindow::coordinateEditingFinished);
+    basicToolbar.addSeparator();
+    subobjectIdLabelAction = basicToolbar.addWidget(&subobjectIdLabel);
+    subobjectIdAction = basicToolbar.addWidget(&subobjectIdEdit);
+    paintTargetButton = new QToolButton(this);
+    paintTargetButton->setPopupMode(QToolButton::InstantPopup);
+    paintTargetButton->setToolTip(tr("<b>What the brush may write over.</b><br/>Erasing is unaffected by any of these."));
+    paintTargetMenu = new QMenu(paintTargetButton);
+    paintTargetButton->setMenu(paintTargetMenu);
+    rebuildPaintTargetMenu();
+    paintTargetAction = basicToolbar.addWidget(paintTargetButton);
 
     basicToolbar.addWidget(&currentPosSpins.xSpin);
     basicToolbar.addWidget(&currentPosSpins.ySpin);
@@ -396,7 +441,9 @@ void MainWindow::createToolbars() {
     defaultToolbar.addSeparator();
     createToolToggleButton(widgetContainer.layerDialogWidget, ":/resources/icons/layers.png", "Layers");
     createToolToggleButton(widgetContainer.annotationWidget, ":/resources/icons/annotation.png", "Annotation");
+    createToolToggleButton(widgetContainer.historyWidget, ":/resources/icons/history.png", "History");
     createToolToggleButton(widgetContainer.zoomWidget, ":/resources/icons/zoom.png", "Zoom");
+    shapeInterpolationButton = createToolToggleButton(widgetContainer.shapeInterpolationWidget, ":/resources/icons/shapeinterpolation.png", "Shape Interpolation");
     createToolToggleButton(widgetContainer.snapshotWidget, ":/resources/icons/snapshot.png", "Snapshot");
     createToolToggleButton(widgetContainer.taskManagementWidget, ":/resources/icons/tasks-management.png", "Task Management");
     defaultToolbar.addSeparator();
@@ -404,10 +451,24 @@ void MainWindow::createToolbars() {
 
     defaultToolbar.addSeparator();
 
-    auto resetVPsButton = new QPushButton("Reset vp positions", this);
-    resetVPsButton->setToolTip("Reset viewport positions and sizes");
-    defaultToolbar.addWidget(resetVPsButton);
-    QObject::connect(resetVPsButton, &QPushButton::clicked, this, &MainWindow::defaultViewports);
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::acceptRequested, [this](){ shapeInterpolationAcceptAction->trigger(); });
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::discardRequested, [this](){ shapeInterpolationDiscardAction->trigger(); });
+    QObject::connect(&widgetContainer.shapeInterpolationWidget, &ShapeInterpolationWidget::jumpToDepthRequested, [](const int depth){
+        auto & si = ShapeInterpolation::singleton();
+        auto pos = state->viewerState->currentPosition;
+        axisSet(pos, si.normalAxis(), depth);
+        state->viewer->setPosition(pos, USERMOVE_DRILL);
+    });
+
+    viewportLayoutButton = new QToolButton(this);
+    viewportLayoutButton->setIcon(QIcon(":/resources/icons/viewportlayout.png"));
+    viewportLayoutButton->setToolTip(tr("Viewport arrangement — pick a preset, or save the current one"));
+    viewportLayoutButton->setPopupMode(QToolButton::InstantPopup);
+    viewportLayoutMenu = new QMenu(viewportLayoutButton);
+    viewportLayoutButton->setMenu(viewportLayoutMenu);
+    defaultToolbar.addWidget(viewportLayoutButton);
+    QObject::connect(&ViewportLayouts::singleton(), &ViewportLayouts::changed, this, &MainWindow::rebuildViewportLayoutMenu);
+    rebuildViewportLayoutMenu();
 
     defaultToolbar.addWidget(new QLabel(" Loader pending: "));
     loaderProgress = new QLabel();
@@ -540,7 +601,9 @@ void MainWindow::updateTodosLeft() {
 
 void MainWindow::updateTitlebar() {
     const auto & session = Annotation::singleton();
-    QString title = QString("%1 %2 • ").arg(qApp->applicationDisplayName()).arg(KREVISION);
+    const QString branch = QString::fromUtf8(KBRANCH);
+    QString title = QString("%1 %2%3 • ").arg(qApp->applicationDisplayName()).arg(KREVISION)
+                        .arg(branch.isEmpty() ? QString{} : QString(" [%1]").arg(branch));
     title.append(QString("%1 • ").arg(Dataset::current().experimentname));
     if (!session.annotationFilename.isEmpty()) {
         title.append(Annotation::singleton().annotationFilename);
@@ -615,6 +678,7 @@ void MainWindow::createMenus() {
     }
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/save-annotation.png"), tr("Save Annotation"), this, &MainWindow::saveSlot, QKeySequence::Save);
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/save-annotation-as.png"), tr("Save Annotation as …"), this, &MainWindow::saveAsSlotWrap, QKeySequence::SaveAs);
+    fileMenu.addAction(tr("Go To Annotations Folder"), this, &MainWindow::showAnnotationsFolder);
     fileMenu.addSeparator();
     fileMenu.addAction(QIcon(":/resources/icons/open-annotation.png"), "Import Coordinates", [this] {
         const auto filenames = QFileDialog::getOpenFileNames(this, tr("Import coordinate list"), QDir::homePath(), tr("Text files (*.txt *.csv *.tsv)"));
@@ -682,6 +746,9 @@ void MainWindow::createMenus() {
     newObjectAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New segmentation object"), this, [this]() {
         widgetContainer.annotationWidget.segmentationTab.userCreateObject();
     }, Qt::Key_C);
+    // N as well as C, matching merge tracing. The id comes from nextFreeSubobjectId(),
+    // so it clears the user's declared max id rather than just what happens to be loaded.
+    newObjectAction->setShortcuts({QKeySequence{Qt::Key_C}, QKeySequence{Qt::Key_N}});
     actionMenu.addSeparator();
     //cell mode
     cytoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell with cyoplasm"), this, [](){ Segmentation::singleton().cell(true); }, Qt::Key_1);
@@ -700,6 +767,208 @@ void MainWindow::createMenus() {
         []() { Segmentation::singleton().brush.setRadius(Segmentation::singleton().brush.getRadius() - 0.5 * Dataset::current().scales[0].x); }, Qt::SHIFT + Qt::Key_Minus);
 
     actionMenu.addSeparator();
+    undoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Undo segmentation edit"), this, [this]() {
+        UndoStack::singleton().undo(this);
+    }, QKeySequence::Undo);
+    redoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Redo segmentation edit"), this, [this]() {
+        UndoStack::singleton().redo(this);
+    }, QKeySequence::Redo);
+    QObject::connect(&UndoStack::singleton(), &UndoStack::changed, this, [this]() {
+        undoAction->setEnabled(UndoStack::singleton().canUndo());
+        redoAction->setEnabled(UndoStack::singleton().canRedo());
+    });
+    undoAction->setEnabled(false);
+    redoAction->setEnabled(false);
+
+    actionMenu.addSeparator();
+    /* Surfaces Annotation::magLock, which the brush and the fills have always honoured but
+     * which could previously only be set by hand-editing an annotation file — so painting
+     * at the wrong magnification just silently did nothing. */
+    magLockAction = actionMenu.addAction(tr("Lock Painting to Magnification"), [this]() {
+        auto & lock = Annotation::singleton().magLock;
+        if (magLockAction->isChecked()) {
+            lock = Dataset::datasets[Segmentation::singleton().layerId].magIndex;
+        } else {
+            lock.reset();
+        }
+        refreshMagLockAction();
+        statusBar()->showMessage(lock ? tr("Painting locked to magnification %1.").arg(magFromIndex(*lock))
+                                      : tr("Painting is no longer locked to a magnification."), 6000);
+    });
+    magLockAction->setCheckable(true);
+    refreshMagLockAction();
+
+    actionMenu.addSeparator();
+    // flood fill. Paintera uses F / Shift+F, but F steps a slice in KNOSSOS, so this sits
+    // on the neighbouring G. Not Ctrl+F: Qt maps Qt::CTRL to Command on macOS, so that
+    // binding would be Cmd+F there and a literal Ctrl+F would fall through to the viewport.
+    // The mouse gesture is middle click / Shift + middle click.
+    /*
+     * Aimed with the pointer, like the middle-click gesture it shares its code with.
+     *
+     * The crosshair is fixed at the centre of the viewport, so filling there meant moving
+     * the view onto the region first — one navigation per fill, for an operation whose
+     * whole point is picking out a particular blob. The pointer is already where the user
+     * is looking.
+     *
+     * Falls back to the crosshair when the pointer is over no orthogonal viewport at all —
+     * the 3D viewport, another window, off screen — since there is nothing to aim at then.
+     * Pointing at the arbitrary viewport is *not* a fallback: it is turned away with the
+     * usual "use one of the xy/xz/zy viewports", because quietly filling at the crosshair
+     * of some other viewport would put voxels somewhere nobody was looking. */
+    const auto fillUnderPointer = [this](const bool threeDimensional){
+        const auto globalPos = QCursor::pos();
+        /* widgetAt() first, because it respects stacking and viewports can be dragged on
+         * top of one another — a geometry scan would then answer with whichever one it
+         * happened to test first, not the one being looked at. The scan is the backup for
+         * when widgetAt() comes back with nothing useful, as it does over another
+         * application's window. */
+        ViewportOrtho * hovered{nullptr};
+        for (auto * w = QApplication::widgetAt(globalPos); w != nullptr && hovered == nullptr; w = w->parentWidget()) {
+            hovered = dynamic_cast<ViewportOrtho *>(w);
+        }
+        if (hovered == nullptr) {
+            forEachOrthoVPDo([&hovered, &globalPos](ViewportOrtho & orthoVP){
+                if (hovered == nullptr && orthoVP.isVisible() && orthoVP.rect().contains(orthoVP.mapFromGlobal(globalPos))) {
+                    hovered = &orthoVP;
+                }
+            });
+        }
+        if (hovered != nullptr) {
+            segmentation_flood_fill(getCoordinateFromOrthogonalClick(hovered->mapFromGlobal(globalPos), *hovered), *hovered, threeDimensional);
+            return;
+        }
+        auto * vp = state->viewer->window->viewportXY.get();
+        forEachOrthoVPDo([&vp](ViewportOrtho & orthoVP){
+            if (orthoVP.hasFocus()) {
+                vp = &orthoVP;
+            }
+        });
+        segmentation_flood_fill(state->viewerState->currentPosition, *vp, threeDimensional);
+    };
+    fill2dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("2D Fill at Pointer"), this, [fillUnderPointer]() { fillUnderPointer(false); }, Qt::Key_G);
+    fill3dAction = &addApplicationShortcut(actionMenu, QIcon(), tr("3D Fill at Pointer"), this, [fillUnderPointer]() { fillUnderPointer(true); }, Qt::SHIFT + Qt::Key_G);
+    for (auto * action : {fill2dAction, fill3dAction}) {
+        action->setToolTip(tr("Fills where the mouse is pointing, the same spot a middle click would. "
+                              "With the pointer outside the xy/xz/zy viewports it falls back to the crosshair."));
+    }
+    fillMayLoadAction = actionMenu.addAction(tr("Fill May Load More Blocks"), [this]() {
+        Segmentation::singleton().floodFillMayLoadCubes = fillMayLoadAction->isChecked();
+    });
+    fillMayLoadAction->setCheckable(true);
+    fillMayLoadAction->setChecked(Segmentation::singleton().floodFillMayLoadCubes);
+    fillMayLoadAction->setToolTip(tr("A fill normally stops at the edge of the blocks already in memory. With this on, a 2D fill "
+                                     "will pull the loader along and carry on — which moves the view and evicts what you were "
+                                     "looking at. 3D fills always stop at the boundary regardless."));
+    fillEdgeGuardAction = actionMenu.addAction(tr("Keep Fills Off the Dataset Edge"), [this]() {
+        Segmentation::singleton().floodFillAvoidsDatasetEdge = fillEdgeGuardAction->isChecked();
+    });
+    fillEdgeGuardAction->setCheckable(true);
+    fillEdgeGuardAction->setChecked(Segmentation::singleton().floodFillAvoidsDatasetEdge);
+    fillEdgeGuardAction->setToolTip(tr("Datasets often carry a one-voxel rind of background at their boundary, and because it "
+                                       "wraps the whole volume a fill that reaches it escapes the object and runs to the safety "
+                                       "limit. With this on the outermost voxel is excluded, unless you seed the fill there "
+                                       "yourself."));
+
+    /* Selecting the background as the paint id, so the brush and the fills erase.
+     *
+     * Background is not an object and so cannot be selected the way a label is, which left
+     * erasing reachable only by holding Shift — no use for "fill this chunk away", where
+     * the gesture is a keystroke rather than a drag. `0` sits with the other paint ids and
+     * mirrors typing 0 into the toolbar field. */
+    paintBackgroundAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Paint Background (Erase)"), this, [this]() {
+        auto & seg = Segmentation::singleton();
+        seg.setPaintingBackground(paintBackgroundAction->isChecked());
+        statusBar()->showMessage(seg.paintingBackground()
+            ? tr("Painting background — the brush and the fills now erase. Click a label, or type an id, to paint again.")
+            : tr("Painting labels again."), 8000);
+        state->viewer->run();
+    }, Qt::Key_0);
+    paintBackgroundAction->setCheckable(true);
+    paintBackgroundAction->setToolTip(tr("Paint and fill with id 0 instead of a label, rubbing out whatever is touched. "
+                                         "Same as typing 0 into the id box, or clicking unlabelled data."));
+    QObject::connect(&Segmentation::singleton(), &Segmentation::paintingBackgroundChanged, this, [this](const bool on) {
+        paintBackgroundAction->setChecked(on);// it is also set by the id field and by clicking
+    });
+
+    actionMenu.addSeparator();
+    // shape interpolation. Bindings mirror Paintera's so the muscle memory carries over;
+    // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
+    // yielded while a painting mode is active (see setWorkMode).
+    shapeInterpolationToggleModeAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Toggle Shape Interpolation"), this, [this]() {
+        if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+            if (confirmLeavingShapeInterpolation()) {
+                setWorkMode(AnnotationMode::Mode_Paint);
+            }
+        } else {
+            setWorkMode(AnnotationMode::Mode_ShapeInterpolation);
+        }
+    }, Qt::Key_S);
+    shapeInterpolationAcceptAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Accept Interpolated Shape"), this, [this]() {
+        if (ShapeInterpolation::singleton().sliceCount() < 2) {
+            return;// nothing to accept; stay quiet rather than nagging on a stray Return
+        }
+        // Return is an application shortcut, so it would otherwise steal the key from the
+        // coordinate spin boxes and any other line edit while a chain is running
+        if (qobject_cast<QAbstractSpinBox *>(QApplication::focusWidget()) != nullptr
+                || qobject_cast<QLineEdit *>(QApplication::focusWidget()) != nullptr) {
+            return;
+        }
+        const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().commit(this); });
+        statusBar()->showMessage(result.message, 8000);
+        if (!result.cancelled) {
+            // also on a partial write: the voxels are committed either way, so leaving the
+            // preview up would show a stale overlay on top of real segmentation
+            ShapeInterpolation::singleton().reset();
+        }
+        state->viewer->run();
+    }, Qt::Key_Return);
+    shapeInterpolationPreviewAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Toggle Interpolation Preview"), this, [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        si.setPreviewEnabled(!si.previewEnabled());
+        shapeInterpolationPreviewAction->setChecked(si.previewEnabled());
+        state->viewer->run();
+    }, Qt::CTRL + Qt::Key_P);
+    shapeInterpolationPreviewAction->setCheckable(true);
+    shapeInterpolationPreviewAction->setChecked(true);
+    shapeInterpolationAlignAction = actionMenu.addAction(tr("Align Slices on Their Centroids"), [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        si.setCentroidAlignment(shapeInterpolationAlignAction->isChecked());
+        state->viewer->run();
+    });
+    shapeInterpolationAlignAction->setCheckable(true);
+    // last session's choice; an annotation carrying its own value overrides it on load
+    ShapeInterpolation::singleton().setCentroidAlignment(
+        QSettings{}.value(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment()).toBool());
+    shapeInterpolationAlignAction->setChecked(ShapeInterpolation::singleton().centroidAlignment());
+    shapeInterpolationAlignAction->setToolTip(tr("Shift the two key slices onto a common centre before interpolating. "
+                                                 "Without this a structure that drifts sideways between slices pinches, and "
+                                                 "disappears entirely once the two outlines no longer overlap."));
+    // the setting is stored per annotation, so loading one moves the tick without going
+    // through this action
+    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::centroidAlignmentChanged,
+                     shapeInterpolationAlignAction, &QAction::setChecked);
+    shapeInterpolationDiscardAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), tr("Discard Painted Slices"), [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        if (si.sliceCount() == 0) {
+            return;
+        }
+        QMessageBox prompt{this};
+        prompt.setIcon(QMessageBox::Question);
+        prompt.setText(tr("Erase the %n painted key slice(s) of this chain?", "", static_cast<int>(si.sliceCount())));
+        prompt.setInformativeText(tr("This cannot be undone — KNOSSOS keeps no undo history for segmentation."));
+        auto * confirm = prompt.addButton(tr("Erase"), QMessageBox::AcceptRole);
+        prompt.addButton(tr("Cancel"), QMessageBox::RejectRole);
+        prompt.exec();
+        if (prompt.clickedButton() == confirm) {
+            const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().eraseSlices(this); });
+            statusBar()->showMessage(result.message, 8000);
+            ShapeInterpolation::singleton().reset();
+            state->viewer->run();
+        }
+    });
+
+    actionMenu.addSeparator();
     clearMergelistAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), "Clear Merge List", &Segmentation::singleton(), &Segmentation::clear);
     //proof reading mode
     modeSwitchSeparator = actionMenu.addSeparator();
@@ -713,7 +982,7 @@ void MainWindow::createMenus() {
 
     auto viewMenu = menuBar()->addMenu("&Navigation");
 
-    addApplicationShortcut(*viewMenu, QIcon(), tr("Jump to Active Node"), &Skeletonizer::singleton(), [this]() {
+    auto & jumpToActiveNode = addApplicationShortcut(*viewMenu, QIcon(), tr("Jump to Active Node"), &Skeletonizer::singleton(), [this]() {
         boost::optional<floatCoordinate> pos;
         auto meshPriority = !state->skeletonState->jumpToSkeletonNext;
         const auto * const activeTree = Skeletonizer::singleton().skeletonState.activeTree;
@@ -738,9 +1007,10 @@ void MainWindow::createMenus() {
         }
         viewport3D->refocus();
     }, Qt::Key_S);
+    jumpToActiveNodeAction = &jumpToActiveNode;
     addApplicationShortcut(*viewMenu, QIcon(), tr("Forward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Forward); }, Qt::Key_X);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Backward-traverse Tree"), &Skeletonizer::singleton(), []() { Skeletonizer::singleton().goToNode(NodeGenerator::Direction::Backward); }, Qt::SHIFT + Qt::Key_X);
-    addApplicationShortcut(*viewMenu, QIcon(), tr("Next Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(true);}, Qt::Key_N);
+    nextNodeInTableAction = &addApplicationShortcut(*viewMenu, QIcon(), tr("Next Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(true);}, Qt::Key_N);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(false);}, Qt::Key_P);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Next Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(true);}, Qt::Key_Z);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(false);}, Qt::SHIFT + Qt::Key_Z);
@@ -949,6 +1219,22 @@ bool MainWindow::openFileDispatch(QStringList fileNames, const bool mergeAll, co
         return false;
     }
     Skeletonizer::singleton().resetData();
+    refreshMagLockAction();// annotation.xml may carry a brush_lock
+
+    if (Annotation::singleton().extraFiles.contains(VIEWPORT_LAYOUTS_FILE)) {
+        QStringList skipped;
+        const auto added = ViewportLayouts::singleton().importJson(Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE], skipped);
+        if (added != 0 || !skipped.isEmpty()) {
+            QStringList parts;
+            if (added != 0) {
+                parts << tr("%n viewport layout(s) imported from the annotation", "", added);
+            }
+            if (!skipped.isEmpty()) {// never redefine an arrangement the user already has
+                parts << tr("kept your own: %1").arg(skipped.join(", "));
+            }
+            statusBar()->showMessage(parts.join(" · "), 8000);
+        }
+    }
 
     Annotation::singleton().setUnsavedChanges(multipleFiles || mergeSkeleton || mergeSegmentation);// merge implies changes
     if (!mergeSkeleton && !mergeSegmentation) { // if an annotation was already open don't change its filename, otherwise…
@@ -1008,6 +1294,9 @@ void MainWindow::openSlot() {
 }
 
 void MainWindow::saveSlot() {
+    if (!settleShapeInterpolationBeforeSaving()) {
+        return;
+    }
     auto annotationFilename = Annotation::singleton().annotationFilename;
     if (annotationFilename.isEmpty()) {
         saveAsSlot();
@@ -1017,7 +1306,54 @@ void MainWindow::saveSlot() {
 }
 
 void MainWindow::saveAsSlotWrap() {
+    if (!settleShapeInterpolationBeforeSaving()) {
+        return;
+    }
     saveAsSlot(false);
+}
+
+/* An interpolation in progress is not in the annotation.
+ *
+ * Key slices are painted voxels and go to disk with everything else, but the volume
+ * *between* them exists only as a preview until the chain is accepted — so a save taken
+ * mid-chain writes an annotation with the ends of an object and nothing in the middle, and
+ * looks complete when it is reopened. Offer to write it first.
+ *
+ * Deliberately hung off the explicit save paths rather than save() itself: autosave also
+ * lands in save(), and a modal question arriving on a timer, while the user is painting, is
+ * worse than the problem it solves. Autosaves keep writing key slices only, and the next
+ * manual save asks. */
+bool MainWindow::settleShapeInterpolationBeforeSaving() {
+    auto & si = ShapeInterpolation::singleton();
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation) || si.sliceCount() < 2) {
+        return true;// nothing interpolated, so nothing the save would miss
+    }
+    QMessageBox prompt{this};
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setText(tr("Accept the interpolated shape before saving?"));
+    prompt.setInformativeText(tr("The chain has %n key slice(s). The slices themselves are saved either way, but the "
+                                 "interpolated volume between them is only a preview until it is accepted — save without "
+                                 "accepting and the annotation holds the key slices alone.",
+                                 "", static_cast<int>(si.sliceCount())));
+    auto * accept = prompt.addButton(tr("Accept, then save"), QMessageBox::AcceptRole);
+    auto * plain = prompt.addButton(tr("Save without accepting"), QMessageBox::DestructiveRole);
+    prompt.addButton(tr("Cancel"), QMessageBox::RejectRole);
+    prompt.setDefaultButton(accept);
+    state->viewer->suspend([&prompt]{ return prompt.exec(); });
+    if (prompt.clickedButton() == plain) {
+        return true;
+    }
+    if (prompt.clickedButton() != accept) {
+        return false;
+    }
+    const auto result = state->viewer->suspend([this]{ return ShapeInterpolation::singleton().commit(this); });
+    statusBar()->showMessage(result.message, 8000);
+    if (result.cancelled) {
+        return false;// they backed out of the write; don't then save behind their back
+    }
+    si.reset();
+    state->viewer->run();
+    return true;
 }
 
 void MainWindow::saveAsSlot(const bool onlySelectedTrees, const bool saveTime, const bool saveDatasetPath) {
@@ -1071,6 +1407,14 @@ try {
         }
     }
     emit aboutToSave();
+    // Ride along in the .k.zip via extraFiles, which round trips unrecognised entries
+    // verbatim — so saved arrangements travel with the annotation.
+    const auto layoutsJson = ViewportLayouts::singleton().userLayoutsJson();
+    if (ViewportLayouts::singleton().userLayouts().empty()) {
+        Annotation::singleton().extraFiles.remove(VIEWPORT_LAYOUTS_FILE);
+    } else {
+        Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE] = layoutsJson;
+    }
     annotationFileSave(filename, onlySelectedTrees, saveTime, saveDatasetPath);
     Annotation::singleton().annotationFilename = filename;
     updateRecentFile(filename);
@@ -1131,18 +1475,50 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
         setSegmentState(SegmentState::On);
     }
     newTreeAction->setVisible(trees);
-    newObjectAction->setVisible(mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint));
+    const bool painting = mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint);
+    newObjectAction->setVisible(painting);
+    // `N` is "new object" while painting; everywhere else it stays Next Node in Table
+    nextNodeInTableAction->setEnabled(!painting);
     pushBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
     popBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
     createSynapse->setVisible(mode.testFlag(AnnotationMode::Mode_TracingAdvanced));
     swapSynapticNodes->setVisible((mode.testFlag(AnnotationMode::Mode_TracingAdvanced)));
     clearSkeletonAction->setVisible(skeleton && !mode.testFlag(AnnotationMode::Mode_MergeTracing));
     generateLUTAction->setVisible(segmentation);
+    for (auto * action : {subobjectIdLabelAction, subobjectIdAction, paintTargetAction}) {
+        action->setVisible(segmentation);
+    }
+    // no brush, no paint id to point at the background
+    paintBackgroundAction->setVisible(mode.testFlag(AnnotationMode::Brush));
+    paintBackgroundAction->setEnabled(mode.testFlag(AnnotationMode::Brush));
+    paintBackgroundAction->setChecked(Segmentation::singleton().paintingBackground());
+    subobjectIdEdit.refresh();
     increaseOpacityAction->setVisible(segmentation);
     decreaseOpacityAction->setVisible(segmentation);
     enlargeBrushAction->setVisible(mode.testFlag(AnnotationMode::Brush));
     shrinkBrushAction->setVisible(mode.testFlag(AnnotationMode::Brush));
     // cell seg
+    const bool shapeInterpolation = mode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+    const bool fills = mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint);
+    for (auto * action : {fill2dAction, fill3dAction, fillMayLoadAction}) {
+        action->setVisible(fills);
+        action->setEnabled(fills);
+    }
+    for (auto * action : {shapeInterpolationAcceptAction, shapeInterpolationPreviewAction, shapeInterpolationAlignAction, shapeInterpolationDiscardAction}) {
+        action->setVisible(shapeInterpolation);
+        action->setEnabled(shapeInterpolation);// Return/Ctrl+P must not fire in other modes
+    }
+    shapeInterpolationButton->setVisible(shapeInterpolation);
+    if (!shapeInterpolation) {
+        widgetContainer.shapeInterpolationWidget.hide();
+    }
+    updateShapeInterpolationLabel();
+    // `S` toggles shape interpolation only from the two painting modes it switches between;
+    // everywhere else it stays Jump to Active Node
+    const bool paintish = shapeInterpolation || mode == AnnotationMode::Mode_Paint;
+    shapeInterpolationToggleModeAction->setVisible(paintish);
+    shapeInterpolationToggleModeAction->setEnabled(paintish);
+    jumpToActiveNodeAction->setEnabled(!paintish);
     cytoAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
     plusNucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
     nucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
@@ -1156,6 +1532,9 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
         Skeletonizer::singleton().selectObjectForNode(*state->skeletonState->activeNode);
     }
 
+    if (!mode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+        ShapeInterpolation::singleton().reset();// leaving the mode drops any in-progress slice chain
+    }
     cheatsheet.load(workMode);
 }
 
@@ -1336,6 +1715,10 @@ void MainWindow::saveSettings() {
     widgetContainer.pythonInterpreterWidget.saveSettings();
     widgetContainer.pythonPropertyWidget.saveSettings();
     widgetContainer.snapshotWidget.saveSettings();
+    ViewportLayouts::singleton().saveSettings();
+    settings.setValue(SEGMENTATION_BRUSH_RADIUS, Segmentation::singleton().brush.getRadius());
+    settings.setValue(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment());
+    settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();
     widgetContainer.zoomWidget.saveSettings();
 }
@@ -1379,9 +1762,24 @@ void MainWindow::loadSettings() {
     widgetContainer.snapshotWidget.loadSettings();
     widgetContainer.zoomWidget.loadSettings();
 
+    // `knossos exit` is the headless smoke test — it starts up and quits. Don't steal
+    // focus for it: it gets run repeatedly during development, and each run yanking the
+    // window in front of whatever you were typing into is its own small disaster.
+    const bool smokeTest = qApp->arguments().contains("exit");
+    if (smokeTest) {
+        setAttribute(Qt::WA_ShowWithoutActivating);
+    }
     show();
-    activateWindow();// prevent mainwin in background in gnome when other widgets are also visible
+    if (!smokeTest) {
+        activateWindow();// prevent mainwin in background in gnome when other widgets are also visible
+    }
     state->viewer->loadSettings();// size vps after show() for proper maximized space
+    ViewportLayouts::singleton().loadSettings();
+    // applied after show(), so the central widget already has its final size
+    const auto restoredLayout = settings.value(VIEWPORT_LAYOUTS + '/' + "active").toString();
+    if (!restoredLayout.isEmpty() && ViewportLayouts::singleton().find(restoredLayout) != nullptr) {
+        applyViewportLayout(restoredLayout);
+    }
     if (Annotation::singleton().guiMode == GUIMode::ProofReading) {
         setProofReadingUI(true);// this breaks restoring segmentation work modes
     }
@@ -1431,12 +1829,24 @@ void MainWindow::resizeEvent(QResizeEvent *) {
     if(state->viewerState->defaultVPSizeAndPos) {
         // don't resize viewports when user positioned and resized them manually
         adjustViewports();
-    } else {//ensure viewports fit the window
-        forEachVPDo([](ViewportBase & vp) {
-            vp.posAdapt();
-            vp.sizeAdapt();
-        });
+        return;
     }
+    if (!activeViewportLayout.isEmpty()) {
+        const auto * layout = ViewportLayouts::singleton().find(activeViewportLayout);
+        // Re-apply so the arrangement keeps its proportions — but only while it still
+        // matches, so that dragging a viewport by hand quietly drops out of the preset
+        // instead of having the next window resize undo the change.
+        if (layout != nullptr && !layout->stockArrangement && viewportsMatchLayout(*layout)) {
+            applyViewportLayout(activeViewportLayout);
+            return;
+        }
+        activeViewportLayout.clear();
+        rebuildViewportLayoutMenu();
+    }
+    forEachVPDo([](ViewportBase & vp) {//ensure viewports fit the window
+        vp.posAdapt();
+        vp.sizeAdapt();
+    });
 }
 
 void MainWindow::dropEvent(QDropEvent *event) {
@@ -1476,6 +1886,141 @@ void MainWindow::dragEnterEvent(QDragEnterEvent * event) {
 void MainWindow::defaultViewports() {
     state->viewerState->defaultVPSizeAndPos = true;
     adjustViewports();
+}
+
+void MainWindow::applyViewportLayout(const QString & name) {
+    const auto * layout = ViewportLayouts::singleton().find(name);
+    if (layout == nullptr) {
+        return;
+    }
+    activeViewportLayout = name;
+    if (layout->stockArrangement) {
+        defaultViewports();
+        rebuildViewportLayoutMenu();
+        return;
+    }
+    const auto unit = layoutUnit(layout->placements, layout->canvas, centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    if (unit <= 0) {
+        return;
+    }
+    state->viewerState->defaultVPSizeAndPos = false;
+    state->viewer->setDefaultVPSizeAndPos(false);
+    forEachVPDo([layout, unit](ViewportBase & vp) {
+        const auto placement = layout->placements.find(vp.viewportType);
+        const bool shown = placement != std::end(layout->placements)
+                && (vp.viewportType != VIEWPORT_ARBITRARY || state->viewerState->enableArbVP);
+        if (!shown) {
+            vp.setHidden(true);
+            return;
+        }
+        if (!vp.isDocked) {
+            vp.setDock(true);
+        }
+        const auto box = placementGeometry(placement->second, unit, DEFAULT_VP_MARGIN);
+        vp.setGeometry(box.x, box.y, box.side, box.side);
+        vp.show();
+    });
+    rebuildViewportLayoutMenu();
+}
+
+bool MainWindow::viewportsMatchLayout(const ViewportLayout & layout) {
+    const auto unit = layoutUnit(layout.placements, layout.canvas, centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    if (unit <= 0) {
+        return false;
+    }
+    bool matches{true};
+    forEachVPDo([&layout, unit, &matches](ViewportBase & vp) {
+        const auto placement = layout.placements.find(vp.viewportType);
+        const bool shouldShow = placement != std::end(layout.placements)
+                && (vp.viewportType != VIEWPORT_ARBITRARY || state->viewerState->enableArbVP);
+        if (!shouldShow) {
+            matches = matches && vp.isHidden();
+            return;
+        }
+        const auto expected = placementGeometry(placement->second, unit, DEFAULT_VP_MARGIN);
+        constexpr int SLACK = 2;// rounding, not user intent
+        matches = matches && !vp.isHidden() && vp.isDocked
+                && std::abs(vp.x() - expected.x) <= SLACK && std::abs(vp.y() - expected.y) <= SLACK
+                && std::abs(vp.width() - expected.side) <= SLACK;
+    });
+    return matches;
+}
+
+ViewportLayout MainWindow::captureViewportLayout(const QString & name) {
+    ViewportLayout layout;
+    layout.name = name;
+    // normalise against the height, matching how layoutUnit() reads them back
+    const auto unit = std::max(1, centralWidget()->height() - 2 * DEFAULT_VP_MARGIN);
+    layout.canvas = captureCanvas(centralWidget()->width(), centralWidget()->height(), DEFAULT_VP_MARGIN);
+    forEachVPDo([&layout, unit](ViewportBase & vp) {
+        if (vp.isHidden() || !vp.isDocked) {
+            return;// floating and hidden viewports are not part of an arrangement
+        }
+        layout.placements[vp.viewportType] = capturePlacement(vp.x(), vp.y(), vp.width(), unit, DEFAULT_VP_MARGIN);
+    });
+    return layout;
+}
+
+void MainWindow::saveCurrentViewportLayout() {
+    auto & layouts = ViewportLayouts::singleton();
+    bool ok{false};
+    const auto name = QInputDialog::getText(this, tr("Save viewport layout"), tr("Name:"), QLineEdit::Normal, QString{}, &ok).trimmed();
+    if (!ok || name.isEmpty()) {
+        return;
+    }
+    const auto * existing = layouts.find(name);
+    if (existing != nullptr && existing->builtin) {
+        QMessageBox::warning(this, tr("Save viewport layout"), tr("“%1” is a built-in layout. Pick another name.").arg(name));
+        return;
+    }
+    if (existing != nullptr && QMessageBox::question(this, tr("Save viewport layout"), tr("Replace the existing layout “%1”?").arg(name)) != QMessageBox::Yes) {
+        return;
+    }
+    const auto layout = captureViewportLayout(name);
+    if (layout.placements.empty()) {
+        QMessageBox::warning(this, tr("Save viewport layout"), tr("No docked viewports to save."));
+        return;
+    }
+    layouts.addOrReplaceUser(layout);
+    activeViewportLayout = name;
+    rebuildViewportLayoutMenu();
+}
+
+void MainWindow::rebuildViewportLayoutMenu() {
+    if (viewportLayoutMenu == nullptr) {
+        return;
+    }
+    viewportLayoutMenu->clear();
+    auto & layouts = ViewportLayouts::singleton();
+    const auto addEntry = [this](QMenu & menu, const ViewportLayout & layout){
+        auto * action = menu.addAction(layout.name, [this, name = layout.name](){ applyViewportLayout(name); });
+        action->setCheckable(true);
+        action->setChecked(layout.name == activeViewportLayout);
+    };
+    for (const auto & layout : layouts.builtinLayouts()) {
+        addEntry(*viewportLayoutMenu, layout);
+    }
+    if (!layouts.userLayouts().empty()) {
+        viewportLayoutMenu->addSeparator();
+        for (const auto & layout : layouts.userLayouts()) {
+            addEntry(*viewportLayoutMenu, layout);
+        }
+    }
+    viewportLayoutMenu->addSeparator();
+    viewportLayoutMenu->addAction(tr("Save current layout…"), this, &MainWindow::saveCurrentViewportLayout);
+    if (!layouts.userLayouts().empty()) {
+        auto * removeMenu = viewportLayoutMenu->addMenu(tr("Delete saved layout"));
+        for (const auto & layout : layouts.userLayouts()) {
+            removeMenu->addAction(layout.name, [this, name = layout.name](){
+                if (QMessageBox::question(this, tr("Delete viewport layout"), tr("Delete “%1”?").arg(name)) == QMessageBox::Yes) {
+                    ViewportLayouts::singleton().removeUser(name);
+                    if (activeViewportLayout == name) {
+                        activeViewportLayout.clear();
+                    }
+                }
+            });
+        }
+    }
 }
 
 void MainWindow::adjustViewports() {
@@ -1667,4 +2212,115 @@ void MainWindow::pythonPluginMgrSlot() {
 
 void MainWindow::updateCompressionRatioDisplay() {
     compressionToggleAction->setText(tr("Toggle dataset compression: %1 ").arg(Dataset::current().compressionString()));
+}
+
+void MainWindow::updateShapeInterpolationLabel() {
+    const bool show = Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation);
+    shapeInterpolationLabel.setVisible(show);
+    if (!show) {
+        return;
+    }
+    const auto summary = ShapeInterpolation::singleton().summary();
+    const auto warning = !shapeInterpolationWarning.isEmpty();
+    const auto & text = warning ? shapeInterpolationWarning : summary;
+    shapeInterpolationLabel.setStyleSheet(warning
+        ? QStringLiteral("QLabel { color: palette(bright-text); background: #b03030; padding: 0 4px; }")
+        : QString{});
+    // the label is width-capped so it can share the permanent zone; elide rather than
+    // letting Qt clip mid-word, and keep the whole thing on the tooltip
+    const auto available = shapeInterpolationLabel.maximumWidth() - 12;
+    shapeInterpolationLabel.setText(shapeInterpolationLabel.fontMetrics().elidedText(text, Qt::ElideRight, available));
+    shapeInterpolationLabel.setToolTip(warning ? text + "\n" + summary : QString{});
+}
+
+/* Interpolation warnings go into the chain label rather than through showMessage(), which
+ * would be hidden behind the very readout it is trying to talk about. */
+void MainWindow::warnShapeInterpolation(const QString & message) {
+    shapeInterpolationWarning = message;
+    updateShapeInterpolationLabel();
+    shapeInterpolationWarningTimer.start(6000);
+}
+
+/* Leaving the mode throws the chain away, and both routes out of it — the work-mode combo
+ * and the S shortcut — are easy to hit by accident. Confirm only when there is something
+ * to lose; the painted voxels survive regardless, it is the chain that does not.
+ *
+ * A single adopted slice is nothing to lose. There is no interpolation with one slice, and
+ * a slice that has only ever been clicked into the chain is one click away from being
+ * clicked back in — so asking about it is a prompt whose only honest answer is "yes". Once
+ * anything has been painted, filled, baked or deleted, the chain has state that a click
+ * will not reproduce, and the prompt earns its place. */
+bool MainWindow::confirmLeavingShapeInterpolation() {
+    auto & si = ShapeInterpolation::singleton();
+    if (!Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation) || si.sliceCount() == 0) {
+        return true;
+    }
+    if (si.sliceCount() == 1 && !si.edited()) {
+        return true;
+    }
+    QMessageBox prompt{this};
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setText(tr("Leave shape interpolation?"));
+    prompt.setInformativeText(tr("The chain has %n key slice(s) and will be discarded. The painted voxels are kept — only the chain and its interpolations go. Accept it first (Enter) if you want the interpolated volume written.", "", static_cast<int>(si.sliceCount())));
+    auto * confirm = prompt.addButton(tr("Discard chain"), QMessageBox::AcceptRole);
+    prompt.addButton(tr("Stay"), QMessageBox::RejectRole);
+    state->viewer->suspend([&prompt]{ return prompt.exec(); });
+    return prompt.clickedButton() == confirm;
+}
+
+void MainWindow::rebuildPaintTargetMenu() {
+    using Target = Segmentation::PaintTarget;
+    struct Named { Target target; QString label; QString hint; QString icon; };
+    // the icon differs per mode, so which one is active is still visible on an icon-only
+    // button: the brush covering the label, stopping at it, or stopping a voxel short
+    const std::array<Named, 3> options{{
+        {Target::Anything, tr("overwrite"), tr("Replace whatever is under the brush."),
+         QStringLiteral(":/resources/icons/painttarget-overwrite.png")},
+        {Target::OnlyBackground, tr("no overwrite"), tr("Paint only into unlabelled voxels; other objects are left intact."),
+         QStringLiteral(":/resources/icons/painttarget-nooverwrite.png")},
+        {Target::BackgroundWithGap, tr("no overwrite + 1 voxel boundary"),
+         tr("As above, and refuse any voxel touching another label — including diagonally. "
+            "Every object keeps a one-voxel background boundary."),
+         QStringLiteral(":/resources/icons/painttarget-gap.png")},
+    }};
+
+    paintTargetMenu->clear();
+    const auto current = Segmentation::singleton().paintTarget;
+    for (const auto & option : options) {
+        auto * action = paintTargetMenu->addAction(QIcon(option.icon), option.label, [this, target = option.target](){
+            Segmentation::singleton().paintTarget = target;
+            rebuildPaintTargetMenu();
+        });
+        action->setCheckable(true);
+        action->setChecked(option.target == current);
+        action->setToolTip(option.hint);
+        if (option.target == current) {
+            paintTargetButton->setIcon(QIcon(option.icon));
+            paintTargetButton->setToolTip(tr("<b>What the brush may write over: %1.</b><br/>%2<br/>Erasing is unaffected.")
+                                              .arg(option.label).arg(option.hint));
+        }
+    }
+}
+
+/* Opens the folder the current annotation lives in, or the default one autosave writes to
+ * when nothing has been saved yet — which is buried under the platform's data location and
+ * is not somewhere anyone would find by hand. Creates it if autosave has not run yet, so
+ * the entry does nothing surprising on a fresh install. */
+void MainWindow::showAnnotationsFolder() {
+    const auto & filename = Annotation::singleton().annotationFilename;
+    const auto folder = filename.isEmpty() ? QFileInfo(annotationFileDefaultPath()).absolutePath()
+                                           : QFileInfo(filename).absolutePath();
+    QDir{}.mkpath(folder);
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(folder))) {
+        QMessageBox::warning(this, tr("Go To Annotations Folder"), tr("Could not open %1.").arg(folder));
+    }
+}
+
+void MainWindow::refreshMagLockAction() {
+    const auto & lock = Annotation::singleton().magLock;
+    magLockAction->setChecked(lock.has_value());
+    magLockAction->setText(lock ? tr("Painting Locked to Magnification %1").arg(magFromIndex(*lock))
+                                : tr("Lock Painting to Magnification"));
+    magLockAction->setToolTip(tr("Refuse brush strokes and fills at any other magnification. "
+                                 "Stored with the annotation, so it survives a reload."));
 }

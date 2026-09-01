@@ -39,6 +39,7 @@
 #include <limits>
 #include <random>
 #include <tuple>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -61,6 +62,7 @@ Q_OBJECT
     friend class CategoryModel;
     friend class SegmentationView;
     friend class SegmentationProxy;
+    friend class UndoStack;// snapshots and restores the object graph wholesale
 
     class Object;
     class SubObject {
@@ -68,6 +70,7 @@ Q_OBJECT
         friend void verticalSplittingPlane(const Coordinate & seed);
         friend class SegmentationObjectModel;
         friend class Segmentation;
+        friend class UndoStack;// saves and restores the id watermark
         static inline uint64_t highestId{0};
         std::vector<uint64_t> objects;
         std::size_t selectedObjectsCount = 0;
@@ -101,6 +104,7 @@ Q_OBJECT
         friend class SegmentationView;
         friend class SegmentationProxy;
         friend class Segmentation;
+        friend class UndoStack;// saves and restores the id watermarks
 
         static inline std::uint64_t highestId{0};
         static inline std::uint64_t highestIndex{std::numeric_limits<std::uint64_t>::max()};
@@ -131,6 +135,20 @@ Q_OBJECT
     const QSet<QString> prefixed_categories = {"", "cell", "cytoplasm", "ecs", "mito", "myelin", "neuron", "nucleus", "synapse"};
     QSet<QString> categories = prefixed_categories;
     uint64_t backgroundId = 0;
+    /* Whether the brush and the fills write the background id — i.e. erase — with nothing
+     * held down, which is how "background" is selected as the thing being painted.
+     *
+     * Distinct from brush.inverse, KNOSSOS's Shift-to-erase, because that flag lives
+     * exactly as long as Shift is down (it is cleared on key release and on focus loss)
+     * and so cannot express a standing choice. Mutually exclusive with an object
+     * selection: arming it clears the selection, and selecting an object clears it. */
+    bool paintsBackground{false};
+    // highest subobject id known to exist in the data, including parts never loaded
+    std::uint64_t maxId = 0;
+    /* Bumped whenever the object graph changes. Undo uses it to skip serialising the
+     * mergelist for operations that only moved voxels — which is most of them, and the
+     * mergelist is megabytes of text on a large annotation. */
+    std::uint64_t graphRevision = 0;
     uint64_t hovered_subobject_id = 0;
     // Selection via subobjects touches all objects containing the subobject.
     uint64_t touched_subobject_id = 0;
@@ -175,7 +193,33 @@ public:
     bool renderOnlySelectedObjs{false};
     uint8_t alpha;
     brush_subject brush;
+    /* What a brush stroke is allowed to write over.
+     *
+     * Anything is the historical behaviour and stays the default. OnlyExisting is what
+     * Mode_OverPaint hardcodes. OnlyBackground is the new one: paint into unlabelled
+     * voxels but leave other objects intact. */
+    enum class PaintTarget {
+        Anything,           // historical behaviour: replace whatever is under the brush
+        OnlyBackground,     // leave other objects alone
+        BackgroundWithGap,  // …and keep a one-voxel background gap around them
+        OnlyExisting,       // what Mode_OverPaint hardcodes
+    };
+    PaintTarget paintTarget{PaintTarget::Anything};
+
     bool createPaintObject{true};
+    // Off by default: letting a fill pull the loader along moves the view, evicts what
+    // the user was looking at, and on a connected region can walk a very long way.
+    // 2D fills only — a 3D fill is always confined to the resident blocks.
+    bool floodFillMayLoadCubes{false};
+    /* Whether a fill is kept out of the dataset's outermost voxel shell.
+     *
+     * EM volumes routinely carry a one-voxel rind of background at the boundary, left by
+     * however the volume was cropped. Because it wraps the whole dataset it connects every
+     * unlabelled region to every other one, so a fill that reaches it escapes the object
+     * entirely and runs until the safety cap stops it. Nothing worth labelling lives in
+     * that shell, so it is excluded by default; the toggle is there because "by default"
+     * is not "always". */
+    bool floodFillAvoidsDatasetEdge{true};
     // for mode in which edges are online highlighted for objects when selected and being hovered over by mouse
     bool hoverVersion{false};
     uint64_t mouseFocusedObjectId{0};
@@ -192,6 +236,8 @@ public:
     void setRenderOnlySelectedObjs(const bool onlySelected);
     decltype(backgroundId) getBackgroundId() const;
     void setBackgroundId(decltype(backgroundId));
+    bool paintingBackground() const { return paintsBackground; }
+    void setPaintingBackground(const bool paint);
     decltype(lockNewObjects) getLockNewObjects() const;
     void setLockNewObjects(const decltype(lockNewObjects));
     using color_t = std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>;
@@ -222,6 +268,20 @@ public:
     void createAndSelectObject(const Coordinate & position, const QString & category = "");
     SubObject & subobjectFromId(const uint64_t & subobjectId, const Coordinate & location);
     uint64_t subobjectIdOfFirstSelectedObject(const Coordinate & newLocation);
+    /* Allocates a subobject id guaranteed to be above everything KNOSSOS knows about.
+     *
+     * SubObject::highestId only rises when a SubObject is *constructed*, and the loader
+     * never touches Segmentation — so on a pre-segmented dataset with no mergelist it is
+     * still 0 and the first new object would take id 1, silently aliasing whatever already
+     * owns it in the data. maxId is the user's declared floor for exactly that case; it is
+     * edited in the Layers panel and stored with the annotation. */
+    std::uint64_t nextFreeSubobjectId();
+    std::uint64_t getMaxId() const { return maxId; }
+    void setMaxId(const std::uint64_t id) { maxId = id; }
+    // The subobject id a brush stroke would use right now, without the side effect of
+    // moving the object's location the way subobjectIdOfFirstSelectedObject() does.
+    // Empty when nothing is selected.
+    std::optional<uint64_t> currentPaintSubobjectId() const;
     bool objectOrder(const uint64_t &lhsIndex, const uint64_t &rhsIndex) const;
     uint64_t largestObjectContainingSubobjectId(const uint64_t subObjectId, const Coordinate & location);
     uint64_t largestObjectContainingSubobject(const SubObject & subobject) const;
@@ -286,6 +346,7 @@ signals:
     void resetTouchedObjects();
     void renderOnlySelectedObjsChanged(bool onlySelected);
     void backgroundIdChanged(uint64_t backgroundId);
+    void paintingBackgroundChanged(bool paintsBackground);
     void lockNewObjectsChanged(const bool lockNewObjects);
     void categoriesChanged();
     void todosLeftChanged();
