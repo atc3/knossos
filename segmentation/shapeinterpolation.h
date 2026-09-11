@@ -178,6 +178,7 @@ public:
         std::size_t depthsWritten{0};
         std::size_t cubesWritten{0};
         std::size_t cubesMissing{0};// cubes we could not make resident, i.e. dropped voxels
+        std::size_t depthsSkipped{0};// depths that yielded no mask — see writeAll
         QString message;
     };
     // Writes the whole chain — painted slices and every interpolated slice between them.

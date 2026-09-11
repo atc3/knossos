@@ -71,6 +71,7 @@ bool awaitLoader(QProgressDialog & progress) {
 #include <cmath>
 #include <limits>
 #include <deque>
+#include <set>
 #include <unordered_set>
 
 void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoid) {
@@ -690,18 +691,27 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
         return result;
     }
 
-    std::vector<int> depths;
+    /* Every depth to write: the stride between the first and last key slice, *plus* the
+     * key slices themselves.
+     *
+     * Striding alone silently dropped key slices that were not on the stride's parity. The
+     * stride is one voxel of the current magnification, but a key slice sits wherever the
+     * crosshair was when it was painted, so at magnification 2 and above roughly half of
+     * them fall between strides — and those were never visited, never written, and looked
+     * exactly like "some slices just don't interpolate". At magnification 1 the stride is
+     * one voxel and the bug cannot appear, which is why it seemed to have no pattern. */
+    std::set<int> depthSet;
     if (wholeChain) {
         const auto dStep = std::max(1, axisGet(step, axis));
         for (auto d = std::begin(slices)->first; d <= std::rbegin(slices)->first; d += dStep) {
-            depths.push_back(d);
-        }
-    } else {
-        for (const auto & [depth, slice] : slices) {
-            (void)slice;
-            depths.push_back(depth);
+            depthSet.insert(d);
         }
     }
+    for (const auto & [depth, slice] : slices) {
+        (void)slice;
+        depthSet.insert(depth);
+    }
+    const std::vector<int> depths(std::begin(depthSet), std::end(depthSet));
 
     const auto startPosition = state->viewerState->currentPosition;
     const auto & areaMin = Annotation::singleton().movementAreaMin;
@@ -741,6 +751,12 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
 
         const auto * slice = maskAtDepth(depth);
         if (slice == nullptr || slice->count() == 0) {
+            // Not necessarily benign: interpolantFor() also returns nothing when a slice
+            // pair spans more than MAX_PIXELS, and skipping that in silence is what makes a
+            // gap in the middle of a chain look inexplicable. Counted and reported.
+            if (slice == nullptr && !hasSliceAt(depth)) {
+                ++result.depthsSkipped;
+            }
             continue;
         }
         // the interpolated grid is padded well beyond the shape; clip to the painted extent
@@ -807,6 +823,10 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
         // never silently: a dropped cube means a hole in the object
         result.message = QObject::tr("Wrote %n slice(s), but %1 block(s) could not be loaded in time and were skipped — the object may have holes there.", "", static_cast<int>(result.depthsWritten))
                              .arg(result.cubesMissing);
+    } else if (result.depthsSkipped != 0) {
+        result.message = QObject::tr("Wrote %n slice(s) across %1 block(s). %2 slice(s) could not be interpolated: %3", "", static_cast<int>(result.depthsWritten))
+                             .arg(result.cubesWritten).arg(result.depthsSkipped)
+                             .arg(error.isEmpty() ? QObject::tr("nothing between the key slices there.") : error);
     } else {
         result.message = QObject::tr("Wrote %n slice(s) across %1 block(s).", "", static_cast<int>(result.depthsWritten)).arg(result.cubesWritten);
     }

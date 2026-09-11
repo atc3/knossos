@@ -92,8 +92,6 @@ public:
     void beginScope(const QString & description);
     void endScope();
     bool recordCube(std::size_t layerId, const CoordOfCube &, const void * rawCube);
-    // Hand back a snapshot recordCube() just took, for a pass that wrote nothing.
-    void discardCube(std::size_t layerId, const CoordOfCube & cubeCoord);
     bool scopeOpen() const { return depth != 0; }
 
 signals:

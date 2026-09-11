@@ -112,6 +112,31 @@ bool Loader::Controller::isFinished() {
     return worker->isFinished.load();
 }
 
+Loader::Controller::MemoryReport Loader::Controller::memoryReport() {
+    MemoryReport report;
+    {
+        QMutexLocker lock{&state->protectCube2Pointer};
+        for (std::size_t layerId{0}; layerId < worker->slotChunk.size(); ++layerId) {
+            report.slotsTotal += worker->slotChunk[layerId].size();
+            report.slotsFree += worker->freeSlots[layerId].size();
+            for (const auto & chunk : worker->slotChunk[layerId]) {
+                report.slotBytes += chunk.size();
+            }
+        }
+    }
+    QMutexLocker lock{&worker->snappyCacheMutex};
+    for (const auto & layer : worker->snappyCache) {
+        for (const auto & mag : layer) {
+            report.snappyCubes += mag.size();
+            for (const auto & [cubeCoord, cube] : mag) {
+                (void)cubeCoord;
+                report.snappyBytes += cube.capacity();
+            }
+        }
+    }
+    return report;
+}
+
 bool Loader::Controller::hasSnappyCache() {
     QMutexLocker lock{&worker->snappyCacheMutex};
     for (const auto & layer : worker->snappyCache) {

@@ -214,8 +214,14 @@ namespace {
  * read. The caps are what stops a stroke on one end of a vessel running the length of it:
  * past them the boundary is simply treated as an opening, so an object too big to bound
  * gets nothing filled rather than something wrong filled. */
-constexpr int HOLE_GROW_BLOCK = 96;   // mag1 voxels added per side per round
-constexpr int HOLE_MAX_ROUNDS = 12;
+/* Each round costs a full region read, so the margin doubles rather than stepping.
+ *
+ * A fixed step meant a shape needing 1000 voxels of headroom took eleven reads of an
+ * ever-larger region before it settled — the lag between letting go and the inside filling
+ * in. Doubling gets to the same place in four, and the common case (a small outline clear
+ * of its own bounding box) still settles on the first. */
+constexpr int HOLE_GROW_START = 48;   // mag1 voxels of margin on the first attempt
+constexpr int HOLE_MAX_ROUNDS = 7;    // 48 → 3072 voxels of margin
 constexpr std::size_t HOLE_MAX_PIXELS = 4096 * 4096;
 // A 3D brush spans depths, and each is a separate plane to examine. Bounded so that a
 // large 3D brush cannot turn one stroke into hundreds of region reads.
@@ -263,10 +269,11 @@ HoleFillReport fillEnclosedHoles(const HoleFillRequest & request) {
 
         // start one growth block out from the stroke, so a shape drawn tight to its own
         // bounding box still has an outside ring to escape through
-        auto uLow = axisGet(request.strokeMin, uAxis) - HOLE_GROW_BLOCK;
-        auto uHigh = axisGet(request.strokeMax, uAxis) + HOLE_GROW_BLOCK;
-        auto vLow = axisGet(request.strokeMin, vAxis) - HOLE_GROW_BLOCK;
-        auto vHigh = axisGet(request.strokeMax, vAxis) + HOLE_GROW_BLOCK;
+        auto margin = HOLE_GROW_START;
+        auto uLow = axisGet(request.strokeMin, uAxis) - margin;
+        auto uHigh = axisGet(request.strokeMax, uAxis) + margin;
+        auto vLow = axisGet(request.strokeMin, vAxis) - margin;
+        auto vHigh = axisGet(request.strokeMax, vAxis) + margin;
 
         /* The bounds the last successful read actually used.
          *
@@ -331,10 +338,11 @@ HoleFillReport fillEnclosedHoles(const HoleFillRequest & request) {
                     grew = true;
                 }
             };
-            if (contact.left)   { widen(uLow, -HOLE_GROW_BLOCK, lowLimit(uAxis), true); }
-            if (contact.right)  { widen(uHigh, HOLE_GROW_BLOCK, highLimit(uAxis), false); }
-            if (contact.top)    { widen(vLow, -HOLE_GROW_BLOCK, lowLimit(vAxis), true); }
-            if (contact.bottom) { widen(vHigh, HOLE_GROW_BLOCK, highLimit(vAxis), false); }
+            margin *= 2;
+            if (contact.left)   { widen(uLow, -margin, lowLimit(uAxis), true); }
+            if (contact.right)  { widen(uHigh, margin, highLimit(uAxis), false); }
+            if (contact.top)    { widen(vLow, -margin, lowLimit(vAxis), true); }
+            if (contact.bottom) { widen(vHigh, margin, highLimit(vAxis), false); }
             if (!grew) {
                 bounded = true;
                 break;// nowhere left to go; the boundary counts as an opening

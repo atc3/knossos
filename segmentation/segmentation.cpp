@@ -354,6 +354,9 @@ std::optional<uint64_t> Segmentation::currentPaintSubobjectId() const {
     if (paintsBackground) {
         return backgroundId;// a deliberate choice, unlike "nothing is selected"
     }
+    if (pickedSubobject && isSubObjectIdSelected(*pickedSubobject)) {
+        return pickedSubobject;// the id that was clicked, not the group's first
+    }
     if (selectedObjectIndices.empty()) {
         return std::nullopt;
     }
@@ -470,6 +473,7 @@ bool Segmentation::isSubObjectIdSelected(const uint64_t & subobjectId) const {
 }
 
 void Segmentation::clearObjectSelection() {
+    pickedSubobject.reset();
     {
         QSignalBlocker blocker{this};
         while (!selectedObjectIndices.empty()) {
@@ -480,6 +484,8 @@ void Segmentation::clearObjectSelection() {
 }
 
 void Segmentation::selectObject(Object & object) {
+    // a selection arrived by some other route, so the remembered pick no longer applies
+    pickedSubobject.reset();
     if (paintsBackground) {// picking a real object ends "painting background"
         paintsBackground = false;
         emit paintingBackgroundChanged(false);
@@ -621,6 +627,17 @@ void Segmentation::selectMergedObjectFromSubObject(const uint64_t soid, const Co
     const auto index = largestObjectContainingSubobject(subobject);
     setObjectLocation(index, position);
     selectObject(index, position);
+    pickedSubobject = soid;// after selectObject, which clears it
+}
+
+uint64_t Segmentation::paintSubobjectId(const Coordinate & newLocation) {
+    if (pickedSubobject && isSubObjectIdSelected(*pickedSubobject)) {
+        if (selectedObjectsCount() != 0) {
+            objects[selectedObjectIndices.front()].location = newLocation;
+        }
+        return *pickedSubobject;
+    }
+    return subobjectIdOfFirstSelectedObject(newLocation);
 }
 
 void Segmentation::selectObjectFromSubObject(const uint64_t soid, const Coordinate & position) {
@@ -656,6 +673,7 @@ void Segmentation::mergelistClear() {
     Object::highestIndex = -1;
     SubObject::highestId = 0;
     subobjects.clear();
+    pickedSubobject.reset();
     backgroundId = 0;
     if (paintsBackground) {// nothing left to erase; also un-checks the menu entry
         paintsBackground = false;

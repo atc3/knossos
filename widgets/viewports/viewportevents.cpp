@@ -155,7 +155,7 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                 seg.createAndSelectObject(coord);
             }
             if (eraseBackground || seg.selectedObjectsCount() > 0) {
-                uint64_t soid = eraseBackground ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+                uint64_t soid = eraseBackground ? seg.getBackgroundId() : seg.paintSubobjectId(coord);
                 auto brush = seg.brush.value();
                 if (eraseBackground) {
                     // brush.inverse means "erase only what is selected", and nothing is —
@@ -266,7 +266,7 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
 
     FloodFillRequest request;
     request.seed = coord;
-    request.fillsoid = erasing ? seg.getBackgroundId() : seg.subobjectIdOfFirstSelectedObject(coord);
+    request.fillsoid = erasing ? seg.getBackgroundId() : seg.paintSubobjectId(coord);
     request.threeDimensional = threeDimensional;
     request.view = static_cast<brush_t::view_t>(vp.viewportType);
     request.mayLoadCubes = Segmentation::singleton().floodFillMayLoadCubes;

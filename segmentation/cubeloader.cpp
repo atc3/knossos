@@ -200,23 +200,27 @@ CubeCoordSet processRegion(const Coordinate & globalFirst, const Coordinate &  g
         const auto globalCubeBegin = Dataset::current().cube2global(cubeCoord);
         auto rawcube = getRawCube(globalCubeBegin);
         if (rawcube.first) {
-            // snapshot before the first write lands in this cube (no-op outside a scope)
-            const bool snapshotted = UndoStack::singleton().recordCube(Segmentation::singleton().layerId, cubeCoord, rawcube.second);
             auto cubeRef = getCubeRef(rawcube.second);
             const auto globalCubeEnd = globalCubeBegin + Dataset::current().scaleFactor.componentMul(cubeShape);
             const auto localStart = globalFirst.capped(globalCubeBegin, globalCubeEnd).insideCube(cubeShape, Dataset::current().scaleFactor);
             const auto localEnd = globalLast.capped(globalCubeBegin, globalCubeEnd).insideCube(cubeShape, Dataset::current().scaleFactor);
 
-            /* Whether the visitor actually wrote anything here, rather than merely whether
-             * it was shown this cube.
+            /* Everything here keys off whether the visitor *wrote* something, not whether
+             * it was shown the cube.
              *
-             * The returned set is what callers hand to coordCubesMarkChanged(), and marking
-             * a cube modified is not free or reversible: it is copied, compressed and held
-             * in the loader's cache for the rest of the session, because that cache *is* the
-             * unsaved annotation. Reporting every visited cube meant every operation that
-             * sweeps a region — an interpolation commit over a large object, a hole fill, a
-             * plain read-back — permanently charged the session for cubes it never touched.
-             * The comparison costs one register read per voxel against work already done. */
+             * Both of the things done per cube are expensive and neither is reversible. The
+             * returned set is what callers hand to coordCubesMarkChanged(), and a cube
+             * marked modified is copied, compressed and held in the loader's cache for the
+             * rest of the session, because that cache *is* the unsaved annotation. The undo
+             * snapshot compresses a whole 16 MiB cube. Doing either on arrival meant every
+             * operation whose bounding box is mostly empty — an interpolation commit over a
+             * long chain, a hole fill, a plain read-back — paid both costs for cubes it
+             * never touched, in time and for the whole session in memory.
+             *
+             * The snapshot has to predate the write, so it is taken at the first voxel that
+             * actually changes, with that voxel put back for the duration so what gets
+             * stored is still the pristine cube. The comparison it hangs off costs one
+             * register read against work already being done. */
             bool cubeChanged{false};
             for (int z = localStart.z; z <= localEnd.z; ++z)
             for (int y = localStart.y; y <= localEnd.y; ++y)
@@ -226,15 +230,16 @@ CubeCoordSet processRegion(const Coordinate & globalFirst, const Coordinate &  g
                 auto & voxel = cubeRef[z][y][x];
                 const auto before = voxel;
                 func(voxel, adjustedGlobalCoord);
-                cubeChanged = cubeChanged || voxel != before;
+                if (voxel != before && !cubeChanged) {
+                    cubeChanged = true;
+                    const auto written = voxel;
+                    voxel = before;// so the snapshot is of the cube as it was
+                    UndoStack::singleton().recordCube(Segmentation::singleton().layerId, cubeCoord, rawcube.second);
+                    voxel = written;
+                }
             }
             if (cubeChanged) {
                 cubeCoords.emplace(cubeCoord);
-            } else if (snapshotted) {
-                // nothing happened here, so the undo entry should not be carrying a copy of
-                // it. Only the snapshot this call took: an earlier one in the same scope
-                // belongs to a write that did happen.
-                UndoStack::singleton().discardCube(Segmentation::singleton().layerId, cubeCoord);
             }
         }
     }

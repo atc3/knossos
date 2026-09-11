@@ -177,6 +177,17 @@ public:
         worker->snappyFlushCondition.wait(&worker->snappyFlushConditionMutex);
         return LockedSnappy{worker->snappyCacheMutex, worker->snappyCache[layerId]};
     }
+    /* What the loader is holding, so "where did the memory go" is answerable rather than
+     * guessable. The snappy cache is the interesting number: it is the unsaved annotation,
+     * it grows with every distinct cube ever modified, and nothing shrinks it short of
+     * clearing the annotation — saving writes the cubes out but keeps them, because this is
+     * also what an evicted cube is re-hydrated from. */
+    struct MemoryReport {
+        std::size_t slotsTotal{0}, slotsFree{0}, slotBytes{0};
+        std::size_t snappyCubes{0}, snappyBytes{0};
+    };
+    MemoryReport memoryReport();
+
 public slots:
     bool isFinished();
     bool hasSnappyCache();

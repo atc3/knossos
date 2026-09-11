@@ -143,6 +143,16 @@ Q_OBJECT
      * and so cannot express a standing choice. Mutually exclusive with an object
      * selection: arming it clears the selection, and selecting an object clears it. */
     bool paintsBackground{false};
+    /* The subobject the user actually pointed at, when that is not the one heading the
+     * selected object.
+     *
+     * Selecting a member of a merged group has to select the *group*, or the voxels draw in
+     * a different colour than their merge partners. But painting then has to extend the id
+     * that was clicked, not whichever subobject happens to come first in the group: a
+     * merged object is several ids that render alike, and collapsing them on the first
+     * stroke would quietly rewrite the voxels the user pointed at as something else.
+     * Empty when the selection's own first subobject is the right answer. */
+    std::optional<std::uint64_t> pickedSubobject;
     // highest subobject id known to exist in the data, including parts never loaded
     std::uint64_t maxId = 0;
     /* Bumped whenever the object graph changes. Undo uses it to skip serialising the
@@ -276,6 +286,9 @@ public:
     void createAndSelectObject(const Coordinate & position, const QString & category = "");
     SubObject & subobjectFromId(const uint64_t & subobjectId, const Coordinate & location);
     uint64_t subobjectIdOfFirstSelectedObject(const Coordinate & newLocation);
+    /* The id a stroke should write: the subobject that was picked, if it is still part of
+     * what is selected, and otherwise the selected object's first. See pickedSubobject. */
+    uint64_t paintSubobjectId(const Coordinate & newLocation);
     /* Allocates a subobject id guaranteed to be above everything KNOSSOS knows about.
      *
      * SubObject::highestId only rises when a SubObject is *constructed*, and the loader

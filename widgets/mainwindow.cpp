@@ -909,6 +909,39 @@ void MainWindow::createMenus() {
         paintBackgroundAction->setChecked(on);// it is also set by the id field and by clicking
     });
 
+    /* Where the memory went, rather than where it might have gone.
+     *
+     * Worth a menu entry because the interesting number is deeply unobvious: the loader's
+     * snappy cache holds a compressed copy of every cube ever modified, for the life of the
+     * session. Saving writes those cubes out but cannot drop them — an evicted cube is
+     * re-hydrated from exactly this cache, so clearing it would make edits vanish from the
+     * screen. So the footprint of a long session tracks how much of the volume has been
+     * painted, and shape interpolation reaches a lot of it in one accept. */
+    actionMenu.addAction(tr("Memory Report"), [this]() {
+        const auto loader = Loader::Controller::singleton().memoryReport();
+        const auto & si = ShapeInterpolation::singleton();
+        const auto size = [](const std::size_t bytes){ return QLocale::system().formattedDataSize(static_cast<qint64>(bytes)); };
+        QMessageBox box{this};
+        box.setIcon(QMessageBox::Information);
+        box.setText(tr("Memory held by KNOSSOS"));
+        box.setInformativeText(tr(
+            "<b>Cube cache:</b> %1 across %2 slots, %3 free.<br/>"
+            "Fixed at startup from the field of view; it does not grow.<br/><br/>"
+            "<b>Modified cubes (unsaved annotation):</b> %4 in %5 cubes.<br/>"
+            "One compressed copy of every cube touched since the annotation was opened. "
+            "This is the number that grows all session. Saving writes them out but keeps "
+            "them, because an evicted cube is restored from here — only opening or clearing "
+            "an annotation releases them.<br/><br/>"
+            "<b>Undo history:</b> %6 across %7 step(s).<br/>"
+            "<b>Interpolation chain:</b> %8 across %9 key slice(s).")
+            .arg(size(loader.slotBytes)).arg(loader.slotsTotal).arg(loader.slotsFree)
+            .arg(size(loader.snappyBytes)).arg(loader.snappyCubes)
+            .arg(size(UndoStack::singleton().totalBytes()))
+            .arg(UndoStack::singleton().undoEntries().size() + UndoStack::singleton().redoEntries().size())
+            .arg(size(si.saveState().bytes())).arg(si.sliceCount()));
+        box.exec();
+    });
+
     actionMenu.addSeparator();
     // shape interpolation. Bindings mirror Paintera's so the muscle memory carries over;
     // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
