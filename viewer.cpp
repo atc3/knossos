@@ -703,6 +703,15 @@ void Viewer::setDefaultVPSizeAndPos(const bool on) {
 }
 
 void Viewer::vpGenerateTexture(ViewportArb &vp, const std::size_t layerId) {
+    /* The per-cube reslice queue is cleared here too, not only in the orthogonal path.
+     *
+     * reslice_notify_all() adds to every ortho viewport's queue, the arbitrary one
+     * included, but this overload reslices the whole texture at once and has no use for the
+     * list — and it returns long before the orthogonal path's clear(), so the queue only
+     * ever grew. Bounded by the number of distinct cubes ever touched rather than by events,
+     * so it is a slow trickle rather than a runaway, but it is a container that is only ever
+     * added to for the life of the session. */
+    vp.resliceNecessaryCubes[layerId].clear();
     if (Dataset::datasets[layerId].isOverlay() || !vp.resliceNecessary[layerId]) {
         return;
     }

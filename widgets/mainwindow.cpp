@@ -927,7 +927,7 @@ void MainWindow::createMenus() {
         box.setInformativeText(tr(
             "<b>Cube cache:</b> %1 across %2 slots, %3 free.<br/>"
             "Fixed at startup from the field of view; it does not grow.<br/><br/>"
-            "<b>Modified cubes (unsaved annotation):</b> %4 in %5 cubes.<br/>"
+            "<b>Modified cubes (unsaved annotation):</b> %4 in %5 cubes, %10 each.<br/>"
             "One compressed copy of every cube touched since the annotation was opened. "
             "This is the number that grows all session. Saving writes them out but keeps "
             "them, because an evicted cube is restored from here — only opening or clearing "
@@ -938,7 +938,11 @@ void MainWindow::createMenus() {
             .arg(size(loader.snappyBytes)).arg(loader.snappyCubes)
             .arg(size(UndoStack::singleton().totalBytes()))
             .arg(UndoStack::singleton().undoEntries().size() + UndoStack::singleton().redoEntries().size())
-            .arg(size(si.saveState().bytes())).arg(si.sliceCount()));
+            .arg(size(si.saveState().bytes())).arg(si.sliceCount())
+            // per-cube average: a cube is 16 MiB raw, so this says at a glance whether the
+            // data is compressing well or barely at all, which is the difference between
+            // this number being a nuisance and being the whole problem
+            .arg(size(loader.snappyCubes != 0 ? loader.snappyBytes / loader.snappyCubes : 0)));
         box.exec();
     });
 
