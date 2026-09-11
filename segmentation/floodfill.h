@@ -65,3 +65,36 @@ struct FloodFillReport {
 };
 
 FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * parent);
+
+
+/* Fill whatever a plane now encloses — the "close the outline and the middle fills in"
+ * gesture, run once at the end of a brush stroke.
+ *
+ * Not a property of the stroke but of the plane it left behind: the stroke may have drawn
+ * only the last arc of a circle whose rest was painted an hour ago, and that encloses just
+ * as much. So the question asked is "what in this plane can no longer reach the outside",
+ * and everything that cannot becomes part of the object. A stroke that closed nothing
+ * fills nothing, which is the overwhelmingly common case and costs one region read.
+ *
+ * `strokeMin`/`strokeMax` bound what the stroke touched. The region actually examined
+ * starts there and grows outward while the object still runs off its edge, because the
+ * edge has to be genuinely outside the shape for "cannot reach the border" to mean
+ * anything. Growth stops at the loaded blocks, the movement area, and a size cap; if it
+ * stops while the object is still crossing the boundary, that boundary counts as an
+ * opening and nothing on the far side of it is filled. Failing that way round means a
+ * missed fill rather than a plane flooded by mistake. */
+struct HoleFillRequest {
+    Coordinate strokeMin, strokeMax;
+    std::uint64_t soid{0};
+    brush_t::view_t view{brush_t::view_t::xy};
+};
+
+struct HoleFillReport {
+    std::size_t voxelsFilled{0};
+    std::size_t planesFilled{0};
+    bool boundedEarly{false};// growth hit the loaded blocks, the movement area or the cap
+    Coordinate filledMin, filledMax;
+    QString message;// empty when nothing was filled and nothing needs saying
+};
+
+HoleFillReport fillEnclosedHoles(const HoleFillRequest & request);

@@ -198,6 +198,16 @@ public:
         std::size_t magIndex{0}, layerId{0};
         std::uint64_t soid{0};
         std::map<int, SISlice> slices;
+        /* Heap this state holds. Undo keeps one of these per entry, and on a long chain
+         * over a large object the masks dwarf the compressed cube snapshots beside them —
+         * so a history budget that does not count them is not a budget. */
+        std::size_t bytes() const {
+            std::size_t total{0};
+            for (const auto & [depth, slice] : slices) {
+                total += slice.bytes() + sizeof(SISlice);
+            }
+            return total;
+        }
     };
     State saveState() const;
     void restoreState(const State &);

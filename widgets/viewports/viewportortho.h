@@ -76,6 +76,15 @@ class ViewportOrtho : public ViewportBase {
     bool magWarningShownThisStroke{false};// one dialog per drag, not one per stamp
     // last stamped position, so a fast drag can be filled in rather than left as beads
     boost::optional<Coordinate> lastBrushStamp;
+    /* What the current stroke has covered, for the fill-enclosed-holes pass on release.
+     *
+     * Accumulated as stamp centres and widened by the brush at the end, rather than taking
+     * each stamp's footprint: the pass only needs a box to start growing from, and it grows
+     * anyway wherever the object crosses the edge. */
+    boost::optional<std::pair<Coordinate, Coordinate>> strokeBox;
+    double strokeRadius{0};
+    std::uint64_t strokeSoid{0};
+    void fillHolesClosedByStroke();
     virtual void mouseMoveEvent(QMouseEvent *event) override;
 
     virtual void handleKeyPress(const QKeyEvent *event) override;

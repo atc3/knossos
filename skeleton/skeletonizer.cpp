@@ -333,6 +333,7 @@ void Skeletonizer::saveXmlSkeleton(QXmlStreamWriter & xml, const bool onlySelect
     xml.writeAttribute("maxId", QString::number(Segmentation::singleton().getMaxId()));
     xml.writeAttribute("brushRadius", QString::number(Segmentation::singleton().brush.getRadius()));
     xml.writeAttribute("interpolationAlignCentroids", QString::number(ShapeInterpolation::singleton().centroidAlignment()));
+    xml.writeAttribute("fillEnclosedHoles", QString::number(Segmentation::singleton().fillEnclosedHoles));
     xml.writeEndElement();
 
     xml.writeStartElement("editPosition");
@@ -561,6 +562,9 @@ std::unordered_map<decltype(treeListElement::treeID), std::reference_wrapper<tre
                     }
                     if (attributes.hasAttribute("interpolationAlignCentroids")) {
                         ShapeInterpolation::singleton().setCentroidAlignment(attributes.value("interpolationAlignCentroids").toInt() != 0);
+                    }
+                    if (attributes.hasAttribute("fillEnclosedHoles")) {
+                        Segmentation::singleton().setFillEnclosedHoles(attributes.value("fillEnclosedHoles").toInt() != 0);
                     }
                 } else if(xml.name() == "editPosition") {
                     loadedPosition = floatCoordinate(attributes.value("x").toDouble(), attributes.value("y").toDouble(), attributes.value("z").toDouble());

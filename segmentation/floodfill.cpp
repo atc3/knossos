@@ -26,6 +26,8 @@
 #include "dataset.h"
 #include "loader.h"
 #include "segmentation/labelonlyloading.h"
+#include "segmentation/holefill.h"
+#include "segmentation/shapeinterpolation.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/undostack.h"
 #include "stateInfo.h"
@@ -196,6 +198,206 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
         report.message = QObject::tr("%1: %2 voxels in %3 block(s), loading %4 extra block(s) on the way.").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten).arg(report.loadRounds);
     } else {
         report.message = QObject::tr("%1: %2 voxels in %3 block(s).").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten);
+    }
+    return report;
+}
+
+namespace {
+/* Growing the examined region.
+ *
+ * A stroke's own bounding box is rarely enough: the outline it closed may be mostly older
+ * paint lying outside it. So the region is grown on whichever sides the object still
+ * crosses, until it stops crossing any of them — at which point the border is known to be
+ * outside the shape and "cannot reach the border" means "enclosed".
+ *
+ * Grown in blocks rather than a voxel at a time, because each round costs a full region
+ * read. The caps are what stops a stroke on one end of a vessel running the length of it:
+ * past them the boundary is simply treated as an opening, so an object too big to bound
+ * gets nothing filled rather than something wrong filled. */
+constexpr int HOLE_GROW_BLOCK = 96;   // mag1 voxels added per side per round
+constexpr int HOLE_MAX_ROUNDS = 12;
+constexpr std::size_t HOLE_MAX_PIXELS = 4096 * 4096;
+// A 3D brush spans depths, and each is a separate plane to examine. Bounded so that a
+// large 3D brush cannot turn one stroke into hundreds of region reads.
+constexpr int HOLE_MAX_PLANES = 64;
+}
+
+HoleFillReport fillEnclosedHoles(const HoleFillRequest & request) {
+    HoleFillReport report;
+    const auto axis = (request.view == brush_t::view_t::xy) ? 2 : (request.view == brush_t::view_t::xz) ? 1 : 0;
+    if (request.view == brush_t::view_t::arb) {
+        return report;// no axis-aligned plane to enclose anything in
+    }
+    const auto uAxis = (axis == 0) ? 1 : 0;
+    const auto vAxis = (axis == 2) ? 1 : 2;
+    const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
+    const Coordinate step{std::max(1, static_cast<int>(dataset.scaleFactor.x)),
+                          std::max(1, static_cast<int>(dataset.scaleFactor.y)),
+                          std::max(1, static_cast<int>(dataset.scaleFactor.z))};
+    const auto uStep = axisGet(step, uAxis);
+    const auto vStep = axisGet(step, vAxis);
+    const auto depthStep = std::max(1, axisGet(step, axis));
+
+    const auto areaMin = Annotation::singleton().movementAreaMin;
+    const auto areaMax = Annotation::singleton().movementAreaMax - 1;
+
+    const auto firstDepth = axisGet(request.strokeMin, axis);
+    const auto lastDepth = axisGet(request.strokeMax, axis);
+    const auto planes = (lastDepth - firstDepth) / depthStep + 1;
+    if (planes > HOLE_MAX_PLANES) {
+        return report;// a 3D brush this deep is not what this gesture is for
+    }
+
+    std::vector<std::uint8_t> solid, filled;
+    std::size_t totalFilled{0};
+    for (auto depth = firstDepth; depth <= lastDepth; depth += depthStep) {
+        // the plane's resident extent, which is as far as anything can be read or written
+        Coordinate centre = request.strokeMin;
+        axisSet(centre, uAxis, (axisGet(request.strokeMin, uAxis) + axisGet(request.strokeMax, uAxis)) / 2);
+        axisSet(centre, vAxis, (axisGet(request.strokeMin, vAxis) + axisGet(request.strokeMax, vAxis)) / 2);
+        axisSet(centre, axis, depth);
+        const auto resident = residentBoxAround(centre);
+
+        const auto lowLimit = [&](const int axisIdx){ return std::max(axisGet(areaMin, axisIdx), axisGet(resident.first, axisIdx)); };
+        const auto highLimit = [&](const int axisIdx){ return std::min(axisGet(areaMax, axisIdx), axisGet(resident.second, axisIdx)); };
+
+        // start one growth block out from the stroke, so a shape drawn tight to its own
+        // bounding box still has an outside ring to escape through
+        auto uLow = axisGet(request.strokeMin, uAxis) - HOLE_GROW_BLOCK;
+        auto uHigh = axisGet(request.strokeMax, uAxis) + HOLE_GROW_BLOCK;
+        auto vLow = axisGet(request.strokeMin, vAxis) - HOLE_GROW_BLOCK;
+        auto vHigh = axisGet(request.strokeMax, vAxis) + HOLE_GROW_BLOCK;
+
+        /* The bounds the last successful read actually used.
+         *
+         * Kept apart from the ones the growth loop is still moving, so the write can never
+         * be handed a region that does not match the grid `enclosed` was computed on —
+         * which is the one way this could put voxels somewhere nobody drew. */
+        int w{0}, h{0};
+        int readULow{0}, readUHigh{0}, readVLow{0}, readVHigh{0};
+        bool bounded{false};
+        for (int round = 0; round <= HOLE_MAX_ROUNDS; ++round) {
+            const auto clampedULow = std::max(uLow, lowLimit(uAxis));
+            const auto clampedUHigh = std::min(uHigh, highLimit(uAxis));
+            const auto clampedVLow = std::max(vLow, lowLimit(vAxis));
+            const auto clampedVHigh = std::min(vHigh, highLimit(vAxis));
+            bounded = clampedULow != uLow || clampedUHigh != uHigh || clampedVLow != vLow || clampedVHigh != vHigh;
+            uLow = clampedULow; uHigh = clampedUHigh; vLow = clampedVLow; vHigh = clampedVHigh;
+            if (uHigh < uLow || vHigh < vLow) {
+                break;
+            }
+
+            w = (uHigh - uLow) / uStep + 1;
+            h = (vHigh - vLow) / vStep + 1;
+            if (static_cast<std::size_t>(w) * h > HOLE_MAX_PIXELS) {
+                bounded = true;
+                break;
+            }
+
+            Coordinate first, last;
+            axisSet(first, axis, depth);      axisSet(last, axis, depth);
+            axisSet(first, uAxis, uLow);      axisSet(last, uAxis, uHigh);
+            axisSet(first, vAxis, vLow);      axisSet(last, vAxis, vHigh);
+
+            readULow = uLow; readUHigh = uHigh; readVLow = vLow; readVHigh = vHigh;
+            solid.assign(static_cast<std::size_t>(w) * h, 0);
+            readRegion(first, last, [&](const std::uint64_t voxel, const Coordinate & pos){
+                if (voxel != request.soid) {
+                    return;
+                }
+                const auto u = (axisGet(pos, uAxis) - readULow) / uStep;
+                const auto v = (axisGet(pos, vAxis) - readVLow) / vStep;
+                if (u >= 0 && v >= 0 && u < w && v < h) {
+                    solid[static_cast<std::size_t>(v) * w + u] = 1;
+                }
+            });
+
+            const auto contact = holefill::touchesBorder(solid, w, h);
+            if (!contact.any()) {
+                bounded = false;
+                break;// the border is outside the shape; the region is big enough
+            }
+            if (round == HOLE_MAX_ROUNDS) {
+                bounded = true;
+                break;
+            }
+            // grow only where it is needed, and only where there is room left to grow
+            bool grew{false};
+            const auto widen = [&](int & edge, const int delta, const int limit, const bool low){
+                const auto wanted = edge + delta;
+                const auto allowed = low ? std::max(wanted, limit) : std::min(wanted, limit);
+                if (allowed != edge) {
+                    edge = allowed;
+                    grew = true;
+                }
+            };
+            if (contact.left)   { widen(uLow, -HOLE_GROW_BLOCK, lowLimit(uAxis), true); }
+            if (contact.right)  { widen(uHigh, HOLE_GROW_BLOCK, highLimit(uAxis), false); }
+            if (contact.top)    { widen(vLow, -HOLE_GROW_BLOCK, lowLimit(vAxis), true); }
+            if (contact.bottom) { widen(vHigh, HOLE_GROW_BLOCK, highLimit(vAxis), false); }
+            if (!grew) {
+                bounded = true;
+                break;// nowhere left to go; the boundary counts as an opening
+            }
+        }
+        report.boundedEarly = report.boundedEarly || bounded;
+        if (w <= 0 || h <= 0 || solid.empty()) {
+            continue;
+        }
+
+        if (static_cast<std::size_t>(w) * h != solid.size() || holefill::enclosed(solid, w, h, filled) == 0) {
+            continue;// this plane closed nothing, which is the usual answer
+        }
+
+        Coordinate first, last;
+        axisSet(first, axis, depth);      axisSet(last, axis, depth);
+        axisSet(first, uAxis, readULow);  axisSet(last, uAxis, readUHigh);
+        axisSet(first, vAxis, readVLow);  axisSet(last, vAxis, readVHigh);
+        std::size_t filledHere{0};
+        Coordinate hereMin, hereMax;
+        writeVoxelsWhere(first, last, [&](const Coordinate & pos){
+            const auto u = (axisGet(pos, uAxis) - readULow) / uStep;
+            const auto v = (axisGet(pos, vAxis) - readVLow) / vStep;
+            if (u < 0 || v < 0 || u >= w || v >= h || filled[static_cast<std::size_t>(v) * w + u] == 0) {
+                return false;
+            }
+            if (filledHere == 0) {
+                hereMin = hereMax = pos;
+            } else {
+                hereMin = {std::min(hereMin.x, pos.x), std::min(hereMin.y, pos.y), std::min(hereMin.z, pos.z)};
+                hereMax = {std::max(hereMax.x, pos.x), std::max(hereMax.y, pos.y), std::max(hereMax.z, pos.z)};
+            }
+            ++filledHere;
+            return true;
+        }, request.soid, true, false);// false: an enclosed voxel is inside the object, not something painted over
+
+        if (filledHere == 0) {
+            continue;
+        }
+        if (totalFilled == 0) {
+            report.filledMin = hereMin;
+            report.filledMax = hereMax;
+        } else {
+            report.filledMin = {std::min(report.filledMin.x, hereMin.x), std::min(report.filledMin.y, hereMin.y), std::min(report.filledMin.z, hereMin.z)};
+            report.filledMax = {std::max(report.filledMax.x, hereMax.x), std::max(report.filledMax.y, hereMax.y), std::max(report.filledMax.z, hereMax.z)};
+        }
+        totalFilled += filledHere;
+        ++report.planesFilled;
+
+        // the key slice has to learn about the interior too, or accepting the chain would
+        // write the outline back over it
+        auto & si = ShapeInterpolation::singleton();
+        if (si.active() && si.subobjectId() == request.soid && si.normalAxis() == axis) {
+            QString reason;
+            si.absorbRegion(centre, hereMin, hereMax, depth, request.soid, reason);
+        }
+    }
+
+    report.voxelsFilled = totalFilled;
+    if (totalFilled != 0) {
+        report.message = report.boundedEarly
+            ? QObject::tr("Filled %n enclosed voxel(s). Part of the outline ran past the loaded blocks, so anything enclosed out there was left alone.", "", static_cast<int>(totalFilled))
+            : QObject::tr("Filled %n enclosed voxel(s).", "", static_cast<int>(totalFilled));
     }
     return report;
 }

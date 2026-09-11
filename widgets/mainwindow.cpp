@@ -870,6 +870,24 @@ void MainWindow::createMenus() {
                                        "limit. With this on the outermost voxel is excluded, unless you seed the fill there "
                                        "yourself."));
 
+    /* Fill whatever a stroke shut in, the moment the mouse comes up.
+     *
+     * Off by default and stored with the annotation: it changes what every stroke does, and
+     * whether that suits the work depends on what is being traced — an outline you close on
+     * purpose wants it, a long process you happen to loop back over does not. */
+    fillEnclosedAction = actionMenu.addAction(tr("Fill Enclosed Areas After Each Stroke"), [this]() {
+        Segmentation::singleton().setFillEnclosedHoles(fillEnclosedAction->isChecked());
+    });
+    fillEnclosedAction->setCheckable(true);
+    fillEnclosedAction->setChecked(Segmentation::singleton().fillEnclosedHoles);
+    fillEnclosedAction->setToolTip(tr("Draw a closed outline and its inside becomes part of the object when you let go. "
+                                      "Every area the stroke shut in is filled, not just one, and an area closed against "
+                                      "paint that was already there counts — draw a C onto an existing edge and the space "
+                                      "between them fills. A stroke that closed nothing changes nothing. The inside is "
+                                      "taken whatever is in it, including other labels, since it is interior to the object."));
+    QObject::connect(&Segmentation::singleton(), &Segmentation::fillEnclosedHolesChanged,
+                     fillEnclosedAction, &QAction::setChecked);
+
     /* Selecting the background as the paint id, so the brush and the fills erase.
      *
      * Background is not an object and so cannot be selected the way a label is, which left
@@ -936,6 +954,8 @@ void MainWindow::createMenus() {
         si.setCentroidAlignment(shapeInterpolationAlignAction->isChecked());
         state->viewer->run();
     });
+    Segmentation::singleton().setFillEnclosedHoles(
+        QSettings{}.value(SEGMENTATION_FILL_ENCLOSED, false).toBool());
     shapeInterpolationAlignAction->setCheckable(true);
     // last session's choice; an annotation carrying its own value overrides it on load
     ShapeInterpolation::singleton().setCentroidAlignment(
@@ -1488,6 +1508,10 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     for (auto * action : {subobjectIdLabelAction, subobjectIdAction, paintTargetAction}) {
         action->setVisible(segmentation);
     }
+    for (auto * action : {fillEnclosedAction}) {// only a brush can close anything
+        action->setVisible(mode.testFlag(AnnotationMode::Brush));
+        action->setEnabled(mode.testFlag(AnnotationMode::Brush));
+    }
     // no brush, no paint id to point at the background
     paintBackgroundAction->setVisible(mode.testFlag(AnnotationMode::Brush));
     paintBackgroundAction->setEnabled(mode.testFlag(AnnotationMode::Brush));
@@ -1523,6 +1547,12 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     plusNucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
     nucAction->setVisible(mode.testFlag(AnnotationMode::Mode_CellSegmentation));
 
+    /* A mode switch can change what is under a pointer that never moved — the shape
+     * interpolation panel is hidden on the way out, a confirmation dialog opens and closes
+     * over a viewport — and neither produces the enter/leave crossing that hasCursor is
+     * maintained by. Without this the brush cursor stays missing until the pointer is
+     * dragged into another viewport. */
+    forEachVPDo([](ViewportBase & vp){ vp.syncCursorInside(); });
     clearMergelistAction->setVisible(segmentation && !mode.testFlag(AnnotationMode::Mode_MergeTracing));
     categoriesMenu.setEnabled(segmentation && !mode.testFlag(AnnotationMode::Mode_Selection));
     for (auto * action : categoriesMenu.actions()) {
@@ -1718,6 +1748,7 @@ void MainWindow::saveSettings() {
     ViewportLayouts::singleton().saveSettings();
     settings.setValue(SEGMENTATION_BRUSH_RADIUS, Segmentation::singleton().brush.getRadius());
     settings.setValue(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment());
+    settings.setValue(SEGMENTATION_FILL_ENCLOSED, Segmentation::singleton().fillEnclosedHoles);
     settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();
     widgetContainer.zoomWidget.saveSettings();

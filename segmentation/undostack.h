@@ -107,6 +107,8 @@ private:
     static void restoreGraph(const UndoEntry &);
     // Put the brush back on the id it was on before the undo, if that id still exists.
     static void reinstatePaintTarget(bool background, const std::vector<std::uint64_t> & objectIds);
+    // Charge an entry for everything it retains, not only its compressed cubes.
+    static void accountForEntry(UndoEntry &);
     void enforceBudget();
 
     std::deque<UndoEntry> past, future;

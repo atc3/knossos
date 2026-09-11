@@ -72,3 +72,20 @@ Needs toml11, which the build fetches; the path below is where CMake's FetchCont
 c++ -std=c++17 -O2 -I ../../knossos-build/_deps/toml11-src/single_include \
     -o /tmp/datasetmaxid_test datasetmaxid_test.cpp && /tmp/datasetmaxid_test
 ```
+
+## holefill_test
+
+Exercises `segmentation/holefill.h`, the connectivity behind "close an outline and the
+middle fills in". Checks that an open outline encloses nothing and a closed one encloses
+exactly its interior, that several holes in one plane are all found, that the region border
+counts as the outside (which is why the caller grows its region until the object stops
+touching it), and that degenerate input is refused rather than read out of bounds.
+
+The case worth having a test for is the diagonal: a round brush dragged at 45° leaves
+voxels touching only at their corners, which the eye reads as a closed wall. The escape
+walk is therefore 4-connected — an 8-connected one slips between them and reports a closed
+ring as open.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/holefill_test holefill_test.cpp && /tmp/holefill_test
+```

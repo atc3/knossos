@@ -52,6 +52,9 @@ public:
 
     bool empty() const { return voxelCount == 0; }
     std::size_t count() const { return voxelCount; }
+    /* Heap held by this slice. Capacity, not size: reserveIndex() grows the mask in
+     * blocks, so what is actually retained is what a memory budget has to measure. */
+    std::size_t bytes() const { return mask.capacity() * sizeof(decltype(mask)::value_type); }
 
     int uIndexOf(const int globalU) const { return siFloorDiv(globalU - uMin, uStep); }
     int vIndexOf(const int globalV) const { return siFloorDiv(globalV - vMin, vStep); }

@@ -130,6 +130,7 @@ class MainWindow : public QMainWindow {
     QAction *paintTargetAction{};
     QAction *paintBackgroundAction{};// checkable: paint/fill with id 0, i.e. erase
     QAction *fillEdgeGuardAction{};// checkable: keep fills out of the dataset's outer voxel shell
+    QAction *fillEnclosedAction{};// checkable: fill what a stroke shut in, on mouse up
     class QMenu *paintTargetMenu{};
     void rebuildPaintTargetMenu();
     class QToolButton *viewportLayoutButton{};

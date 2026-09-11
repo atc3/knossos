@@ -220,6 +220,13 @@ public:
      * that shell, so it is excluded by default; the toggle is there because "by default"
      * is not "always". */
     bool floodFillAvoidsDatasetEdge{true};
+    /* Whether finishing a brush stroke fills anything the plane now encloses.
+     *
+     * Off by default: it changes what a stroke does, and a stroke that accidentally closes
+     * a loop around something you meant to keep separate would fill it. Stored with the
+     * annotation, since whether it suits the work depends on what is being traced.
+     * See fillEnclosedHoles() in segmentation/floodfill.h. */
+    bool fillEnclosedHoles{false};
     // for mode in which edges are online highlighted for objects when selected and being hovered over by mouse
     bool hoverVersion{false};
     uint64_t mouseFocusedObjectId{0};
@@ -238,6 +245,7 @@ public:
     void setBackgroundId(decltype(backgroundId));
     bool paintingBackground() const { return paintsBackground; }
     void setPaintingBackground(const bool paint);
+    void setFillEnclosedHoles(const bool fill);
     decltype(lockNewObjects) getLockNewObjects() const;
     void setLockNewObjects(const decltype(lockNewObjects));
     using color_t = std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>;
@@ -347,6 +355,7 @@ signals:
     void renderOnlySelectedObjsChanged(bool onlySelected);
     void backgroundIdChanged(uint64_t backgroundId);
     void paintingBackgroundChanged(bool paintsBackground);
+    void fillEnclosedHolesChanged(bool fill);
     void lockNewObjectsChanged(const bool lockNewObjects);
     void categoriesChanged();
     void todosLeftChanged();

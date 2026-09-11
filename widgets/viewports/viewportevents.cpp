@@ -179,6 +179,15 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
 
                 const auto stamp = [&](const Coordinate & at){
                     writeVoxels(at, soid, brush);
+                    // what the stroke covered, for the enclosed-hole pass on mouse release
+                    if (!eraseBackground && !brush.inverse) {
+                        vp.strokeBox = vp.strokeBox
+                                ? std::make_pair(Coordinate{std::min(vp.strokeBox->first.x, at.x), std::min(vp.strokeBox->first.y, at.y), std::min(vp.strokeBox->first.z, at.z)},
+                                                 Coordinate{std::max(vp.strokeBox->second.x, at.x), std::max(vp.strokeBox->second.y, at.y), std::max(vp.strokeBox->second.z, at.z)})
+                                : std::make_pair(at, at);
+                        vp.strokeRadius = std::max(vp.strokeRadius, brush.radius);
+                        vp.strokeSoid = soid;
+                    }
                     if (shapeInterpolation) {
                         auto & si = ShapeInterpolation::singleton();
                         // An erase is absorbed against the chain's own id: absorbStamp reads

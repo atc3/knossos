@@ -261,6 +261,13 @@ void Segmentation::setPaintingBackground(const bool paint) {
     emit paintingBackgroundChanged(paintsBackground);
 }
 
+void Segmentation::setFillEnclosedHoles(const bool fill) {
+    if (fillEnclosedHoles != fill) {
+        fillEnclosedHoles = fill;
+        emit fillEnclosedHolesChanged(fillEnclosedHoles);
+    }
+}
+
 decltype(Segmentation::lockNewObjects) Segmentation::getLockNewObjects() const {
     return lockNewObjects;
 }

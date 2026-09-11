@@ -62,7 +62,11 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t &, cons
 // listFill() generalised: writes `value` wherever `inside` returns true. Unlike
 // processRegionByStridedBuf(isWrite=true) this leaves non-matching voxels untouched,
 // so it will not erase other labels sharing the region.
-CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, bool markChanged = true);
+/* `respectPaintTarget` false writes over whatever is there, ignoring the overwrite setting.
+ * For filling the inside of a closed outline: the setting governs what the brush may cover
+ * as it moves through the plane, and a voxel that is walled in by the object on every side
+ * is not something the brush is moving over — it is already inside. */
+CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, bool markChanged = true, bool respectPaintTarget = true);
 // Splits the cubes covering a region into (resident, missing).
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast);
 

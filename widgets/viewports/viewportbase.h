@@ -240,6 +240,14 @@ public:
     const static int numberViewports = 5;
 
     bool hasCursor{false};
+    /* Re-derive hasCursor from where the pointer actually is.
+     *
+     * enterEvent/leaveEvent only fire on a real crossing, so anything that changes what
+     * sits under a stationary pointer — hiding a panel that was covering a viewport,
+     * a modal dialog opening and closing over one — leaves the flag saying the opposite of
+     * the truth until the mouse is moved across a boundary again. The brush cursor is
+     * drawn behind that flag, so it silently goes missing. */
+    void syncCursorInside();
     virtual void showHideButtons(bool isShow) {
         menuButton.setVisible(isShow);
         resizeButton.setVisible(isShow && isDocked);

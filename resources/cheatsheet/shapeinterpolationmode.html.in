@@ -56,6 +56,7 @@
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
 		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
 		<tr><td><span class="sh">Action menu</span></td><td>Lock painting to the current magnification</td></tr>
+		<tr><td><span class="sh">Action menu</span></td><td>Fill enclosed areas after each stroke — close an outline and its inside joins the object when you let go. Every area shut in counts, including one closed against paint that was already there; a stroke that closed nothing changes nothing. Off by default, stored with the annotation</td></tr>
 		<tr><td><span class="sh">C</span> / <span class="sh">N</span></td><td>New segmentation object (id above the layer’s max id)</td></tr>
 		<tr><td><span class="sh">0</span> / <span class="sh">id</span> (toolbar) / <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/> on empty space outside the preview</td><td>Paint the background instead of a label — the brush and both fills then erase, so a fill rubs out the connected chunk it lands on and the key slice is re-read to match. The id box turns red. Click the chain’s object, or one of its key slices, to go back</td></tr>
 		<tr><td><span class="sh">Ctrl + Z</span></td><td>Undo the last segmentation edit</td></tr>

@@ -23,11 +23,15 @@
 #include "viewportortho.h"
 
 #include "dataset.h"
+#include "segmentation/floodfill.h"
 #include "segmentation/undostack.h"
 #include "segmentation/segmentation.h"
 #include "annotation/annotation.h"
 #include "stateInfo.h"
 #include "viewer.h"
+#include "widgets/mainwindow.h"
+
+#include <QStatusBar>
 
 ViewportOrtho::ViewportOrtho(QWidget *parent, ViewportType viewportType) : ViewportBase(parent, viewportType) {
     // v2 is negative because it goes from top to bottom on screen
@@ -97,6 +101,9 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     // a time would be useless.
     magWarningShownThisStroke = false;
     lastBrushStamp = boost::none;// a fresh stroke starts with a single stamp
+    strokeBox = boost::none;
+    strokeRadius = 0;
+    strokeSoid = 0;
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         paintUndoScope = std::make_unique<UndoScope>(
                     Segmentation::singleton().brush.isInverse() || Segmentation::singleton().paintingBackground() ? tr("Erase") : tr("Brush stroke"));
@@ -107,7 +114,40 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
 void ViewportOrtho::mouseReleaseEvent(QMouseEvent *event) {
     ViewportBase::mouseReleaseEvent(event);
     lastBrushStamp = boost::none;
+    // before the scope closes, so a stroke and the interior it enclosed undo together
+    fillHolesClosedByStroke();
     paintUndoScope.reset();// closes the stroke, committing it as one undo entry
+}
+
+/* Run the enclosed-hole pass for the stroke that just ended.
+ *
+ * On release rather than per stamp: mid-stroke the outline is open by definition, and
+ * filling on the way round would swallow the very gap the hand is still closing. */
+void ViewportOrtho::fillHolesClosedByStroke() {
+    auto & seg = Segmentation::singleton();
+    if (!seg.fillEnclosedHoles || !strokeBox || strokeSoid == seg.getBackgroundId()) {
+        return;
+    }
+    if (viewportType != VIEWPORT_XY && viewportType != VIEWPORT_XZ && viewportType != VIEWPORT_ZY) {
+        return;// an arbitrary plane has no axis-aligned slice to enclose anything in
+    }
+    // the stamp centres widened by the brush, which is where its footprint reached
+    const auto & scale = Dataset::current().scales[0];
+    const Coordinate reach{static_cast<int>(strokeRadius / scale.x) + 1,
+                           static_cast<int>(strokeRadius / scale.y) + 1,
+                           static_cast<int>(strokeRadius / scale.z) + 1};
+    HoleFillRequest request;
+    request.strokeMin = strokeBox->first - reach;
+    request.strokeMax = strokeBox->second + reach;
+    request.soid = strokeSoid;
+    request.view = static_cast<brush_t::view_t>(viewportType);
+
+    const auto report = state->viewer->suspend([&request]{ return fillEnclosedHoles(request); });
+    if (report.voxelsFilled != 0) {
+        state->viewer->mainWindow.statusBar()->showMessage(report.message, 6000);
+        state->viewer->run();
+    }
+    strokeBox = boost::none;
 }
 
 void ViewportOrtho::resetTexture(const std::size_t layerCount) {

@@ -159,6 +159,22 @@ int main() {
         check(a.count() == 3, "merging the same piece again changes nothing");
     }
 
+    std::printf("12. bytes() reports retained heap, which the undo budget charges for\n");
+    {
+        SISlice a; a.uMin = 0; a.vMin = 0; a.uStep = 1; a.vStep = 1;
+        check(a.bytes() == 0, "an empty slice holds nothing");
+        paint(a, 0, 0);
+        const auto small = a.bytes();
+        check(small >= static_cast<std::size_t>(a.uSize) * a.vSize, "covers at least the mask");
+        paint(a, 500, 500);
+        check(a.bytes() > small, "growing the box grows what is retained");
+        // the point of the accounting: one slice over a large object is megabytes, and undo
+        // keeps a copy of every slice in the chain for every entry
+        SISlice big; big.uMin = 0; big.vMin = 0; big.uStep = 1; big.vStep = 1;
+        paint(big, 0, 0); paint(big, 2000, 2000);
+        check(big.bytes() > 4u * 1000 * 1000, "a 2000² outline retains megabytes");
+    }
+
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "THERE WERE FAILURES");
     return failures != 0;
 }

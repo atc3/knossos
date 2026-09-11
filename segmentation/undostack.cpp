@@ -43,9 +43,16 @@
 
 namespace {
 constexpr std::size_t MAX_ENTRIES = 10;
-// Compressed ceiling across the whole stack. Label data is mostly runs of one id, so a
-// 16 MiB cube usually lands well under 1 MiB — this is a lot of history in practice.
-constexpr std::size_t MAX_BYTES = 2ull * 1024 * 1024 * 1024;
+/* Ceiling on everything the stack retains, past and future together.
+ *
+ * Was 2 GiB, on the reasoning that label data is mostly runs of one id so a 16 MiB cube
+ * compresses to well under 1 MiB and 2 GiB is therefore an enormous amount of history.
+ * Both halves of that were true and the conclusion still wrong: the figure being compared
+ * against only counted the compressed cubes, so the real retention was larger by however
+ * much the key-slice masks came to, and 2 GiB of genuinely-accounted history sits on top
+ * of a supercube that is already gigabytes. 512 MiB of compressed snapshots is still a
+ * deep history; raising it is one line if the trade is worth it on a bigger machine. */
+constexpr std::size_t MAX_BYTES = 512ull * 1024 * 1024;
 
 QByteArray serializeMergelist() {
     QByteArray out;
@@ -181,10 +188,27 @@ void UndoStack::recordCube(const std::size_t layerId, const CoordOfCube & cubeCo
     pending.bytes += compressed.size();
 }
 
+/* Everything an entry retains, not just the part that was easy to measure.
+ *
+ * `bytes` accumulates compressed cube snapshots as they are recorded, which for a long
+ * time was taken to be the whole cost. It is not: an entry also carries a full copy of
+ * every shape-interpolation key slice and, when the object graph moved, the serialised
+ * mergelist. On a long chain over a large object the masks alone run to tens of megabytes
+ * per entry, so the stack could sit several times over its own ceiling while every number
+ * the budget looked at said it was well inside. */
+void UndoStack::accountForEntry(UndoEntry & entry) {
+    entry.bytes += entry.shapeInterpolation.bytes();
+    // implicitly shared between entries taken between two graph changes, so this
+    // over-counts a run of them — deliberately, since the budget should err high
+    entry.bytes += static_cast<std::size_t>(entry.mergelist.size());
+    entry.bytes += entry.selectedObjectIds.capacity() * sizeof(std::uint64_t);
+}
+
 void UndoStack::endScope() {
     if (--depth != 0 || pending.cubes.empty()) {
         return;
     }
+    accountForEntry(pending);
     if (pending.bytes > MAX_BYTES) {
         // Being honest beats pretending: one operation too big to hold means the history
         // is gone, and the History window says so rather than showing stale entries.
@@ -203,13 +227,29 @@ void UndoStack::endScope() {
     emit changed();
 }
 
+/* The ceiling covers the whole stack, redo included.
+ *
+ * endScope() clears `future` before calling this, so historically it only ever saw an
+ * empty redo tail and measuring `past` alone was equivalent. That stopped being true once
+ * undo() and redo() started calling it: a run of undos moves entries into `future`, where
+ * nothing but the ten-entry count limit applied to them. Charging them against the same
+ * allowance keeps the total bounded however the entries are distributed between the two. */
 void UndoStack::enforceBudget() {
+    std::size_t futureBytes{0};
+    for (const auto & entry : future) {
+        futureBytes += entry.bytes;
+    }
+    while (future.size() > MAX_ENTRIES) {
+        futureBytes -= future.front().bytes;
+        future.pop_front();
+    }
     std::vector<std::size_t> sizes;
     sizes.reserve(past.size());
     for (const auto & entry : past) {
         sizes.push_back(entry.bytes);
     }
-    for (auto evict = entriesToEvict(sizes, MAX_ENTRIES, MAX_BYTES); evict != 0; --evict) {
+    const auto allowance = futureBytes < MAX_BYTES ? MAX_BYTES - futureBytes : 0;
+    for (auto evict = entriesToEvict(sizes, MAX_ENTRIES, allowance); evict != 0; --evict) {
         past.pop_front();
     }
 }
@@ -299,6 +339,7 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
     state->viewer->reslice_notify();
     Annotation::singleton().setUnsavedChanges(true);
 
+    accountForEntry(inverse);
     opposite.push_back(std::move(inverse));
     while (opposite.size() > MAX_ENTRIES) {
         opposite.pop_front();
@@ -312,6 +353,7 @@ void UndoStack::undo(QWidget * const parent) {
     auto entry = std::move(past.back());
     past.pop_back();
     state->viewer->suspend([&]{ applyEntry(entry, future, parent); return 0; });
+    enforceBudget();// the entry just moved between the stacks; the ceiling covers both
     emit changed();
     state->viewer->run();
 }
@@ -323,6 +365,7 @@ void UndoStack::redo(QWidget * const parent) {
     auto entry = std::move(future.back());
     future.pop_back();
     state->viewer->suspend([&]{ applyEntry(entry, past, parent); return 0; });
+    enforceBudget();// the entry just moved between the stacks; the ceiling covers both
     emit changed();
     state->viewer->run();
 }

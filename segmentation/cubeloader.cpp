@@ -434,8 +434,8 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t & brush
     return readRegion(region.first, region.second, visit);
 }
 
-CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged) {
-    const auto guard = currentPaintGuard();
+CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, const bool markChanged, const bool respectPaintTarget) {
+    const auto guard = respectPaintTarget ? currentPaintGuard() : PaintGuard{Segmentation::PaintTarget::Anything, Segmentation::singleton().getBackgroundId()};
     const std::unique_ptr<const ForeignProximity> gap = guard.needsGap(value)
             ? std::make_unique<const ForeignProximity>(globalFirst, globalLast, value, Segmentation::singleton().getBackgroundId())
             : nullptr;
