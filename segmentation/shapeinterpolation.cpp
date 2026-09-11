@@ -740,6 +740,15 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
             unmarked.clear();
         }
     };
+    /* The mask being written is copied out, not pointed at.
+     *
+     * maskAtDepth() returns the one shared preview slice, and awaitLoader() further down
+     * runs processEvents() to keep the progress dialog alive — which repaints, which asks
+     * for the preview at whatever depth the viewports are showing and overwrites it under
+     * us. Holding the pointer across that wrote one depth's outline at another depth, on
+     * exactly the commits that have to move the loader. Reusing one buffer across depths
+     * keeps the copy from being a fresh allocation each time. */
+    SISlice writeSlice;
     int done = 0;
     for (const auto depth : depths) {
         progress.setValue(done++);
@@ -749,16 +758,18 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
             break;
         }
 
-        const auto * slice = maskAtDepth(depth);
-        if (slice == nullptr || slice->count() == 0) {
+        const auto * maskPtr = maskAtDepth(depth);
+        if (maskPtr == nullptr || maskPtr->count() == 0) {
             // Not necessarily benign: interpolantFor() also returns nothing when a slice
             // pair spans more than MAX_PIXELS, and skipping that in silence is what makes a
             // gap in the middle of a chain look inexplicable. Counted and reported.
-            if (slice == nullptr && !hasSliceAt(depth)) {
+            if (maskPtr == nullptr && !hasSliceAt(depth)) {
                 ++result.depthsSkipped;
             }
             continue;
         }
+        writeSlice = *maskPtr;
+        const auto * const slice = &writeSlice;
         // the interpolated grid is padded well beyond the shape; clip to the painted extent
         Coordinate first, last;
         axisSet(first, axis, depth);
@@ -872,20 +883,21 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
     const auto wAxis = (fixedAxis == uAxisIdx) ? vAxisIdx : uAxisIdx;
     const bool fixedIsU = fixedAxis == uAxisIdx;
 
-    // build every pair up front so the extent below covers the padded interpolation grids
-    std::vector<const Interpolant *> pairs;
-    for (auto it = std::begin(slices); std::next(it) != std::end(slices); ++it) {
-        pairs.push_back(interpolantFor(it->first, std::next(it)->first));
-    }
-
     int wMin = std::numeric_limits<int>::max(), wMax = std::numeric_limits<int>::min(), wStep = 1;
     const auto extend = [&](const int lo, const int size, const int st){
         wStep = st;
         wMin = std::min(wMin, lo);
         wMax = std::max(wMax, lo + size * st);
     };
-    for (const auto * in : pairs) {
-        if (in != nullptr) {
+    /* Each pair's extent is read out as plain numbers in the same breath as it is built.
+     *
+     * This used to collect a pointer per pair and then walk them, which is only sound while
+     * nothing evicts: interpolantFor() drops the whole cache when the chain's distance
+     * transforms exceed their byte budget, so from the first pair past that budget onwards
+     * every pointer already collected was dangling and the extents came out of freed
+     * memory. Long chains are precisely the ones that exceed it. */
+    for (auto it = std::begin(slices); std::next(it) != std::end(slices); ++it) {
+        if (const auto * in = interpolantFor(it->first, std::next(it)->first); in != nullptr) {
             extend(fixedIsU ? in->vMin : in->uMin, fixedIsU ? in->vSize : in->uSize, fixedIsU ? in->vStep : in->uStep);
         }
     }
@@ -913,13 +925,9 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
     const auto vSize = axisIsU ? wSize : aSize;
     std::vector<std::uint8_t> mask(static_cast<std::size_t>(uSize) * vSize, 0);
 
-    auto pair = std::begin(slices);
     for (int ai = 0; ai < aSize; ++ai) {
         const auto depth = aMin + ai * aStep;
         const auto painted = slices.find(depth);
-        while (std::next(pair) != std::end(slices) && std::next(pair)->first < depth) {
-            ++pair;
-        }
         const Interpolant * in = nullptr;
         if (painted == std::end(slices)) {
             const auto lo = prevDepth(depth), hi = nextDepth(depth);

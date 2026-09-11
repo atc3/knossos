@@ -50,9 +50,15 @@ constexpr std::size_t MAX_ENTRIES = 10;
  * Both halves of that were true and the conclusion still wrong: the figure being compared
  * against only counted the compressed cubes, so the real retention was larger by however
  * much the key-slice masks came to, and 2 GiB of genuinely-accounted history sits on top
- * of a supercube that is already gigabytes. 512 MiB of compressed snapshots is still a
- * deep history; raising it is one line if the trade is worth it on a bigger machine. */
-constexpr std::size_t MAX_BYTES = 512ull * 1024 * 1024;
+ * of a supercube that is already gigabytes.
+ *
+ * Then measurement said the stack was holding 15-51 MiB in real sessions while the process
+ * was at several gigabytes, i.e. the history was never the problem. So the ceiling is back
+ * up: its only remaining job is to bound a pathological single operation, and being tight
+ * about it costs something real — an entry over the ceiling drops the whole history, and
+ * the operation most likely to be that large is accepting a long interpolation chain, which
+ * is exactly when undo is worth having. */
+constexpr std::size_t MAX_BYTES = 1024ull * 1024 * 1024;
 
 QByteArray serializeMergelist() {
     QByteArray out;
