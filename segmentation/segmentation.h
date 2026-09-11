@@ -291,6 +291,16 @@ public:
     // Empty when nothing is selected.
     std::optional<uint64_t> currentPaintSubobjectId() const;
     bool objectOrder(const uint64_t &lhsIndex, const uint64_t &rhsIndex) const;
+    /* Select the object a subobject belongs to, preferring the merged one.
+     *
+     * selectObjectFromSubObject() insists on an object holding this subobject *alone*, and
+     * creates one when there is none — so for a subobject that has been merged into a group
+     * it quietly adds a second, single-subobject object and selects that. The merge itself
+     * survives, but the voxels then draw in the new object's colour rather than the group's,
+     * which looks exactly like the group coming apart, and the mergelist gains an object
+     * nobody asked for. Clicking a voxel has always resolved to the largest containing
+     * object instead; this is that, for the paths that start from an id. */
+    void selectMergedObjectFromSubObject(const uint64_t subObjectId, const Coordinate & position);
     uint64_t largestObjectContainingSubobjectId(const uint64_t subObjectId, const Coordinate & location);
     uint64_t largestObjectContainingSubobject(const SubObject & subobject) const;
     uint64_t tryLargestObjectContainingSubobject(const uint64_t subObjectId) const;

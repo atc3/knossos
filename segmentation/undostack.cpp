@@ -176,16 +176,36 @@ void UndoStack::beginScope(const QString & description) {
     graphRevisionAtScopeStart = seg.graphRevision;
 }
 
-void UndoStack::recordCube(const std::size_t layerId, const CoordOfCube & cubeCoord, const void * const rawCube) {
+/* Returns whether this call is the one that took the snapshot, so a caller that turns out
+ * not to have written anything can hand it back — see discardCube(). */
+bool UndoStack::recordCube(const std::size_t layerId, const CoordOfCube & cubeCoord, const void * const rawCube) {
     if (depth == 0 || rawCube == nullptr || layerId != pending.layerId) {
-        return;
+        return false;
     }
     if (pending.cubes.find(cubeCoord) != std::end(pending.cubes)) {
-        return;// already have this cube's "before" state for this operation
+        return false;// already have this cube's "before" state for this operation
     }
     auto & compressed = pending.cubes[cubeCoord];
     snappy::Compress(reinterpret_cast<const char *>(rawCube), overlayCubeBytes(layerId), &compressed);
     pending.bytes += compressed.size();
+    return true;
+}
+
+/* Drop a snapshot taken for a write that did not happen.
+ *
+ * A snapshot has to be taken before the visitor runs, because afterwards the old contents
+ * are gone — but plenty of passes over a region read every voxel and write none, and an
+ * entry holding a compressed copy of every cube merely *looked* at is mostly padding.
+ * Only ever called with a cubeCoord that the matching recordCube() reported it inserted,
+ * so this can never discard the snapshot belonging to an earlier write in the same scope. */
+void UndoStack::discardCube(const std::size_t layerId, const CoordOfCube & cubeCoord) {
+    if (depth == 0 || layerId != pending.layerId) {
+        return;
+    }
+    if (const auto it = pending.cubes.find(cubeCoord); it != std::end(pending.cubes)) {
+        pending.bytes -= std::min(pending.bytes, it->second.size());
+        pending.cubes.erase(it);
+    }
 }
 
 /* Everything an entry retains, not just the part that was easy to measure.

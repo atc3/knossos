@@ -616,6 +616,13 @@ void Segmentation::selectObjectFromSubObject(Segmentation::SubObject & subobject
     selectObject(objectFromSubobject(subobject, position));
 }
 
+void Segmentation::selectMergedObjectFromSubObject(const uint64_t soid, const Coordinate & position) {
+    auto & subobject = subobjectFromId(soid, position);// creates the object when the id is new
+    const auto index = largestObjectContainingSubobject(subobject);
+    setObjectLocation(index, position);
+    selectObject(index, position);
+}
+
 void Segmentation::selectObjectFromSubObject(const uint64_t soid, const Coordinate & position) {
     selectObject(objectFromSubobject(subobjectFromId(soid, position), position));
 }

@@ -91,7 +91,9 @@ public:
     // called by the recording hooks; no-ops when no scope is open
     void beginScope(const QString & description);
     void endScope();
-    void recordCube(std::size_t layerId, const CoordOfCube &, const void * rawCube);
+    bool recordCube(std::size_t layerId, const CoordOfCube &, const void * rawCube);
+    // Hand back a snapshot recordCube() just took, for a pass that wrote nothing.
+    void discardCube(std::size_t layerId, const CoordOfCube & cubeCoord);
     bool scopeOpen() const { return depth != 0; }
 
 signals:

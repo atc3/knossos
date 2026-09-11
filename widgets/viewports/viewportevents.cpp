@@ -572,7 +572,7 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         if (!steal && si.active() && si.covers(clickPos)) {
             if (seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != si.subobjectId()) {
                 seg.clearObjectSelection();
-                seg.selectObjectFromSubObject(si.subobjectId(), clickPos);
+                seg.selectMergedObjectFromSubObject(si.subobjectId(), clickPos);
                 state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(si.subobjectId()));
                 state->viewer->run();
             }
@@ -587,7 +587,7 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         }
         // no chain running: adopt the clicked object and start one in this viewport
         seg.clearObjectSelection();
-        seg.selectObjectFromSubObject(clicked, clickPos);
+        seg.selectMergedObjectFromSubObject(clicked, clickPos);
         si.beginAt(static_cast<brush_t::view_t>(viewportType), clicked);
     } else if (!steal && clicked != si.subobjectId()) {
         return false;// a plain click on someone else's object is still just a selection
@@ -595,7 +595,7 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         // clicking back onto the chain's own object after having selected another one:
         // switch the brush back to it, which is the only way back without typing the id
         seg.clearObjectSelection();
-        seg.selectObjectFromSubObject(clicked, clickPos);
+        seg.selectMergedObjectFromSubObject(clicked, clickPos);
         state->viewer->mainWindow.warnShapeInterpolation(tr("Back on id %1, the object this chain is building.").arg(clicked));
         state->viewer->run();
         return true;

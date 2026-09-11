@@ -114,7 +114,7 @@ void SubobjectIdEdit::commit() {
     }
     seg.setPaintingBackground(false);
     seg.clearObjectSelection();
-    seg.selectObjectFromSubObject(id, state->viewerState->currentPosition);
+    seg.selectMergedObjectFromSubObject(id, state->viewerState->currentPosition);
     state->viewer->run();
     refresh();
 }

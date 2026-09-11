@@ -201,20 +201,41 @@ CubeCoordSet processRegion(const Coordinate & globalFirst, const Coordinate &  g
         auto rawcube = getRawCube(globalCubeBegin);
         if (rawcube.first) {
             // snapshot before the first write lands in this cube (no-op outside a scope)
-            UndoStack::singleton().recordCube(Segmentation::singleton().layerId, cubeCoord, rawcube.second);
+            const bool snapshotted = UndoStack::singleton().recordCube(Segmentation::singleton().layerId, cubeCoord, rawcube.second);
             auto cubeRef = getCubeRef(rawcube.second);
             const auto globalCubeEnd = globalCubeBegin + Dataset::current().scaleFactor.componentMul(cubeShape);
             const auto localStart = globalFirst.capped(globalCubeBegin, globalCubeEnd).insideCube(cubeShape, Dataset::current().scaleFactor);
             const auto localEnd = globalLast.capped(globalCubeBegin, globalCubeEnd).insideCube(cubeShape, Dataset::current().scaleFactor);
 
+            /* Whether the visitor actually wrote anything here, rather than merely whether
+             * it was shown this cube.
+             *
+             * The returned set is what callers hand to coordCubesMarkChanged(), and marking
+             * a cube modified is not free or reversible: it is copied, compressed and held
+             * in the loader's cache for the rest of the session, because that cache *is* the
+             * unsaved annotation. Reporting every visited cube meant every operation that
+             * sweeps a region — an interpolation commit over a large object, a hole fill, a
+             * plain read-back — permanently charged the session for cubes it never touched.
+             * The comparison costs one register read per voxel against work already done. */
+            bool cubeChanged{false};
             for (int z = localStart.z; z <= localEnd.z; ++z)
             for (int y = localStart.y; y <= localEnd.y; ++y)
             for (int x = localStart.x; x <= localEnd.x; ++x) {
                 const Coordinate globalFromVoxelCoord{globalCubeBegin + Dataset::current().scaleFactor.componentMul(Coordinate{x, y, z})};
                 const auto adjustedGlobalCoord = globalFromVoxelCoord.capped(globalFirst, globalLast + 1);// fit to region boundaries that don’t exactly match mag2+ voxel coords
-                func(cubeRef[z][y][x], adjustedGlobalCoord);
+                auto & voxel = cubeRef[z][y][x];
+                const auto before = voxel;
+                func(voxel, adjustedGlobalCoord);
+                cubeChanged = cubeChanged || voxel != before;
             }
-            cubeCoords.emplace(cubeCoord);
+            if (cubeChanged) {
+                cubeCoords.emplace(cubeCoord);
+            } else if (snapshotted) {
+                // nothing happened here, so the undo entry should not be carrying a copy of
+                // it. Only the snapshot this call took: an earlier one in the same scope
+                // belongs to a write that did happen.
+                UndoStack::singleton().discardCube(Segmentation::singleton().layerId, cubeCoord);
+            }
         }
     }
     return cubeCoords;
