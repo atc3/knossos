@@ -83,6 +83,7 @@ class ViewportOrtho : public ViewportBase {
      * anyway wherever the object crosses the edge. */
     boost::optional<std::pair<Coordinate, Coordinate>> strokeBox;
     double strokeRadius{0};
+    bool strokeThreeDim{false};// whether the brush actually spanned slices
     std::uint64_t strokeSoid{0};
     void fillHolesClosedByStroke();
     virtual void mouseMoveEvent(QMouseEvent *event) override;

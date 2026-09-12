@@ -392,10 +392,17 @@ HoleFillReport fillEnclosedHoles(const HoleFillRequest & request) {
         totalFilled += filledHere;
         ++report.planesFilled;
 
-        // the key slice has to learn about the interior too, or accepting the chain would
-        // write the outline back over it
+        /* An existing key slice has to learn about the interior, or accepting the chain
+         * would write the outline back over it.
+         *
+         * Only an existing one. absorbRegion() creates a key slice at a depth that has none
+         * — which is right for a flood fill, where adding a slice is the point, and wrong
+         * here: this runs at the end of every stroke, so any depth it happened to fill
+         * something in became a key slice nobody drew. The plane the user actually drew on
+         * is always already keyed, because painting on an interpolated slice bakes it
+         * first. */
         auto & si = ShapeInterpolation::singleton();
-        if (si.active() && si.subobjectId() == request.soid && si.normalAxis() == axis) {
+        if (si.active() && si.subobjectId() == request.soid && si.normalAxis() == axis && si.hasSliceAt(depth)) {
             QString reason;
             si.absorbRegion(centre, hereMin, hereMax, depth, request.soid, reason);
         }

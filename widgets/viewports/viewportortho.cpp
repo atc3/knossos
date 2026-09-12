@@ -104,6 +104,7 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     strokeBox = boost::none;
     strokeRadius = 0;
     strokeSoid = 0;
+    strokeThreeDim = false;
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
         paintUndoScope = std::make_unique<UndoScope>(
                     Segmentation::singleton().brush.isInverse() || Segmentation::singleton().paintingBackground() ? tr("Erase") : tr("Brush stroke"));
@@ -131,11 +132,21 @@ void ViewportOrtho::fillHolesClosedByStroke() {
     if (viewportType != VIEWPORT_XY && viewportType != VIEWPORT_XZ && viewportType != VIEWPORT_ZY) {
         return;// an arbitrary plane has no axis-aligned slice to enclose anything in
     }
-    // the stamp centres widened by the brush, which is where its footprint reached
+    /* The stamp centres widened by the brush — but only across the plane it drew in.
+     *
+     * A 2D brush covers a disc in one slice and nothing on either side of it, so widening
+     * along the slice normal invented planes the stroke never touched. With a 120 nm brush
+     * on 30 nm sections that was eleven planes instead of one, and each one the fill found
+     * anything enclosed in became a key slice the user never drew. Only a brush that really
+     * does span slices gets widened along the normal. */
     const auto & scale = Dataset::current().scales[0];
-    const Coordinate reach{static_cast<int>(strokeRadius / scale.x) + 1,
-                           static_cast<int>(strokeRadius / scale.y) + 1,
-                           static_cast<int>(strokeRadius / scale.z) + 1};
+    const auto normalAxis = (viewportType == VIEWPORT_XY) ? 2 : (viewportType == VIEWPORT_XZ) ? 1 : 0;
+    Coordinate reach{static_cast<int>(strokeRadius / scale.x) + 1,
+                     static_cast<int>(strokeRadius / scale.y) + 1,
+                     static_cast<int>(strokeRadius / scale.z) + 1};
+    if (!strokeThreeDim) {
+        axisSet(reach, normalAxis, 0);
+    }
     HoleFillRequest request;
     request.strokeMin = strokeBox->first - reach;
     request.strokeMax = strokeBox->second + reach;

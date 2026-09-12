@@ -187,6 +187,8 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                                 : std::make_pair(at, at);
                         vp.strokeRadius = std::max(vp.strokeRadius, brush.radius);
                         vp.strokeSoid = soid;
+                        // the local copy, which shape interpolation forces to two_dim
+                        vp.strokeThreeDim = brush.mode == brush_t::mode_t::three_dim;
                     }
                     if (shapeInterpolation) {
                         auto & si = ShapeInterpolation::singleton();
