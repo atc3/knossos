@@ -44,10 +44,28 @@ namespace {
 // margin around the union of two slice bounding boxes, so a shape shrinking towards
 // nothing has room to do so instead of being clipped at the border
 constexpr int PAD = 16;
-// refuse to interpolate a region larger than this many mask pixels; the transient cost is
-// two float distance transforms, i.e. 8 bytes per pixel
-constexpr std::size_t MAX_PIXELS = 2048 * 2048;
-// ceiling on the cached distance transforms across all slice pairs (floats, so ×4 bytes)
+/* Refuse to interpolate a region larger than this many mask pixels.
+ *
+ * The grid is the union of the two key slices' bounding boxes, so this is a limit on how
+ * *wide* an object may be, not how much of it is painted — and 2048² turned out to be well
+ * inside what people actually trace. An object spanning thirty 128-voxel chunks is 3840
+ * voxels across, which blows a 2048² cap on the first axis, and then interpolantFor()
+ * returns nothing and *every* depth between that pair of key slices comes out empty. That
+ * is the "some slices just don't interpolate" report, and it is why it tracked wide
+ * objects.
+ *
+ * The cost is two float distance transforms over the grid, 8 bytes per pixel, so 4096²
+ * peaks at ~134 MiB while a pair is being built. That is a lot to ask transiently, but the
+ * alternative is silently declining to interpolate. Beyond this the honest answer is still
+ * no, and the message says what to do about it. */
+constexpr std::size_t MAX_PIXELS = 4096 * 4096;
+/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes).
+ *
+ * The cache is cleared *before* the new pair is inserted, so a pair larger than this on its
+ * own is still cached — deliberately, since otherwise a wide object would recompute two
+ * distance transforms per depth. The practical effect is that retention is one pair, which
+ * at the MAX_PIXELS limit is ~134 MiB held for as long as the chain is live. Walking depths
+ * in order, as both the preview and the commit do, hits that one pair repeatedly. */
 constexpr std::size_t MAX_CACHED_FLOATS = 16 * 1024 * 1024;
 
 // How long to wait for the loader to make a cube resident before giving up on it. A miss
@@ -533,8 +551,11 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     }
     const auto pixels = static_cast<std::size_t>(uSize) * vSize;
     if (pixels > MAX_PIXELS) {
-        error = QObject::tr("Shape interpolation: the region spanned by slices %1 and %2 is %3×%4 voxels, over the %5×%5 limit. Zoom in, or split the object into shorter runs.")
-                    .arg(z1).arg(z2).arg(uSize).arg(vSize).arg(2048);
+        // the useful remedy is a coarser magnification, which divides the grid by the mag
+        // on both axes; splitting the run does not help, since the width is what bites
+        error = QObject::tr("Shape interpolation: slices %1 and %2 together span %3×%4 mask pixels, over the %5×%5 limit. "
+                            "Work at a coarser magnification, or trace this object in narrower pieces.")
+                    .arg(z1).arg(z2).arg(uSize).arg(vSize).arg(4096);
         return nullptr;
     }
 
@@ -798,7 +819,8 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
             const auto regionFirst = componentMax(first, cubeFirst);
             const auto regionLast = componentMin(last, cubeLast);
 
-            if (!regionCubeResidency(regionFirst, regionLast).second.empty()) {
+            bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
+            if (!resident) {
                 // not resident: pull the loader over to it, then wait. Everything written
                 // so far must be marked first, or moving away discards it.
                 flushMarks();
@@ -806,11 +828,23 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
                 if (!awaitLoader(progress)) {
                     result.cancelled = progress.wasCanceled();
                 }
+                /* Ask again rather than assuming the wait worked.
+                 *
+                 * awaitLoader() also returns on its timeout, and the write that followed
+                 * went into a cube that was still not there — where it is dropped without a
+                 * word. A wide object is the case that needs loading at all, walks the most
+                 * cubes, and gives the loader the least time per cube, so one slow load was
+                 * enough to punch a hole in the result at a chunk boundary. */
+                resident = regionCubeResidency(regionFirst, regionLast).second.empty();
             }
-            const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
-            if (touched.empty()) {
+            if (!resident) {
                 ++result.cubesMissing;
             } else {
+                /* An empty result means this cube held none of the shape, not that it
+                 * failed: processRegion() reports the cubes it changed, and most cubes in a
+                 * wide slice's bounding box are outside the outline. Counting those as
+                 * missing cried wolf on every wide object and buried the real ones. */
+                const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
                 unmarked.insert(std::begin(touched), std::end(touched));
             }
             if (result.cancelled) {
