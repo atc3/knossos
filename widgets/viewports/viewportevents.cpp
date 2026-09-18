@@ -169,7 +169,15 @@ void segmentation_brush_work(const QMouseEvent *event, ViewportOrtho & vp) {
                     // outline instead of being the only thing on an otherwise empty slice.
                     // Must happen before the stroke, or an erase would be undone by the bake.
                     auto & si = ShapeInterpolation::singleton();
-                    if (si.active() && si.normalAxisViewport() == static_cast<int>(vp.viewportType)) {
+                    /* An erase does not bake a previewed slice.
+                     *
+                     * Baking exists so that touching up an interpolated outline edits a
+                     * real one instead of dropping a stroke onto an empty slice. Rubbing
+                     * out is the opposite intent: there is nothing of yours there to rub
+                     * out yet, and baking first left a key slice — pinning the
+                     * interpolation at that depth — as the result of an erase. */
+                    const bool erasing = eraseBackground || brush.inverse;
+                    if (si.active() && !erasing && si.normalAxisViewport() == static_cast<int>(vp.viewportType)) {
                         QString note;
                         if (si.materializeAt(axisGet(coord, si.normalAxis()), note)) {
                             state->viewer->mainWindow.warnShapeInterpolation(note);

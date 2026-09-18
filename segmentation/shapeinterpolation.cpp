@@ -704,6 +704,161 @@ ShapeInterpolation::WriteResult ShapeInterpolation::eraseSlices(QWidget * const 
  * again: eviction only preserves a cube's edits if it is already in modifiedCacheQueue
  * (loader.cpp), so deferring the marking to the end would throw away everything the walk
  * had scrolled past. */
+void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
+    if (!ctx.unmarked.empty()) {
+        coordCubesMarkChanged(ctx.unmarked);
+        ctx.written.insert(std::begin(ctx.unmarked), std::end(ctx.unmarked));
+        ctx.unmarked.clear();
+    }
+}
+
+/* Writes one planar mask at one depth, cube by cube, making each cube resident first.
+ *
+ * KNOSSOS keeps only an M³ supercube around the current position in memory and drops
+ * writes to anything outside it without a word (cubeloader.cpp). There is no on-demand
+ * cube loading anywhere in the codebase, so the only lever is to move the position and let
+ * the loader follow. Doing that per cube keeps peak memory at one supercube however wide
+ * the object is, and the residency check means the common case — everything just painted
+ * and still resident — costs no movement at all. */
+void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
+                                     QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & areaMin = Annotation::singleton().movementAreaMin;
+    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    // an interpolated grid is padded well beyond the shape; clip to the mask's own extent
+    Coordinate first, last;
+    axisSet(first, axis, depth);
+    axisSet(last, axis, depth);
+    axisSet(first, uAxisIdx, mask.uMin);
+    axisSet(last, uAxisIdx, mask.uCoordOf(mask.uSize) - mask.uStep);
+    axisSet(first, vAxisIdx, mask.vMin);
+    axisSet(last, vAxisIdx, mask.vCoordOf(mask.vSize) - mask.vStep);
+    first = first.capped(areaMin, areaMax + 1);
+    last = last.capped(areaMin, areaMax + 1);
+
+    const auto inside = [this, &mask](const Coordinate & pos){
+        return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+    };
+
+    const auto & dataset = Dataset::current();
+    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+    const auto cubeBegin = dataset.global2cube(first);
+    const auto cubeEnd = dataset.global2cube(last) + 1;
+    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
+    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
+    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
+        const CoordOfCube cube{cx, cy, cz};
+        const auto cubeFirst = dataset.cube2global(cube);
+        const auto cubeLast = cubeFirst + cubeExtent - 1;
+        const auto regionFirst = componentMax(first, cubeFirst);
+        const auto regionLast = componentMin(last, cubeLast);
+
+        bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
+        if (!resident) {
+            // Everything written so far must be marked before the position moves, or moving
+            // away discards it: eviction preserves a cube's edits only if it is already
+            // queued as modified.
+            flushMarks(ctx);
+            state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
+            if (!awaitLoader(progress)) {
+                ctx.cancelled = ctx.cancelled || progress.wasCanceled();
+            }
+            /* Ask again rather than assuming the wait worked.
+             *
+             * awaitLoader() also returns on its timeout, and the write that followed went
+             * into a cube that was still not there — where it is dropped without a word. A
+             * wide object is the case that needs loading at all, walks the most cubes, and
+             * gives the loader the least time per cube, so one slow load was enough to
+             * punch a hole in the result at a chunk boundary. */
+            resident = regionCubeResidency(regionFirst, regionLast).second.empty();
+        }
+        if (!resident) {
+            ++ctx.cubesMissing;
+            if (ctx.missing.size() < 64) {// enough to diagnose, not enough to flood the log
+                ctx.missing.push_back(cube);
+            }
+        } else {
+            /* An empty result means this cube held none of the shape, not that it failed:
+             * processRegion() reports the cubes it changed, and most cubes in a wide slice's
+             * bounding box are outside the outline. Counting those as missing cried wolf on
+             * every wide object and buried the real ones. */
+            const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
+            ctx.unmarked.insert(std::begin(touched), std::end(touched));
+        }
+        if (ctx.cancelled) {
+            return;
+        }
+    }
+}
+
+bool ShapeInterpolation::copySliceAt(const int depth, QString & note) {
+    if (!started) {
+        note = QObject::tr("Shape interpolation: start a chain before copying a slice.");
+        return false;
+    }
+    const auto * mask = maskAtDepth(depth);
+    if (mask == nullptr || mask->count() == 0) {
+        note = QObject::tr("Nothing at slice %1 to copy.").arg(depth);
+        return false;
+    }
+    clipboard = *mask;
+    clipboard.depth = depth;
+    note = QObject::tr("Copied slice %1, %2 voxels. Move to another slice and paste.").arg(depth).arg(clipboard.count());
+    return true;
+}
+
+ShapeInterpolation::WriteResult ShapeInterpolation::pasteSliceAt(const int depth, QWidget * const parent) {
+    WriteResult result;
+    if (!started) {
+        result.message = QObject::tr("Shape interpolation: start a chain before pasting a slice.");
+        return result;
+    }
+    if (clipboard.count() == 0) {
+        result.message = QObject::tr("No slice has been copied yet.");
+        return result;
+    }
+    if (clipboard.uStep != axisGet(step, uAxisIdx) || clipboard.vStep != axisGet(step, vAxisIdx)) {
+        // the mask is indexed in voxels of the magnification it was taken at
+        result.message = QObject::tr("That slice was copied at a different magnification. Copy it again here.");
+        return result;
+    }
+    if (hasSliceAt(depth)) {
+        result.message = QObject::tr("Slice %1 is already a key slice. Delete it first if you mean to replace it.").arg(depth);
+        return result;
+    }
+
+    const UndoScope undoScope(QObject::tr("Paste key slice"));
+    const auto startPosition = state->viewerState->currentPosition;
+    QProgressDialog progress(QObject::tr("Pasting slice…"), QObject::tr("Cancel"), 0, 1, parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(400);
+    const LabelOnlyLoading labelOnly;
+
+    WriteCtx ctx;
+    writeMaskAt(clipboard, depth, soid, progress, ctx);
+    flushMarks(ctx);
+    progress.setValue(1);
+    state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
+
+    auto pasted = clipboard;
+    pasted.depth = depth;
+    slices[depth] = std::move(pasted);
+    wasEdited = true;
+    previewValid = false;
+    crossSectionValid = false;
+    ++gen;
+    emit changed();
+
+    result.cancelled = ctx.cancelled;
+    result.cubesMissing = ctx.cubesMissing;
+    result.cubesWritten = ctx.written.size();
+    result.depthsWritten = 1;
+    result.ok = !result.cancelled && result.cubesMissing == 0;
+    result.message = result.cubesMissing != 0
+        ? QObject::tr("Pasted onto slice %1, but %2 block(s) could not be loaded in time — it may have holes there.").arg(depth).arg(result.cubesMissing)
+        : QObject::tr("Pasted onto slice %1. Adjust it with the brush; it is a key slice now.").arg(depth);
+    return result;
+}
+
 ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeChain, const std::uint64_t value, const QString & title, QWidget * const parent) {
     const UndoScope undoScope(title);
     WriteResult result;
@@ -735,8 +890,6 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
     const std::vector<int> depths(std::begin(depthSet), std::end(depthSet));
 
     const auto startPosition = state->viewerState->currentPosition;
-    const auto & areaMin = Annotation::singleton().movementAreaMin;
-    const auto & areaMax = Annotation::singleton().movementAreaMax;
 
     QProgressDialog progress(title, QObject::tr("Cancel"), 0, static_cast<int>(depths.size()), parent);
     progress.setWindowModality(Qt::WindowModal);
@@ -745,37 +898,14 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
     // only the overlay matters here; don’t drag the EM data along behind every move
     const LabelOnlyLoading labelOnly;
 
-    CubeCoordSet written;
-    /* Dirty-marking is batched rather than done per write.
-     *
-     * coordCubesMarkChanged() is a BlockingQueuedConnection round trip to the loader thread
-     * plus a reslice notification to every viewport, so marking once per (depth, cube)
-     * costs hundreds of round trips on a long chain and dominates the commit. Batching is
-     * only safe as long as the set is flushed before the position moves: eviction preserves
-     * a cube's edits solely when it is already queued as modified (loader.cpp). */
-    CubeCoordSet unmarked;
-    const auto flushMarks = [&unmarked, &written](){
-        if (!unmarked.empty()) {
-            coordCubesMarkChanged(unmarked);
-            written.insert(std::begin(unmarked), std::end(unmarked));
-            unmarked.clear();
-        }
-    };
-    /* The mask being written is copied out, not pointed at.
-     *
-     * maskAtDepth() returns the one shared preview slice, and awaitLoader() further down
-     * runs processEvents() to keep the progress dialog alive — which repaints, which asks
-     * for the preview at whatever depth the viewports are showing and overwrites it under
-     * us. Holding the pointer across that wrote one depth's outline at another depth, on
-     * exactly the commits that have to move the loader. Reusing one buffer across depths
-     * keeps the copy from being a fresh allocation each time. */
+    WriteCtx ctx;
     SISlice writeSlice;
     int done = 0;
     for (const auto depth : depths) {
         progress.setValue(done++);
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
         if (progress.wasCanceled()) {
-            result.cancelled = true;
+            ctx.cancelled = true;
             break;
         }
 
@@ -789,78 +919,35 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
             }
             continue;
         }
+        /* The mask being written is copied out, not pointed at.
+         *
+         * maskAtDepth() returns the one shared preview slice, and awaitLoader() inside the
+         * walk runs processEvents() to keep the progress dialog alive — which repaints,
+         * which asks for the preview at whatever depth the viewports are showing and
+         * overwrites it under us. Holding the pointer across that wrote one depth's outline
+         * at another depth. Reusing one buffer keeps the copy off the allocator. */
         writeSlice = *maskPtr;
-        const auto * const slice = &writeSlice;
-        // the interpolated grid is padded well beyond the shape; clip to the painted extent
-        Coordinate first, last;
-        axisSet(first, axis, depth);
-        axisSet(last, axis, depth);
-        axisSet(first, uAxisIdx, slice->uMin);
-        axisSet(last, uAxisIdx, slice->uCoordOf(slice->uSize) - slice->uStep);
-        axisSet(first, vAxisIdx, slice->vMin);
-        axisSet(last, vAxisIdx, slice->vCoordOf(slice->vSize) - slice->vStep);
-        first = first.capped(areaMin, areaMax + 1);
-        last = last.capped(areaMin, areaMax + 1);
-
-        const auto inside = [this, slice](const Coordinate & pos){
-            return slice->at(slice->uIndexOf(axisGet(pos, uAxisIdx)), slice->vIndexOf(axisGet(pos, vAxisIdx))) != 0;
-        };
-
-        const auto & dataset = Dataset::current();
-        const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
-        const auto cubeBegin = dataset.global2cube(first);
-        const auto cubeEnd = dataset.global2cube(last) + 1;
-        for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
-        for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
-        for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
-            const CoordOfCube cube{cx, cy, cz};
-            const auto cubeFirst = dataset.cube2global(cube);
-            const auto cubeLast = cubeFirst + cubeExtent - 1;
-            const auto regionFirst = componentMax(first, cubeFirst);
-            const auto regionLast = componentMin(last, cubeLast);
-
-            bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
-            if (!resident) {
-                // not resident: pull the loader over to it, then wait. Everything written
-                // so far must be marked first, or moving away discards it.
-                flushMarks();
-                state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
-                if (!awaitLoader(progress)) {
-                    result.cancelled = progress.wasCanceled();
-                }
-                /* Ask again rather than assuming the wait worked.
-                 *
-                 * awaitLoader() also returns on its timeout, and the write that followed
-                 * went into a cube that was still not there — where it is dropped without a
-                 * word. A wide object is the case that needs loading at all, walks the most
-                 * cubes, and gives the loader the least time per cube, so one slow load was
-                 * enough to punch a hole in the result at a chunk boundary. */
-                resident = regionCubeResidency(regionFirst, regionLast).second.empty();
-            }
-            if (!resident) {
-                ++result.cubesMissing;
-            } else {
-                /* An empty result means this cube held none of the shape, not that it
-                 * failed: processRegion() reports the cubes it changed, and most cubes in a
-                 * wide slice's bounding box are outside the outline. Counting those as
-                 * missing cried wolf on every wide object and buried the real ones. */
-                const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
-                unmarked.insert(std::begin(touched), std::end(touched));
-            }
-            if (result.cancelled) {
-                break;
-            }
-        }
+        writeMaskAt(writeSlice, depth, value, progress, ctx);
         ++result.depthsWritten;
-        if (result.cancelled) {
+        if (ctx.cancelled) {
             break;
         }
     }
-    flushMarks();
+    flushMarks(ctx);
     progress.setValue(static_cast<int>(depths.size()));
 
     state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
-    result.cubesWritten = written.size();
+    result.cancelled = ctx.cancelled;
+    result.cubesMissing = ctx.cubesMissing;
+    result.cubesWritten = ctx.written.size();
+    if (ctx.cubesMissing != 0) {
+        // named in the log, because "a chunk of my object is missing" is otherwise
+        // impossible to tell from "the interpolation did not cover it"
+        qDebug() << "shape interpolation: " << ctx.cubesMissing << "block(s) could not be made resident:";
+        for (const auto & cube : ctx.missing) {
+            qDebug() << "   " << cube;
+        }
+    }
     result.ok = !result.cancelled && result.cubesMissing == 0;
     if (result.cancelled) {
         result.message = QObject::tr("Cancelled after writing %n slice(s). What was written is kept.", "", static_cast<int>(result.depthsWritten));

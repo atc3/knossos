@@ -1005,6 +1005,31 @@ void MainWindow::createMenus() {
     // through this action
     QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::centroidAlignmentChanged,
                      shapeInterpolationAlignAction, &QAction::setChecked);
+    /* Duplicate one slice's outline onto another.
+     *
+     * For the case where the run needs one more slice that is very nearly the same as the
+     * one before it — the alternative is redrawing it by hand for the sake of a few voxels.
+     * Interpolated slices can be copied too, since the shape halfway between two key slices
+     * is often the right starting point a few slices further along.
+     *
+     * Ctrl+Shift+C/V rather than plain Ctrl+C/V: Ctrl+V is paste-coordinate in the
+     * viewports, and these are only visible in shape interpolation anyway. */
+    copySliceAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Copy Key Slice"), this, [this]() {
+        QString note;
+        ShapeInterpolation::singleton().copySliceAt(
+            axisGet(state->viewerState->currentPosition, ShapeInterpolation::singleton().normalAxis()), note);
+        warnShapeInterpolation(note);
+    }, Qt::CTRL + Qt::SHIFT + Qt::Key_C);
+    pasteSliceAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Paste Key Slice Here"), this, [this]() {
+        auto & si = ShapeInterpolation::singleton();
+        const auto depth = axisGet(state->viewerState->currentPosition, si.normalAxis());
+        const auto result = state->viewer->suspend([this, &si, depth]{ return si.pasteSliceAt(depth, this); });
+        statusBar()->showMessage(result.message, 8000);
+        state->viewer->run();
+    }, Qt::CTRL + Qt::SHIFT + Qt::Key_V);
+    copySliceAction->setToolTip(tr("Copy the outline at this slice — painted or interpolated — so it can be stamped onto another."));
+    pasteSliceAction->setToolTip(tr("Write the copied outline at this slice and make it a key slice, ready to adjust with the brush."));
+
     shapeInterpolationDiscardAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), tr("Discard Painted Slices"), [this]() {
         auto & si = ShapeInterpolation::singleton();
         if (si.sliceCount() == 0) {
@@ -1565,7 +1590,8 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
         action->setVisible(fills);
         action->setEnabled(fills);
     }
-    for (auto * action : {shapeInterpolationAcceptAction, shapeInterpolationPreviewAction, shapeInterpolationAlignAction, shapeInterpolationDiscardAction}) {
+    for (auto * action : {shapeInterpolationAcceptAction, shapeInterpolationPreviewAction, shapeInterpolationAlignAction,
+                         shapeInterpolationDiscardAction, copySliceAction, pasteSliceAction}) {
         action->setVisible(shapeInterpolation);
         action->setEnabled(shapeInterpolation);// Return/Ctrl+P must not fire in other modes
     }

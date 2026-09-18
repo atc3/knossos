@@ -131,6 +131,7 @@ class MainWindow : public QMainWindow {
     QAction *paintBackgroundAction{};// checkable: paint/fill with id 0, i.e. erase
     QAction *fillEdgeGuardAction{};// checkable: keep fills out of the dataset's outer voxel shell
     QAction *fillEnclosedAction{};// checkable: fill what a stroke shut in, on mouse up
+    QAction *copySliceAction{}, *pasteSliceAction{};// duplicate one key slice's outline onto another
     class QMenu *paintTargetMenu{};
     void rebuildPaintTargetMenu();
     class QToolButton *viewportLayoutButton{};

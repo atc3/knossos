@@ -53,6 +53,7 @@
 		<tr><td><span class="sh">Shift + &larr;</span></td><td>Jump to first painted slice</td></tr>
 		<tr><td><span class="sh">Shift + &rarr;</span></td><td>Jump to last painted slice</td></tr>
 		<tr><td><span class="sh">Delete</span> / <span class="sh">Backspace</span></td><td>Delete the painted slice at the current depth</td></tr>
+		<tr><td><span class="sh">Ctrl + Shift + C</span> / <span class="sh">Ctrl + Shift + V</span></td><td>Copy the outline at this slice — painted or interpolated — and stamp it onto another, which becomes a key slice ready to adjust. For a run needing one more slice almost the same as the last</td></tr>
 		<tr><td><span class="sh">D</span> / <span class="sh">F</span></td><td>Step one slice back / forward</td></tr>
 		<tr><td><span class="sh">overwrite</span> (toolbar)</td><td>What the brush may write over: everything, only unlabelled voxels, or only unlabelled voxels not touching another label — which keeps a one-voxel gap around every object</td></tr>
 		<tr><td><span class="sh">Action menu</span></td><td>Lock painting to the current magnification</td></tr>

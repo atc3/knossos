@@ -30,9 +30,12 @@
 #include <QString>
 #include <QTimer>
 
+class QProgressDialog;
+
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <unordered_set>
 #include <vector>
 
 class QWidget;
@@ -183,6 +186,21 @@ public:
     };
     // Writes the whole chain — painted slices and every interpolated slice between them.
     WriteResult commit(QWidget * parent);
+
+    /* Copy one slice's outline and stamp it onto another.
+     *
+     * The case this exists for: you draw the second-to-last slice of a run, then find the
+     * last one still needs an outline that is very nearly the same. Redrawing it by hand is
+     * the only alternative, and the two differ by a few voxels.
+     *
+     * Copies whatever is at that depth, interpolated slices included — the interpolation
+     * between two key slices is often exactly the starting point you want a few slices
+     * further on. Pasting writes the voxels and keys the result, so it becomes a real slice
+     * you can then adjust with the brush. */
+    bool copySliceAt(int depth, QString & note);
+    bool hasCopiedSlice() const { return clipboard.count() != 0; }
+    std::size_t copiedSliceVoxels() const { return clipboard.count(); }
+    WriteResult pasteSliceAt(int depth, QWidget * parent);
     // Destructive rollback: erases the painted key slices back to background.
     WriteResult eraseSlices(QWidget * parent);
 
@@ -283,9 +301,25 @@ private:
     };
     bool seedSliceFromPlane(SISlice & slice, const Coordinate & seed, PlaneScan & scan, bool mayLoad, QWidget * parent = nullptr);
     WriteResult writeAll(bool wholeChain, std::uint64_t value, const QString & title, QWidget * parent);
+    /* State carried across the cube-by-cube walk that both the commit and the paste do.
+     *
+     * Dirty-marking is batched rather than done per write: coordCubesMarkChanged() is a
+     * blocking round trip to the loader thread plus a reslice notification per viewport, so
+     * marking once per (depth, cube) dominates a long chain. Batching is only safe while
+     * the set is flushed before the position moves — eviction preserves a cube's edits only
+     * if it is already queued as modified — which is what flushMarks() is for. */
+    struct WriteCtx {
+        std::unordered_set<CoordOfCube> unmarked, written;
+        std::size_t cubesMissing{0};
+        std::vector<CoordOfCube> missing;// for the log; a silent hole is the bug to avoid
+        bool cancelled{false};
+    };
+    void flushMarks(WriteCtx &);
+    void writeMaskAt(const SISlice & mask, int depth, std::uint64_t value, QProgressDialog & progress, WriteCtx &);
 
     bool alignCentroids{true};
 
+    SISlice clipboard;// see copySliceAt(); outlives the chain it was taken from
     SISlice previewSlice;
     std::uint64_t previewGen{0};
     bool previewValid{false};
