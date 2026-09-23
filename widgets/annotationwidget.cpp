@@ -29,6 +29,8 @@
 #include <QLineEdit>
 #include <QCheckBox>
 #include <QSettings>
+
+#include <vector>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -43,6 +45,7 @@ AnnotationWidget::AnnotationWidget(QWidget *parent) : DialogVisibilityNotify(ANN
     tabs.addTab(&skeletonTab, "Skeleton");
     tabs.addTab(&segmentationTab, "Segmentation");
     tabs.addTab(&commentsTab, "Comments");
+    tabs.addTab(&inventoryTab, "Inventory");
 
     mainLayout.addWidget(&tabs);
     mainLayout.setContentsMargins({});
@@ -50,10 +53,13 @@ AnnotationWidget::AnnotationWidget(QWidget *parent) : DialogVisibilityNotify(ANN
 }
 
 void AnnotationWidget::setSegmentationVisibility(const bool visible) {
-    const auto index = tabs.indexOf(&segmentationTab);
-    tabs.setTabEnabled(index, visible);
     const QString tooltip = "Enable the segmentation overlay when loading a dataset";
-    tabs.setTabToolTip(index, visible ? "" : tooltip);
+    // the inventory is a list of segmentation objects, so it is meaningless without the layer
+    for (auto * tab : std::vector<QWidget *>{&segmentationTab, &inventoryTab}) {
+        const auto index = tabs.indexOf(tab);
+        tabs.setTabEnabled(index, visible);
+        tabs.setTabToolTip(index, visible ? "" : tooltip);
+    }
 }
 
 void AnnotationWidget::loadSettings() {
@@ -66,6 +72,7 @@ void AnnotationWidget::loadSettings() {
     settings.endGroup();
 
     commentsTab.loadSettings();
+    inventoryTab.loadSettings();
 }
 
 void AnnotationWidget::saveSettings() {
@@ -78,4 +85,5 @@ void AnnotationWidget::saveSettings() {
     settings.endGroup();
 
     commentsTab.saveSettings();
+    inventoryTab.saveSettings();
 }

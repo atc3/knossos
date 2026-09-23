@@ -317,6 +317,16 @@ public:
     uint64_t largestObjectContainingSubobjectId(const uint64_t subObjectId, const Coordinate & location);
     uint64_t largestObjectContainingSubobject(const SubObject & subobject) const;
     uint64_t tryLargestObjectContainingSubobject(const uint64_t subObjectId) const;
+    /* The index of the object a known subobject belongs to, or nothing if the id is new.
+     *
+     * tryLargestObjectContainingSubobject() cannot answer this: it returns 0 for an unknown
+     * id, but Object::index counts up from ++highestIndex with highestIndex starting at
+     * UINT64_MAX, so the first object's index is 0 too — "unknown" and "the first object"
+     * are the same answer. And unlike selectMergedObjectFromSubObject() this creates
+     * nothing and moves nothing, which is what a caller holding a long list of ids needs:
+     * that one sets the object's location as a side effect, so using it merely to look
+     * something up would overwrite wherever the user last painted. */
+    std::optional<uint64_t> objectIndexOfSubobject(const uint64_t subObjectId) const;
     uint64_t smallestImmutableObjectContainingSubobject(const SubObject & subobject) const;
     decltype(defaultMergeClass) getDefaultMergeClass() const;
     void setDefaultMergeClass(const QString & mergeClass);

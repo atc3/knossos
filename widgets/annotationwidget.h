@@ -26,6 +26,7 @@
 #include "tools/skeletonview.h"
 #include "tools/commentstab.h"
 #include "widgets/DialogVisibilityNotify.h"
+#include "widgets/tools/objectinventoryview.h"
 
 #include <QShowEvent>
 #include <QTabWidget>
@@ -38,6 +39,7 @@ public:
     SkeletonView skeletonTab{this};
     SegmentationView segmentationTab{this};
     CommentsTab commentsTab;
+    ObjectInventoryView inventoryTab{this};
     explicit AnnotationWidget(QWidget *parent = 0);
     void setSegmentationVisibility(const bool visible);
     void saveSettings();

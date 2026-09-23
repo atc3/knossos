@@ -89,3 +89,45 @@ ring as open.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/holefill_test holefill_test.cpp && /tmp/holefill_test
 ```
+
+## inventoryaccumulator_test
+
+Exercises `segmentation/inventoryaccumulator.h`, the tally behind the object inventory: the
+Z-order sweep, the block-to-magnification-1 coordinate arithmetic, and the choice of which
+voxel to remember per object.
+
+Two properties are worth having pinned. The first is that the stored position is a real
+voxel of its object: the mean of a bent shape sits outside it, so a centroid would send
+"next object" to empty neuropil beside a vessel rather than into it — there is a test with
+an L-shaped object asserting that its mean is *not* on it while the stored position is. The
+second is that the answer does not depend on the order blocks arrive in, since they arrive
+over minutes, out of order, and across restarts; the test shuffles them and requires every
+object to come out identical, and separately checks that a scan resumed halfway from the
+cache matches one that never stopped.
+
+The block-count checks also pin the real dataset sizes the feature was designed around
+(1344 blocks at 8× for the largest volume, 880 at magnification 1 for a crop), because
+those numbers are what the scan budget is set against.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/invacc_test inventoryaccumulator_test.cpp && /tmp/invacc_test
+```
+
+## inventoryfilter_test
+
+Exercises `widgets/tools/inventoryfilter.h`, which decides what the Inventory tab shows and
+where the next/previous keys go.
+
+The guarantee the feature rests on is that pressing "next" twenty times shows twenty
+different objects, once each, while a sweep is still appending to the list underneath. So
+the central test is a randomised one: 200 scans built batch by batch must produce exactly
+what rebuilding the row list from scratch would, since any divergence means the key silently
+skips objects. It also pins that the row list stays strictly increasing, that a batch
+contributing nothing reports nothing (so no row-insertion signal is emitted), that raising
+the minimum size mid-walk resumes at the next surviving object instead of jumping back to
+the top, and that the walk caps at both ends rather than wrapping — at this list length a
+silent wrap is indistinguishable from the key having done nothing.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/invfilter_test inventoryfilter_test.cpp && /tmp/invfilter_test
+```

@@ -175,6 +175,9 @@ class MainWindow : public QMainWindow {
     QAction *shapeInterpolationToggleModeAction{};
     QAction *jumpToActiveNodeAction{};// held so its `S` shortcut can yield in paint modes
     QAction *nextNodeInTableAction{};// held so its `N` shortcut can yield in paint modes
+    /* Held only so their auto-repeat can be turned off. Unlike nextNodeInTableAction these
+     * two stay enabled in every work mode on purpose — see the comment at their binding. */
+    QAction *nextInventoryObjectAction{}, *prevInventoryObjectAction{};
     QAction *magLockAction{};
     void refreshMagLockAction();
     QAction *undoAction{};
@@ -220,6 +223,12 @@ class MainWindow : public QMainWindow {
     QLabel hoverLabel;
     QLabel GUIModeLabel{""};
     QLabel shapeInterpolationLabel;// persistent chain state: plane, key slices, span
+    /* How far the object inventory sweep has got. Permanent, for the same reason the label
+     * above is: the sweep runs for minutes while transient messages come and go, and a
+     * non-permanent widget would blink out for the length of every one of them. */
+    QProgressBar inventoryScanProgressBar;
+    QLabel inventoryScanLabel;
+    void updateInventoryScanProgress(quint64 done, quint64 total, quint64 objects);
     QString shapeInterpolationWarning;// shown in that label, in place of the summary
     QTimer shapeInterpolationWarningTimer;
     QLabel nodeLockingLabel;

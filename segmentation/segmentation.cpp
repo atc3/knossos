@@ -411,6 +411,14 @@ uint64_t Segmentation::tryLargestObjectContainingSubobject(const uint64_t subObj
     return largestObjectContainingSubobject(it->second);
 }
 
+std::optional<uint64_t> Segmentation::objectIndexOfSubobject(const uint64_t subObjectId) const {
+    const auto it = subobjects.find(subObjectId);
+    if (it == std::end(subobjects)) {
+        return std::nullopt;
+    }
+    return largestObjectContainingSubobject(it->second);
+}
+
 uint64_t Segmentation::smallestImmutableObjectContainingSubobject(const Segmentation::SubObject & subobject) const {
     auto comparitor = std::bind(&Segmentation::objectOrder, this, std::placeholders::_1, std::placeholders::_2);
     const auto objectIndex = *std::min_element(std::begin(subobject.objects), std::end(subobject.objects), comparitor);

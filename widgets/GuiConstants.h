@@ -42,7 +42,13 @@ const QString VIEWPORT_LAYOUTS = "viewport_layouts";
 const QString SEGMENTATION_BRUSH_RADIUS = "segmentation_brush_radius";// nm, remembered across launches
 const QString SEGMENTATION_ALIGN_CENTROIDS = "segmentation_interpolation_align_centroids";// remembered across launches
 const QString SEGMENTATION_FILL_ENCLOSED = "segmentation_fill_enclosed_holes";// remembered across launches
+const QString OBJECT_INVENTORY_TAB = "object_inventory_tab";
+const QString INVENTORY_MIN_VOXELS = "inventory_min_voxels";
+const QString INVENTORY_HIDE_KNOWN = "inventory_hide_known";
+const QString INVENTORY_HIDE_VISITED = "inventory_hide_visited";
+const QString INVENTORY_ORDER = "inventory_order";
 const QString VIEWPORT_LAYOUTS_FILE = "viewport_layouts.json";// entry name inside the .k.zip
+const QString OBJECT_INVENTORY_FILE = "object_inventory.json";// entry name inside the .k.zip
 const QString VIEWER = "viewer";
 const QString ZOOM_WIDGET = "zoom_and_multires_widget";
 
