@@ -55,6 +55,7 @@
 		<tr><td><span class="sh">Shift +  <img src=":/resources/cheatsheet/middleclick.png" alt="Middle click"/> scroll</span></td><td>Change brush size</td></tr>
 		<tr><td><span class="sh"><img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Draw</td></tr>
 		<tr><td><span class="sh">Shift + <img src=":/resources/cheatsheet/rightclick.png" alt="Right click"/></span></td><td>Erase</td></tr>
+		<tr><td><span class="sh">0</span> / <span class="sh">id</span> (toolbar) / <img src=":/resources/cheatsheet/leftclick.png" alt="Left click"/> on empty space</td><td>Paint the background instead of a label — the brush and both fills then erase. The id box turns red. Pick a label again to go back</td></tr>
 		<tr><td><span class="sh">-</span></td><td>Overlay: decrease opacity</td></tr>
 		<tr><td><span class="sh">+</span></td><td>Overlay: increase opacity</td></tr>
 		<tr><td><span class="sh">Hold space</span></td><td>Reveal raw data temporarily</td></tr>

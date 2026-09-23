@@ -121,6 +121,12 @@ public://matsch
     void unloadCurrentMagnification();
     void markCubeAsModified(const std::size_t layerId, const CoordOfCube &cubeCoord, const int magnification);
     void snappyCacheSupplySnappy(const std::size_t layerId, const CoordOfCube, const quint64 cubeMagnification, const std::string cube);
+    /* Overwriting counterpart to snappyCacheSupplySnappy, for undo.
+     *
+     * That one emplace()s, which is a no-op when the coord already has an entry — and an
+     * edited cube always does, since being edited is what put it there. It is also one
+     * blocking round trip per cube. This assigns, and takes the whole set at once. */
+    void snappyCacheReplace(const std::size_t layerId, const quint64 cubeMagnification, const SnappySet cubes);
     void flushIntoSnappyCache();
     void broadcastProgress(bool startup = false);
     Worker();
@@ -153,6 +159,10 @@ public:
     void snappyCacheSupplySnappy(Args&&... args) {
         emit snappyCacheSupplySnappySignal(std::forward<Args>(args)...);
     }
+    template<typename... Args>
+    void snappyCacheReplace(Args&&... args) {
+        emit snappyCacheReplaceSignal(std::forward<Args>(args)...);
+    }
     void markCubeAsModified(const std::size_t layerId, const CoordOfCube &cubeCoord, const int magnification);
 
     struct LockedSnappy {
@@ -167,6 +177,17 @@ public:
         worker->snappyFlushCondition.wait(&worker->snappyFlushConditionMutex);
         return LockedSnappy{worker->snappyCacheMutex, worker->snappyCache[layerId]};
     }
+    /* What the loader is holding, so "where did the memory go" is answerable rather than
+     * guessable. The snappy cache is the interesting number: it is the unsaved annotation,
+     * it grows with every distinct cube ever modified, and nothing shrinks it short of
+     * clearing the annotation — saving writes the cubes out but keeps them, because this is
+     * also what an evicted cube is re-hydrated from. */
+    struct MemoryReport {
+        std::size_t slotsTotal{0}, slotsFree{0}, slotBytes{0};
+        std::size_t snappyCubes{0}, snappyBytes{0};
+    };
+    MemoryReport memoryReport();
+
 public slots:
     bool isFinished();
     bool hasSnappyCache();
@@ -177,5 +198,8 @@ signals:
     void loadSignal(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, const Dataset::list_t & changedDatasets, const quint64 cacheSize);
     void markCubeAsModifiedSignal(const std::size_t layerId, const CoordOfCube &cubeCoord, const int magnification);
     void snappyCacheSupplySnappySignal(const std::size_t layerId, const CoordOfCube, const quint64 cubeMagnification, const std::string cube);
+    void snappyCacheReplaceSignal(const std::size_t layerId, const quint64 cubeMagnification, const Loader::Worker::SnappySet cubes);
 };
 }//namespace Loader
+
+Q_DECLARE_METATYPE(Loader::Worker::SnappySet)

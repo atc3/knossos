@@ -54,7 +54,7 @@ QVariant LayerItemModel::data(const QModelIndex &index, int role) const {
         const auto& data = Dataset::datasets[ordered_i(index.row())];
         auto& layerSettings = Dataset::datasets[ordered_i(index.row())].renderSettings;
         if (role == Qt::DisplayRole || role == Qt::EditRole) {
-            return std::array<QVariant,9>{
+            return std::array<QVariant,10>{
                 QVariant{},
                 QString::number(layerSettings.opacity * 100.0f) + (role == Qt::EditRole ? "" : "%"),
                 layerSettings.color,
@@ -64,6 +64,8 @@ QVariant LayerItemModel::data(const QModelIndex &index, int role) const {
                 QString{"%1, %2, %3"}.arg(data.cubeShape.x).arg(data.cubeShape.y).arg(data.cubeShape.z),
                 data.compressionString(),
                 data.apiString(),
+                // the max id only means anything for the segmentation layer
+                data.isOverlay() ? QVariant{QString::number(Segmentation::singleton().getMaxId())} : QVariant{},
             }[index.column()];
         } else if (role == Qt::CheckStateRole) {
             if (index.column() == 0) {
@@ -105,6 +107,11 @@ bool LayerItemModel::setData(const QModelIndex &index, const QVariant &value, in
                 break;
             case 2:
                 layerSettings.color = value.value<QColor>();
+                break;
+            case 9:
+                if (Dataset::datasets[ordered_i(index.row())].isOverlay()) {
+                    Segmentation::singleton().setMaxId(value.toString().toULongLong());
+                }
                 break;
             }
         } else if(role == Qt::CheckStateRole) {
@@ -159,6 +166,9 @@ Qt::ItemFlags LayerItemModel::flags(const QModelIndex &index) const {
             {3, Qt::ItemIsEditable},
             {7, Qt::ItemIsUserCheckable},
         };
+        if (index.column() == 9) {// max id: overlay layers only
+            return Dataset::datasets[ordered_i(index.row())].isOverlay() ? (flags | Qt::ItemIsEditable) : flags;
+        }
         if (auto it = map.find(index.column()); it != std::end(map)) {
             return flags | it->second;
         }

@@ -355,6 +355,14 @@ void ViewportBase::enterEvent(QEvent * event) {
     QOpenGLWidget::enterEvent(event);
 }
 
+void ViewportBase::syncCursorInside() {
+    const bool inside = isVisible() && rect().contains(mapFromGlobal(QCursor::pos()));
+    if (hasCursor != inside) {
+        hasCursor = inside;
+        update();// the brush cursor is drawn from this
+    }
+}
+
 void ViewportBase::leaveEvent(QEvent * event) {
     hasCursor = false;
     emit cursorPositionChanged(Coordinate(), VIEWPORT_UNDEFINED);

@@ -1,0 +1,1169 @@
+/*
+ *  This file is a part of KNOSSOS.
+ *
+ *  (C) Copyright 2007-2018
+ *  Max-Planck-Gesellschaft zur Foerderung der Wissenschaften e.V.
+ *
+ *  KNOSSOS is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 of
+ *  the License as published by the Free Software Foundation.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *
+ *  For further information, visit https://knossos.app
+ *  or contact knossosteam@gmail.com
+ */
+
+#include "shapeinterpolation.h"
+
+#include "dataset.h"
+#include "segmentation/distancetransform.h"
+#include "segmentation/cubeloader.h"
+#include "segmentation/labelonlyloading.h"
+#include "segmentation/segmentation.h"
+#include "segmentation/undostack.h"
+#include "annotation/annotation.h"
+#include "loader.h"
+#include "stateInfo.h"
+#include "viewer.h"
+
+#include <QApplication>
+#include <QElapsedTimer>
+#include <QObject>
+#include <QProgressDialog>
+
+#include <algorithm>
+
+namespace {
+// margin around the union of two slice bounding boxes, so a shape shrinking towards
+// nothing has room to do so instead of being clipped at the border
+constexpr int PAD = 16;
+/* Refuse to interpolate a region larger than this many mask pixels.
+ *
+ * The grid is the union of the two key slices' bounding boxes, so this is a limit on how
+ * *wide* an object may be, not how much of it is painted — and 2048² turned out to be well
+ * inside what people actually trace. An object spanning thirty 128-voxel chunks is 3840
+ * voxels across, which blows a 2048² cap on the first axis, and then interpolantFor()
+ * returns nothing and *every* depth between that pair of key slices comes out empty. That
+ * is the "some slices just don't interpolate" report, and it is why it tracked wide
+ * objects.
+ *
+ * The cost is two float distance transforms over the grid, 8 bytes per pixel, so 4096²
+ * peaks at ~134 MiB while a pair is being built. That is a lot to ask transiently, but the
+ * alternative is silently declining to interpolate. Beyond this the honest answer is still
+ * no, and the message says what to do about it. */
+constexpr std::size_t MAX_PIXELS = 4096 * 4096;
+/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes).
+ *
+ * The cache is cleared *before* the new pair is inserted, so a pair larger than this on its
+ * own is still cached — deliberately, since otherwise a wide object would recompute two
+ * distance transforms per depth. The practical effect is that retention is one pair, which
+ * at the MAX_PIXELS limit is ~134 MiB held for as long as the chain is live. Walking depths
+ * in order, as both the preview and the commit do, hits that one pair repeatedly. */
+constexpr std::size_t MAX_CACHED_FLOATS = 16 * 1024 * 1024;
+
+// How long to wait for the loader to make a cube resident before giving up on it. A miss
+// is reported as a shortfall rather than silently dropping voxels, which is what
+// writeVoxel()/processRegion() would otherwise do.
+constexpr int LOAD_TIMEOUT_MS = 30000;
+
+bool awaitLoader(QProgressDialog & progress) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!Loader::Controller::singleton().isFinished()) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        if (progress.wasCanceled() || timer.elapsed() > LOAD_TIMEOUT_MS) {
+            return false;
+        }
+    }
+    return true;
+}
+}
+
+#include <cmath>
+#include <limits>
+#include <deque>
+#include <set>
+#include <unordered_set>
+
+void ShapeInterpolation::begin(const brush_t & brush, const std::uint64_t newSoid) {
+    const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
+    view = brush.view;
+    // VIEWPORT_XY/XZ/ZY cast directly onto brush_t::view_t (viewportortho.cpp), and the
+    // slice normal is the axis the viewport does not span.
+    axis = (view == brush_t::view_t::xy) ? 2 : (view == brush_t::view_t::xz) ? 1 : 0;
+    uAxisIdx = (axis == 0) ? 1 : 0;
+    vAxisIdx = (axis == 2) ? 1 : 2;
+    step = Dataset::current().scaleFactor;
+    magIndex = dataset.magIndex;
+    layerId = Segmentation::singleton().layerId;
+    soid = newSoid;
+    slices.clear();
+    started = true;
+    wasEdited = false;
+}
+
+void ShapeInterpolation::beginAt(const brush_t::view_t newView, const std::uint64_t newSoid) {
+    brush_t brush;
+    brush.view = newView;
+    begin(brush, newSoid);
+}
+
+int ShapeInterpolation::depthOf(const Coordinate & pos) const {
+    return axisGet(pos, axis);
+}
+
+/* Reads the chain's object out of one whole plane.
+ *
+ * Walks block by block from the seed, following the object wherever it runs off the edge
+ * of a block. With `mayLoad` it pulls in blocks that are not resident — via the loader's
+ * own centre, so the crosshair never moves and only rendering is paused. Without it the
+ * walk simply stops at the edge of memory, which is what a brush stroke needs: painting a
+ * slice must not start fetching data. */
+bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & seed, PlaneScan & scan, const bool mayLoad, QWidget * const parent) {
+    // Reading a block is cheap (one 128² plane); only *loading* a missing one costs
+    // anything, and the progress dialog can be cancelled. So this is set high enough not
+    // to clip a real object and exists only to stop a runaway.
+    constexpr std::size_t MAX_BLOCKS = 1024;
+    const auto depth = depthOf(seed);
+    const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
+    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+
+    slice.depth = depth;
+    slice.uStep = axisGet(step, uAxisIdx);
+    slice.vStep = axisGet(step, vAxisIdx);
+    // anchor on the seed's own block, aligned to the mag lattice; SISlice::set grows the
+    // box in either direction as the walk spreads
+    const auto seedBlock = dataset.global2cube(seed);
+    const auto seedCorner = dataset.cube2global(seedBlock);
+    slice.uMin = siFloorDiv(axisGet(seedCorner, uAxisIdx), slice.uStep) * slice.uStep;
+    slice.vMin = siFloorDiv(axisGet(seedCorner, vAxisIdx), slice.vStep) * slice.vStep;
+
+    QProgressDialog progress(QObject::tr("Following the slice across blocks…"), QObject::tr("Stop"), 0, static_cast<int>(MAX_BLOCKS), parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(500);// the usual case is one resident block and instant
+    const LabelOnlyLoading labelOnly;// the image data is irrelevant here
+
+    std::unordered_set<CoordOfCube> seen;
+    // breadth first: on a budget, spreading out from the seed beats following one tendril
+    // to its end and leaving everything nearby unvisited
+    std::deque<CoordOfCube> queue{seedBlock};
+    seen.insert(seedBlock);
+    std::size_t processed{0};
+    scan = PlaneScan{};
+
+    while (!queue.empty()) {
+        if (processed >= MAX_BLOCKS || progress.wasCanceled()) {
+            scan.hitLimit = true;
+            break;
+        }
+        const auto block = queue.front();
+        queue.pop_front();
+        progress.setValue(static_cast<int>(processed++));
+
+        auto first = dataset.cube2global(block);
+        auto last = first + cubeExtent - 1;
+        axisSet(first, axis, depth);
+        axisSet(last, axis, depth);
+        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+
+        if (!regionCubeResidency(first, last).second.empty()) {
+            if (!mayLoad) {
+                ++scan.unreachable;
+                continue;
+            }
+            // drive the loader to this block. startLoading takes its own centre, so
+            // viewerState->currentPosition — the crosshair — is untouched.
+            Loader::Controller::singleton().startLoading(dataset.cube2global(block) + cubeExtent / 2, USERMOVE_NEUTRAL, {});
+            if (!awaitLoader(progress) || !regionCubeResidency(first, last).second.empty()) {
+                ++scan.unreachable;
+                continue;
+            }
+        }
+
+        bool touchesU0{false}, touchesU1{false}, touchesV0{false}, touchesV1{false};
+        readRegion(first, last, [&](const std::uint64_t voxel, const Coordinate & pos){
+            if (voxel != soid) {
+                return;
+            }
+            slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
+            // a set voxel on a block edge means the object probably continues next door
+            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) <= axisGet(first, uAxisIdx);
+            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) >= axisGet(last, uAxisIdx);
+            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) <= axisGet(first, vAxisIdx);
+            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) >= axisGet(last, vAxisIdx);
+        });
+
+        const auto enqueue = [&](const int axisIdx, const int delta){
+            auto neighbour = block;
+            axisSet(neighbour, axisIdx, axisGet(neighbour, axisIdx) + delta);
+            const auto corner = dataset.cube2global(neighbour);
+            // a block off the edge of the dataset will never load; not finding it there is
+            // not a shortfall, so don't queue it and don't report one
+            if (corner.x < 0 || corner.y < 0 || corner.z < 0
+                    || corner.x >= dataset.boundary.x || corner.y >= dataset.boundary.y || corner.z >= dataset.boundary.z) {
+                return;
+            }
+            if (seen.insert(neighbour).second) {
+                queue.push_back(neighbour);
+            }
+        };
+        if (touchesU0) { enqueue(uAxisIdx, -1); }
+        if (touchesU1) { enqueue(uAxisIdx, +1); }
+        if (touchesV0) { enqueue(vAxisIdx, -1); }
+        if (touchesV1) { enqueue(vAxisIdx, +1); }
+    }
+    progress.setValue(static_cast<int>(MAX_BLOCKS));
+
+    scan.blocks = processed - scan.unreachable;
+    if (mayLoad) {
+        state->viewer->loader_notify();// bring the user's own surroundings back
+    }
+    slice.shrinkToFit();
+    return !slice.empty();
+}
+
+bool ShapeInterpolation::adoptPlaneAt(const Coordinate & seed, QString & note, const bool replace, const std::optional<std::uint64_t> relabelFrom, QWidget * const parent) {
+    if (!started) {
+        return false;
+    }
+    const auto depth = depthOf(seed);
+
+    const UndoScope undoScope(QObject::tr("Adopt slice"));
+    if (relabelFrom && *relabelFrom != soid && *relabelFrom != Segmentation::singleton().getBackgroundId()) {
+        // voxel-level steal: rewrite that object's voxels in this plane only
+        auto box = residentBoxAround(seed);
+        axisSet(box.first, axis, depth);
+        axisSet(box.second, axis, depth);
+        const auto other = *relabelFrom;
+        const auto touched = processRegionReplacing(box.first, box.second, other, soid);
+        if (touched == 0) {
+            note = QObject::tr("Nothing of that object is in this plane.");
+            return false;
+        }
+    }
+
+    SISlice slice;
+    PlaneScan scan;
+    if (!seedSliceFromPlane(slice, seed, scan, true, parent)) {
+        note = QObject::tr("Nothing painted with id %1 in this plane.").arg(soid);
+        return false;
+    }
+    /* Add to whatever is already keyed at this depth rather than replacing it.
+     *
+     * A label can have several disconnected pieces in one plane — the two arms of a U seen
+     * above the join, say — and each click follows only the piece it landed on. Replacing
+     * would make the second click throw the first arm away; merging lets a slice be built
+     * up a piece at a time. */
+    const auto existing = slices.find(depth);
+    const auto pieceVoxels = slice.count();
+    if (replace || existing == std::end(slices)) {
+        slices[depth] = std::move(slice);
+    } else {
+        existing->second.mergeFrom(slice);
+    }
+    const auto totalVoxels = slices.at(depth).count();
+    const bool added = !replace && existing != std::end(slices);
+    previewValid = false;
+    ++gen;
+    emit changed();
+    // say which kind of shortfall it was, so a partial result is diagnosable rather than
+    // just disappointing
+    if (added) {
+        note = totalVoxels > pieceVoxels
+            ? QObject::tr("Added %1 voxels to slice %2, now %3.").arg(pieceVoxels).arg(depth).arg(totalVoxels)
+            : QObject::tr("That piece was already in slice %1.").arg(depth);
+    } else if (scan.complete()) {
+        note = QObject::tr("Adopted slice %1 from %n block(s).", "", static_cast<int>(scan.blocks)).arg(depth);
+    } else if (scan.unreachable != 0) {
+        note = QObject::tr("Adopted slice %1 from %2 block(s); %n would not load.", "", static_cast<int>(scan.unreachable))
+                   .arg(depth).arg(scan.blocks);
+    } else {
+        note = QObject::tr("Adopted slice %1 from %2 blocks, stopping at the block limit — click the rest to add it.")
+                   .arg(depth).arg(scan.blocks);
+    }
+    return true;
+}
+
+bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t & brush, const std::uint64_t stampSoid, QString & reason) {
+    if (!started) {
+        begin(brush, stampSoid);
+    } else if (brush.view != view) {
+        if (slices.size() <= 1) {
+            begin(brush, stampSoid);// nothing worth keeping yet, just move the chain here
+        } else {
+            reason = QObject::tr("Shape interpolation is running in the %1 plane with %2 key slices. Press Esc to end it, then paint here to start a chain in this plane.")
+                         .arg(planeName()).arg(slices.size());
+            return false;
+        }
+    } else if (Dataset::datasets[Segmentation::singleton().layerId].magIndex != magIndex) {
+        reason = QObject::tr("Shape interpolation is pinned to the magnification it was started at. Press Esc to start over.");
+        return false;
+    } else if (Segmentation::singleton().layerId != layerId) {
+        reason = QObject::tr("Shape interpolation is pinned to the segmentation layer it was started at. Press Esc to start over.");
+        return false;
+    } else if (stampSoid != soid) {
+        reason = QObject::tr("Shape interpolation is running on another object. Press Esc to start over.");
+        return false;
+    }
+
+    const auto depth = depthOf(centerPos);
+    auto & slice = slices[depth];
+    if (slice.uSize == 0) {
+        // A fresh slice takes whatever is already painted across the plane, not just what
+        // this stamp covered. Otherwise dropping one stamp onto an existing outline makes
+        // the stamp the key slice — a brush-sized blob in the middle of the real object.
+        PlaneScan scan;
+        seedSliceFromPlane(slice, centerPos, scan, false);
+        slice.depth = depth;
+    }
+
+    // Read back what is actually in the overlay now that the stamp has been applied. This
+    // keeps paint and erase in sync with the mask by construction, and costs one small
+    // brush-sized region read per stamp.
+    readBrushRegion(centerPos, brush, [&](const std::uint64_t voxel, const Coordinate & pos){
+        if (axisGet(pos, axis) != depth) {
+            return; // a 3D brush would span depths; only the stamp’s own plane is a key slice
+        }
+        slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), voxel == soid ? 1 : 0);
+    });
+
+    if (slice.empty()) {
+        slices.erase(depth);
+    }
+    wasEdited = true;
+    ++gen;
+    deferPreview();// a stroke is many stamps; recompute once it stops
+    emit changed();
+    return true;
+}
+
+bool ShapeInterpolation::absorbRegion(const Coordinate & seed, const Coordinate & first, const Coordinate & last, const int depth, const std::uint64_t regionSoid, QString & reason) {
+    if (!started) {
+        reason = QObject::tr("Shape interpolation: paint a slice first, then fill.");
+        return false;
+    }
+    if (regionSoid != soid) {
+        reason = QObject::tr("Shape interpolation is running on another object. Press Esc to start over.");
+        return false;
+    }
+
+    auto & slice = slices[depth];
+    if (slice.uSize == 0) {
+        /* A fill onto a depth with no key slice yet takes the whole outline on that plane,
+         * exactly as a right click does — not merely the box the fill happened to cover.
+         *
+         * Bounding the fresh slice by the filled region instead left a rectangular seam
+         * wherever the object ran past it: everything inside the box was in the key slice
+         * and everything outside was not, so the interpolation stopped dead at the box
+         * edge in the middle of the object. */
+        auto planeSeed = seed;
+        axisSet(planeSeed, axis, depth);
+        PlaneScan scan;
+        seedSliceFromPlane(slice, planeSeed, scan, false);
+        slice.depth = depth;
+    }
+    if (slice.uSize == 0) {
+        // nothing of the chain's object on this plane — an erase, normally. Fall back to
+        // the filled box so the read-back below has a lattice to index into; it will come
+        // out empty and the slice is dropped.
+        slice.depth = depth;
+        slice.uStep = axisGet(step, uAxisIdx);
+        slice.vStep = axisGet(step, vAxisIdx);
+        slice.uMin = siFloorDiv(axisGet(first, uAxisIdx), slice.uStep) * slice.uStep;
+        slice.vMin = siFloorDiv(axisGet(first, vAxisIdx), slice.vStep) * slice.vStep;
+    }
+
+    Coordinate planeFirst = first, planeLast = last;
+    axisSet(planeFirst, axis, depth);
+    axisSet(planeLast, axis, depth);
+    readRegion(planeFirst, planeLast, [&](const std::uint64_t voxel, const Coordinate & pos){
+        slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), voxel == soid ? 1 : 0);
+    });
+
+    if (slice.empty()) {
+        slices.erase(depth);
+    }
+    wasEdited = true;
+    ++gen;
+    emit changed();
+    return true;
+}
+
+bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
+    const UndoScope undoScope(QObject::tr("Bake interpolated slice"));
+    if (!started || hasSliceAt(depth)) {
+        return false;// already a real key slice
+    }
+    const auto * interpolated = maskAtDepth(depth);
+    if (interpolated == nullptr || interpolated->count() == 0) {
+        return false;
+    }
+    // copy first: inserting into `slices` may invalidate the cached preview it points at
+    auto baked = *interpolated;
+    baked.depth = depth;
+
+    Coordinate first, last;
+    axisSet(first, axis, depth);
+    axisSet(last, axis, depth);
+    axisSet(first, uAxisIdx, baked.uMin);
+    axisSet(last, uAxisIdx, baked.uCoordOf(baked.uSize) - baked.uStep);
+    axisSet(first, vAxisIdx, baked.vMin);
+    axisSet(last, vAxisIdx, baked.vCoordOf(baked.vSize) - baked.vStep);
+    first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+    last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+
+    const auto intended = regionCubeResidency(first, last);
+    writeVoxelsWhere(first, last, [this, &baked](const Coordinate & pos){
+        return baked.at(baked.uIndexOf(axisGet(pos, uAxisIdx)), baked.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+    }, soid, true);
+
+    slices[depth] = std::move(baked);
+    wasEdited = true;
+    previewValid = false;
+    ++gen;
+    emit changed();
+
+    note = intended.second.empty()
+        ? QObject::tr("Interpolated slice %1 is now a painted slice — edit it directly.").arg(depth)
+        : QObject::tr("Interpolated slice %1 is now a painted slice, but %2 block(s) weren’t loaded and are missing from it.").arg(depth).arg(intended.second.size());
+    return true;
+}
+
+bool ShapeInterpolation::covers(const Coordinate & pos) {
+    if (!started) {
+        return false;
+    }
+    const auto * slice = maskAtDepth(depthOf(pos));
+    if (slice == nullptr) {
+        return false;
+    }
+    return slice->at(slice->uIndexOf(axisGet(pos, uAxisIdx)), slice->vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+}
+
+std::optional<int> ShapeInterpolation::firstDepth() const {
+    return slices.empty() ? std::nullopt : std::optional<int>{std::begin(slices)->first};
+}
+
+std::optional<int> ShapeInterpolation::lastDepth() const {
+    return slices.empty() ? std::nullopt : std::optional<int>{std::rbegin(slices)->first};
+}
+
+std::optional<int> ShapeInterpolation::prevDepth(const int depth) const {
+    const auto it = slices.lower_bound(depth);
+    return it == std::begin(slices) ? std::nullopt : std::optional<int>{std::prev(it)->first};
+}
+
+std::optional<int> ShapeInterpolation::nextDepth(const int depth) const {
+    const auto it = slices.upper_bound(depth);
+    return it == std::end(slices) ? std::nullopt : std::optional<int>{it->first};
+}
+
+bool ShapeInterpolation::removeSliceAt(const int depth) {
+    if (slices.erase(depth) == 0) {
+        return false;
+    }
+    wasEdited = true;
+    ++gen;
+    emit changed();
+    return true;
+}
+
+ShapeInterpolation::State ShapeInterpolation::saveState() const {
+    return {started, wasEdited, view, axis, uAxisIdx, vAxisIdx, step, magIndex, layerId, soid, slices};
+}
+
+void ShapeInterpolation::restoreState(const State & state) {
+    started = state.started;
+    wasEdited = state.wasEdited;
+    view = state.view;
+    axis = state.axis;
+    uAxisIdx = state.uAxisIdx;
+    vAxisIdx = state.vAxisIdx;
+    step = state.step;
+    magIndex = state.magIndex;
+    layerId = state.layerId;
+    soid = state.soid;
+    slices = state.slices;
+    interpolants.clear();
+    previewValid = false;
+    crossSectionValid = false;
+    ++gen;
+    emit changed();
+}
+
+void ShapeInterpolation::reset() {
+    if (!started && slices.empty()) {
+        return;
+    }
+    slices.clear();
+    started = false;
+    wasEdited = false;
+    soid = 0;
+    interpolants.clear();
+    crossSectionValid = false;
+    previewValid = false;
+    error.clear();
+    ++gen;
+    emit changed();
+}
+
+void ShapeInterpolation::setPreviewEnabled(const bool enabled) {
+    if (preview != enabled) {
+        preview = enabled;
+        emit changed();
+    }
+}
+
+const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const int z1, const int z2) {
+    if (interpolantsGen != gen) {
+        interpolants.clear();// any slice edit invalidates every distance transform
+        interpolantsGen = gen;
+    }
+    const auto cached = interpolants.find(z1);
+    if (cached != std::end(interpolants) && cached->second.z2 == z2) {
+        return &cached->second;
+    }
+
+    const auto & s1 = slices.at(z1);
+    const auto & s2 = slices.at(z2);
+
+    // Common grid: the union of both bounding boxes plus a margin. Both slices are snapped
+    // to the same lattice (see absorbStamp), so index arithmetic is exact.
+    const auto uStep = s1.uStep;
+    const auto vStep = s1.vStep;
+    const auto uMin = std::min(s1.uMin, s2.uMin) - PAD * uStep;
+    const auto vMin = std::min(s1.vMin, s2.vMin) - PAD * vStep;
+    const auto uMax = std::max(s1.uCoordOf(s1.uSize), s2.uCoordOf(s2.uSize)) + PAD * uStep;
+    const auto vMax = std::max(s1.vCoordOf(s1.vSize), s2.vCoordOf(s2.vSize)) + PAD * vStep;
+    const auto uSize = (uMax - uMin) / uStep;
+    const auto vSize = (vMax - vMin) / vStep;
+    if (uSize <= 0 || vSize <= 0) {
+        error = QObject::tr("Shape interpolation: empty region.");
+        return nullptr;
+    }
+    const auto pixels = static_cast<std::size_t>(uSize) * vSize;
+    if (pixels > MAX_PIXELS) {
+        // the useful remedy is a coarser magnification, which divides the grid by the mag
+        // on both axes; splitting the run does not help, since the width is what bites
+        error = QObject::tr("Shape interpolation: slices %1 and %2 together span %3×%4 mask pixels, over the %5×%5 limit. "
+                            "Work at a coarser magnification, or trace this object in narrower pieces.")
+                    .arg(z1).arg(z2).arg(uSize).arg(vSize).arg(4096);
+        return nullptr;
+    }
+
+    Interpolant in;
+    const auto onCommonGrid = [&](const SISlice & slice, float & cu, float & cv){
+        std::vector<std::uint8_t> bin(pixels, 0);
+        const auto uOff = (slice.uMin - uMin) / uStep;
+        const auto vOff = (slice.vMin - vMin) / vStep;
+        for (int v = 0; v < slice.vSize; ++v) {
+            for (int u = 0; u < slice.uSize; ++u) {
+                if (slice.at(u, v) != 0) {
+                    bin[static_cast<std::size_t>(v + vOff) * uSize + (u + uOff)] = 1;
+                }
+            }
+        }
+        distance_transform::maskCentroid(bin, uSize, cu, cv);
+        return bin;
+    };
+
+    // physical spacing of one mask pixel, so anisotropic datasets interpolate correctly
+    const auto & scale = Dataset::current().scales[0];// nm per mag1 voxel, per axis
+    const auto su = axisGet(scale, uAxisIdx) * uStep;
+    const auto sv = axisGet(scale, vAxisIdx) * vStep;
+
+    distance_transform::signedEdt(onCommonGrid(s1, in.c1u, in.c1v), in.d1, uSize, vSize, su, sv);
+    distance_transform::signedEdt(onCommonGrid(s2, in.c2u, in.c2v), in.d2, uSize, vSize, su, sv);
+
+    in.z1 = z1;
+    in.z2 = z2;
+    in.uMin = uMin;
+    in.vMin = vMin;
+    in.uStep = uStep;
+    in.vStep = vStep;
+    in.uSize = uSize;
+    in.vSize = vSize;
+    error.clear();
+
+    // keep the cache from growing without bound on a long chain
+    std::size_t cachedFloats = 2 * pixels;
+    for (const auto & [key, entry] : interpolants) {
+        (void)key;
+        cachedFloats += entry.d1.size() + entry.d2.size();
+    }
+    if (cachedFloats > MAX_CACHED_FLOATS) {
+        interpolants.clear();
+    }
+    return &(interpolants[z1] = std::move(in));
+}
+
+const SISlice * ShapeInterpolation::maskAtDepth(const int depth) {
+    const auto painted = slices.find(depth);
+    if (painted != std::end(slices)) {
+        return &painted->second;
+    }
+    if (slices.size() < 2) {
+        return nullptr;
+    }
+    const auto lo = prevDepth(depth);
+    const auto hi = nextDepth(depth);
+    if (!lo || !hi) {
+        return nullptr;// outside the painted range: nothing to interpolate between
+    }
+    if (previewValid && previewSlice.depth == depth && previewGen == gen) {
+        return &previewSlice;
+    }
+    const auto * in = interpolantFor(*lo, *hi);
+    if (in == nullptr) {
+        return nullptr;
+    }
+
+    std::vector<std::uint8_t> mask;
+    blendInto(*in, depth, mask);
+
+    previewSlice = SISlice{};
+    previewSlice.depth = depth;
+    previewSlice.uMin = in->uMin;
+    previewSlice.vMin = in->vMin;
+    previewSlice.uStep = in->uStep;
+    previewSlice.vStep = in->vStep;
+    previewSlice.uSize = in->uSize;
+    previewSlice.vSize = in->vSize;
+    previewSlice.adoptMask(std::move(mask));
+    previewGen = gen;
+    previewValid = true;
+    return &previewSlice;
+}
+
+const SISlice * ShapeInterpolation::previewAt(const int depth) {
+    if (!started || !preview || previewDeferred || hasSliceAt(depth)) {
+        return nullptr;// a painted slice is already shown as real overlay voxels
+    }
+    return maskAtDepth(depth);
+}
+
+void ShapeInterpolation::setCentroidAlignment(const bool enabled) {
+    if (alignCentroids != enabled) {
+        alignCentroids = enabled;
+        previewValid = false;
+        emit centroidAlignmentChanged(alignCentroids);
+        emit changed();
+    }
+}
+
+void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std::vector<std::uint8_t> & out) const {
+    const auto span = static_cast<float>(in.z2 - in.z1);
+    const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
+    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
+    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    distance_transform::blendSigned(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, out);
+}
+
+namespace {
+
+Coordinate componentMax(const Coordinate & a, const Coordinate & b) {
+    return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
+}
+Coordinate componentMin(const Coordinate & a, const Coordinate & b) {
+    return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
+}
+}
+
+ShapeInterpolation::WriteResult ShapeInterpolation::commit(QWidget * const parent) {
+    if (slices.size() < 2) {
+        WriteResult r;
+        r.message = QObject::tr("Shape interpolation needs at least two painted slices before it can interpolate.");
+        return r;
+    }
+    return writeAll(true, soid, QObject::tr("Writing interpolated shape…"), parent);
+}
+
+ShapeInterpolation::WriteResult ShapeInterpolation::eraseSlices(QWidget * const parent) {
+    return writeAll(false, Segmentation::singleton().getBackgroundId(), QObject::tr("Erasing painted slices…"), parent);
+}
+
+/* Walks the region of interest cube by cube, making each cube resident before writing it.
+ *
+ * KNOSSOS keeps only an M³ supercube around the current position in memory and drops
+ * writes to anything outside it without a word (cubeloader.cpp). There is no on-demand
+ * cube loading anywhere in the codebase, so the only lever is to move the position and let
+ * the loader follow. Doing that per cube keeps peak memory at one supercube no matter how
+ * far apart the key slices are — which is the whole point of doing this in KNOSSOS rather
+ * than in Paintera — and the residency check means the common case, where the user just
+ * painted everything and it is all still resident, costs no movement at all.
+ *
+ * Each cube is marked modified immediately after it is written, before the position moves
+ * again: eviction only preserves a cube's edits if it is already in modifiedCacheQueue
+ * (loader.cpp), so deferring the marking to the end would throw away everything the walk
+ * had scrolled past. */
+void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
+    if (!ctx.unmarked.empty()) {
+        coordCubesMarkChanged(ctx.unmarked);
+        ctx.written.insert(std::begin(ctx.unmarked), std::end(ctx.unmarked));
+        ctx.unmarked.clear();
+    }
+}
+
+/* Writes one planar mask at one depth, cube by cube, making each cube resident first.
+ *
+ * KNOSSOS keeps only an M³ supercube around the current position in memory and drops
+ * writes to anything outside it without a word (cubeloader.cpp). There is no on-demand
+ * cube loading anywhere in the codebase, so the only lever is to move the position and let
+ * the loader follow. Doing that per cube keeps peak memory at one supercube however wide
+ * the object is, and the residency check means the common case — everything just painted
+ * and still resident — costs no movement at all. */
+void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
+                                     QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & areaMin = Annotation::singleton().movementAreaMin;
+    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    // an interpolated grid is padded well beyond the shape; clip to the mask's own extent
+    Coordinate first, last;
+    axisSet(first, axis, depth);
+    axisSet(last, axis, depth);
+    axisSet(first, uAxisIdx, mask.uMin);
+    axisSet(last, uAxisIdx, mask.uCoordOf(mask.uSize) - mask.uStep);
+    axisSet(first, vAxisIdx, mask.vMin);
+    axisSet(last, vAxisIdx, mask.vCoordOf(mask.vSize) - mask.vStep);
+    first = first.capped(areaMin, areaMax + 1);
+    last = last.capped(areaMin, areaMax + 1);
+
+    const auto inside = [this, &mask](const Coordinate & pos){
+        return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+    };
+
+    const auto & dataset = Dataset::current();
+    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+    const auto cubeBegin = dataset.global2cube(first);
+    const auto cubeEnd = dataset.global2cube(last) + 1;
+    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
+    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
+    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
+        const CoordOfCube cube{cx, cy, cz};
+        const auto cubeFirst = dataset.cube2global(cube);
+        const auto cubeLast = cubeFirst + cubeExtent - 1;
+        const auto regionFirst = componentMax(first, cubeFirst);
+        const auto regionLast = componentMin(last, cubeLast);
+
+        bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
+        if (!resident) {
+            // Everything written so far must be marked before the position moves, or moving
+            // away discards it: eviction preserves a cube's edits only if it is already
+            // queued as modified.
+            flushMarks(ctx);
+            state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
+            if (!awaitLoader(progress)) {
+                ctx.cancelled = ctx.cancelled || progress.wasCanceled();
+            }
+            /* Ask again rather than assuming the wait worked.
+             *
+             * awaitLoader() also returns on its timeout, and the write that followed went
+             * into a cube that was still not there — where it is dropped without a word. A
+             * wide object is the case that needs loading at all, walks the most cubes, and
+             * gives the loader the least time per cube, so one slow load was enough to
+             * punch a hole in the result at a chunk boundary. */
+            resident = regionCubeResidency(regionFirst, regionLast).second.empty();
+        }
+        if (!resident) {
+            ++ctx.cubesMissing;
+            if (ctx.missing.size() < 64) {// enough to diagnose, not enough to flood the log
+                ctx.missing.push_back(cube);
+            }
+        } else {
+            /* An empty result means this cube held none of the shape, not that it failed:
+             * processRegion() reports the cubes it changed, and most cubes in a wide slice's
+             * bounding box are outside the outline. Counting those as missing cried wolf on
+             * every wide object and buried the real ones. */
+            const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
+            ctx.unmarked.insert(std::begin(touched), std::end(touched));
+        }
+        if (ctx.cancelled) {
+            return;
+        }
+    }
+}
+
+bool ShapeInterpolation::copySliceAt(const int depth, QString & note) {
+    if (!started) {
+        note = QObject::tr("Shape interpolation: start a chain before copying a slice.");
+        return false;
+    }
+    const auto * mask = maskAtDepth(depth);
+    if (mask == nullptr || mask->count() == 0) {
+        note = QObject::tr("Nothing at slice %1 to copy.").arg(depth);
+        return false;
+    }
+    clipboard = *mask;
+    clipboard.depth = depth;
+    note = QObject::tr("Copied slice %1, %2 voxels. Move to another slice and paste.").arg(depth).arg(clipboard.count());
+    return true;
+}
+
+ShapeInterpolation::WriteResult ShapeInterpolation::pasteSliceAt(const int depth, QWidget * const parent) {
+    WriteResult result;
+    if (!started) {
+        result.message = QObject::tr("Shape interpolation: start a chain before pasting a slice.");
+        return result;
+    }
+    if (clipboard.count() == 0) {
+        result.message = QObject::tr("No slice has been copied yet.");
+        return result;
+    }
+    if (clipboard.uStep != axisGet(step, uAxisIdx) || clipboard.vStep != axisGet(step, vAxisIdx)) {
+        // the mask is indexed in voxels of the magnification it was taken at
+        result.message = QObject::tr("That slice was copied at a different magnification. Copy it again here.");
+        return result;
+    }
+    if (hasSliceAt(depth)) {
+        result.message = QObject::tr("Slice %1 is already a key slice. Delete it first if you mean to replace it.").arg(depth);
+        return result;
+    }
+
+    const UndoScope undoScope(QObject::tr("Paste key slice"));
+    const auto startPosition = state->viewerState->currentPosition;
+    QProgressDialog progress(QObject::tr("Pasting slice…"), QObject::tr("Cancel"), 0, 1, parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(400);
+    const LabelOnlyLoading labelOnly;
+
+    WriteCtx ctx;
+    writeMaskAt(clipboard, depth, soid, progress, ctx);
+    flushMarks(ctx);
+    progress.setValue(1);
+    state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
+
+    auto pasted = clipboard;
+    pasted.depth = depth;
+    slices[depth] = std::move(pasted);
+    wasEdited = true;
+    previewValid = false;
+    crossSectionValid = false;
+    ++gen;
+    emit changed();
+
+    result.cancelled = ctx.cancelled;
+    result.cubesMissing = ctx.cubesMissing;
+    result.cubesWritten = ctx.written.size();
+    result.depthsWritten = 1;
+    result.ok = !result.cancelled && result.cubesMissing == 0;
+    result.message = result.cubesMissing != 0
+        ? QObject::tr("Pasted onto slice %1, but %2 block(s) could not be loaded in time — it may have holes there.").arg(depth).arg(result.cubesMissing)
+        : QObject::tr("Pasted onto slice %1. Adjust it with the brush; it is a key slice now.").arg(depth);
+    return result;
+}
+
+ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeChain, const std::uint64_t value, const QString & title, QWidget * const parent) {
+    const UndoScope undoScope(title);
+    WriteResult result;
+    if (!started || slices.empty()) {
+        result.message = QObject::tr("Nothing to write.");
+        return result;
+    }
+
+    /* Every depth to write: the stride between the first and last key slice, *plus* the
+     * key slices themselves.
+     *
+     * Striding alone silently dropped key slices that were not on the stride's parity. The
+     * stride is one voxel of the current magnification, but a key slice sits wherever the
+     * crosshair was when it was painted, so at magnification 2 and above roughly half of
+     * them fall between strides — and those were never visited, never written, and looked
+     * exactly like "some slices just don't interpolate". At magnification 1 the stride is
+     * one voxel and the bug cannot appear, which is why it seemed to have no pattern. */
+    std::set<int> depthSet;
+    if (wholeChain) {
+        const auto dStep = std::max(1, axisGet(step, axis));
+        for (auto d = std::begin(slices)->first; d <= std::rbegin(slices)->first; d += dStep) {
+            depthSet.insert(d);
+        }
+    }
+    for (const auto & [depth, slice] : slices) {
+        (void)slice;
+        depthSet.insert(depth);
+    }
+    const std::vector<int> depths(std::begin(depthSet), std::end(depthSet));
+
+    const auto startPosition = state->viewerState->currentPosition;
+
+    QProgressDialog progress(title, QObject::tr("Cancel"), 0, static_cast<int>(depths.size()), parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(400);// don’t flash a dialog for the usual, instant case
+
+    // only the overlay matters here; don’t drag the EM data along behind every move
+    const LabelOnlyLoading labelOnly;
+
+    WriteCtx ctx;
+    SISlice writeSlice;
+    int done = 0;
+    for (const auto depth : depths) {
+        progress.setValue(done++);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+        if (progress.wasCanceled()) {
+            ctx.cancelled = true;
+            break;
+        }
+
+        const auto * maskPtr = maskAtDepth(depth);
+        if (maskPtr == nullptr || maskPtr->count() == 0) {
+            // Not necessarily benign: interpolantFor() also returns nothing when a slice
+            // pair spans more than MAX_PIXELS, and skipping that in silence is what makes a
+            // gap in the middle of a chain look inexplicable. Counted and reported.
+            if (maskPtr == nullptr && !hasSliceAt(depth)) {
+                ++result.depthsSkipped;
+            }
+            continue;
+        }
+        /* The mask being written is copied out, not pointed at.
+         *
+         * maskAtDepth() returns the one shared preview slice, and awaitLoader() inside the
+         * walk runs processEvents() to keep the progress dialog alive — which repaints,
+         * which asks for the preview at whatever depth the viewports are showing and
+         * overwrites it under us. Holding the pointer across that wrote one depth's outline
+         * at another depth. Reusing one buffer keeps the copy off the allocator. */
+        writeSlice = *maskPtr;
+        writeMaskAt(writeSlice, depth, value, progress, ctx);
+        ++result.depthsWritten;
+        if (ctx.cancelled) {
+            break;
+        }
+    }
+    flushMarks(ctx);
+    progress.setValue(static_cast<int>(depths.size()));
+
+    state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
+    result.cancelled = ctx.cancelled;
+    result.cubesMissing = ctx.cubesMissing;
+    result.cubesWritten = ctx.written.size();
+    if (ctx.cubesMissing != 0) {
+        // named in the log, because "a chunk of my object is missing" is otherwise
+        // impossible to tell from "the interpolation did not cover it"
+        qDebug() << "shape interpolation: " << ctx.cubesMissing << "block(s) could not be made resident:";
+        for (const auto & cube : ctx.missing) {
+            qDebug() << "   " << cube;
+        }
+    }
+    result.ok = !result.cancelled && result.cubesMissing == 0;
+    if (result.cancelled) {
+        result.message = QObject::tr("Cancelled after writing %n slice(s). What was written is kept.", "", static_cast<int>(result.depthsWritten));
+    } else if (result.cubesMissing != 0) {
+        // never silently: a dropped cube means a hole in the object
+        result.message = QObject::tr("Wrote %n slice(s), but %1 block(s) could not be loaded in time and were skipped — the object may have holes there.", "", static_cast<int>(result.depthsWritten))
+                             .arg(result.cubesMissing);
+    } else if (result.depthsSkipped != 0) {
+        result.message = QObject::tr("Wrote %n slice(s) across %1 block(s). %2 slice(s) could not be interpolated: %3", "", static_cast<int>(result.depthsWritten))
+                             .arg(result.cubesWritten).arg(result.depthsSkipped)
+                             .arg(error.isEmpty() ? QObject::tr("nothing between the key slices there.") : error);
+    } else {
+        result.message = QObject::tr("Wrote %n slice(s) across %1 block(s).", "", static_cast<int>(result.depthsWritten)).arg(result.cubesWritten);
+    }
+    return result;
+}
+
+bool ShapeInterpolation::sampleInterpolant(const Interpolant & in, const int depth, const int uIdx, const int vIdx) const {
+    if (uIdx < 0 || vIdx < 0 || uIdx >= in.uSize || vIdx >= in.vSize) {
+        return false;
+    }
+    const auto span = static_cast<float>(in.z2 - in.z1);
+    const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
+    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
+    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    constexpr float FAR = 1e20f;
+    const auto sample = [&](const std::vector<float> & d, const int u, const int v){
+        return (u < 0 || v < 0 || u >= in.uSize || v >= in.vSize) ? FAR : d[static_cast<std::size_t>(v) * in.uSize + u];
+    };
+    const auto a = sample(in.d1, uIdx + static_cast<int>(std::lround(-t * du)), vIdx + static_cast<int>(std::lround(-t * dv)));
+    const auto b = sample(in.d2, uIdx + static_cast<int>(std::lround((1.f - t) * du)), vIdx + static_cast<int>(std::lround((1.f - t) * dv)));
+    return ((1.f - t) * a + t * b) <= 0.f;
+}
+
+/* Cuts the whole chain — key slices and interpolations alike — with a plane that contains
+ * the interpolation axis, which is what the two viewports the chain does not live in are
+ * showing. Costs one evaluation per (depth, position) pair rather than a full mask per
+ * depth, and is cached until the crosshair leaves the plane or a slice is edited. */
+bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedCoord) {
+    if (previewDeferred) {
+        return false;// mid-stroke; a cross-section walks every pair and is the worst offender
+    }
+    if (crossSectionValid && crossSectionAxis == fixedAxis && crossSectionCoord == fixedCoord && crossSectionGen == gen) {
+        return crossSection.count() != 0;
+    }
+    crossSection = SISlice{};
+    crossSectionValid = true;
+    crossSectionAxis = fixedAxis;
+    crossSectionCoord = fixedCoord;
+    crossSectionGen = gen;
+    if (slices.size() < 2) {
+        return false;
+    }
+    const auto wAxis = (fixedAxis == uAxisIdx) ? vAxisIdx : uAxisIdx;
+    const bool fixedIsU = fixedAxis == uAxisIdx;
+
+    int wMin = std::numeric_limits<int>::max(), wMax = std::numeric_limits<int>::min(), wStep = 1;
+    const auto extend = [&](const int lo, const int size, const int st){
+        wStep = st;
+        wMin = std::min(wMin, lo);
+        wMax = std::max(wMax, lo + size * st);
+    };
+    /* Each pair's extent is read out as plain numbers in the same breath as it is built.
+     *
+     * This used to collect a pointer per pair and then walk them, which is only sound while
+     * nothing evicts: interpolantFor() drops the whole cache when the chain's distance
+     * transforms exceed their byte budget, so from the first pair past that budget onwards
+     * every pointer already collected was dangling and the extents came out of freed
+     * memory. Long chains are precisely the ones that exceed it. */
+    for (auto it = std::begin(slices); std::next(it) != std::end(slices); ++it) {
+        if (const auto * in = interpolantFor(it->first, std::next(it)->first); in != nullptr) {
+            extend(fixedIsU ? in->vMin : in->uMin, fixedIsU ? in->vSize : in->uSize, fixedIsU ? in->vStep : in->uStep);
+        }
+    }
+    for (const auto & [depth, slice] : slices) {
+        (void)depth;
+        extend(fixedIsU ? slice.vMin : slice.uMin, fixedIsU ? slice.vSize : slice.uSize, fixedIsU ? slice.vStep : slice.uStep);
+    }
+    if (wMax <= wMin) {
+        return false;
+    }
+
+    const auto aStep = std::max(1, axisGet(step, axis));
+    const auto aMin = std::begin(slices)->first;
+    const auto aSize = (std::rbegin(slices)->first - aMin) / aStep + 1;
+    const auto wSize = (wMax - wMin) / wStep;
+    if (static_cast<std::size_t>(aSize) * wSize > MAX_PIXELS) {
+        error = QObject::tr("Shape interpolation: the cross-section of this chain is too large to preview.");
+        return false;
+    }
+
+    // uAxis is whichever of the two spanned dataset axes has the lower index, so the quad
+    // the renderer emits and this mask agree on orientation without any special casing
+    const bool axisIsU = axis < wAxis;
+    const auto uSize = axisIsU ? aSize : wSize;
+    const auto vSize = axisIsU ? wSize : aSize;
+    std::vector<std::uint8_t> mask(static_cast<std::size_t>(uSize) * vSize, 0);
+
+    for (int ai = 0; ai < aSize; ++ai) {
+        const auto depth = aMin + ai * aStep;
+        const auto painted = slices.find(depth);
+        const Interpolant * in = nullptr;
+        if (painted == std::end(slices)) {
+            const auto lo = prevDepth(depth), hi = nextDepth(depth);
+            if (lo && hi) {
+                in = interpolantFor(*lo, *hi);
+            }
+        }
+        for (int wi = 0; wi < wSize; ++wi) {
+            const auto wCoord = wMin + wi * wStep;
+            bool set = false;
+            if (painted != std::end(slices)) {
+                const auto & sl = painted->second;
+                set = fixedIsU ? sl.at(sl.uIndexOf(fixedCoord), sl.vIndexOf(wCoord))
+                               : sl.at(sl.uIndexOf(wCoord), sl.vIndexOf(fixedCoord));
+            } else if (in != nullptr) {
+                const auto uIdx = fixedIsU ? (fixedCoord - in->uMin) / in->uStep : (wCoord - in->uMin) / in->uStep;
+                const auto vIdx = fixedIsU ? (wCoord - in->vMin) / in->vStep : (fixedCoord - in->vMin) / in->vStep;
+                set = sampleInterpolant(*in, depth, uIdx, vIdx);
+            }
+            if (set) {
+                const auto u = axisIsU ? ai : wi;
+                const auto v = axisIsU ? wi : ai;
+                mask[static_cast<std::size_t>(v) * uSize + u] = (painted != std::end(slices)) ? 2 : 1;
+            }
+        }
+    }
+
+    crossSection.depth = fixedCoord;
+    crossSection.uMin = axisIsU ? aMin : wMin;
+    crossSection.vMin = axisIsU ? wMin : aMin;
+    crossSection.uStep = axisIsU ? aStep : wStep;
+    crossSection.vStep = axisIsU ? wStep : aStep;
+    crossSection.uSize = uSize;
+    crossSection.vSize = vSize;
+    crossSection.adoptMask(std::move(mask));
+    return crossSection.count() != 0;
+}
+
+bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate & pos, PlanarMask & out) {
+    if (!started || !preview) {
+        return false;
+    }
+    // VIEWPORT_XY/XZ/ZY are 0/1/2 and their plane normals are z/y/x, i.e. 2 - type
+    const auto planeNormal = 2 - viewportType;
+    if (planeNormal < 0 || planeNormal > 2) {
+        return false;
+    }
+
+    if (planeNormal == axis) {// the viewport the chain lives in
+        const auto depth = axisGet(pos, axis);
+        const auto painted = slices.find(depth);
+        const auto isKeySlice = painted != std::end(slices);
+        // a key slice is drawn too, in its own colour, so which slices are in the chain is
+        // obvious at a glance rather than something you have to remember
+        const auto * slice = isKeySlice ? &painted->second : previewAt(depth);
+        if (slice == nullptr || slice->count() == 0) {
+            return false;
+        }
+        out = {axis, depth, uAxisIdx, vAxisIdx, slice->uMin, slice->vMin, slice->uStep, slice->vStep, slice->uSize, slice->vSize, &slice->mask, isKeySlice};
+        return true;
+    }
+
+    const auto fixedCoord = axisGet(pos, planeNormal);
+    if (!buildCrossSection(planeNormal, fixedCoord)) {
+        return false;
+    }
+    const auto wAxis = (planeNormal == uAxisIdx) ? vAxisIdx : uAxisIdx;
+    out = {planeNormal, fixedCoord, std::min(axis, wAxis), std::max(axis, wAxis),
+           crossSection.uMin, crossSection.vMin, crossSection.uStep, crossSection.vStep,
+           crossSection.uSize, crossSection.vSize, &crossSection.mask, false};
+    return true;
+}
+
+ShapeInterpolation::ShapeInterpolation() {
+    previewTimer.setSingleShot(true);
+    QObject::connect(&previewTimer, &QTimer::timeout, this, [this](){
+        previewDeferred = false;
+        ++gen;// drop the cached transforms so the next draw computes them once, from rest
+        emit changed();
+    });
+}
+
+void ShapeInterpolation::deferPreview() {
+    previewDeferred = true;
+    constexpr int SETTLE_MS = 1000;
+    previewTimer.start(SETTLE_MS);
+}
+
+std::size_t magFromIndex(const std::size_t magIndex) {
+    return Dataset::current().api == Dataset::API::PyKnossos ? magIndex + 1 : static_cast<std::size_t>(std::pow(2, magIndex));
+}
+
+QString ShapeInterpolation::magName() const {
+    return QString::number(magFromIndex(magIndex));
+}
+
+QString ShapeInterpolation::planeName() const {
+    return view == brush_t::view_t::xy ? QStringLiteral("xy") : view == brush_t::view_t::xz ? QStringLiteral("xz") : QStringLiteral("zy");
+}
+
+QString ShapeInterpolation::summary() const {
+    if (!started || slices.empty()) {
+        return QObject::tr("Shape interpolation: paint a slice to start a chain");
+    }
+    const auto axisName = axis == 0 ? QStringLiteral("x") : axis == 1 ? QStringLiteral("y") : QStringLiteral("z");
+    if (slices.size() == 1) {
+        return QObject::tr("Shape interpolation: %1 plane · 1 key slice at %2 %3 · paint another slice to interpolate")
+                   .arg(planeName()).arg(axisName).arg(std::begin(slices)->first);
+    }
+    return QObject::tr("Shape interpolation: %1 plane · mag %2 · %3 key slices · %4 %5–%6%7")
+               .arg(planeName())
+               .arg(magName())
+               .arg(slices.size())
+               .arg(axisName)
+               .arg(std::begin(slices)->first)
+               .arg(std::rbegin(slices)->first)
+               .arg(preview ? QString{} : QObject::tr(" · preview off"));
+}

@@ -84,6 +84,7 @@ Loader::Controller::Controller() {
     QObject::connect(this, &Loader::Controller::unloadCurrentMagnificationSignal, worker.get(), static_cast<void(Loader::Worker::*)()>(&Loader::Worker::unloadCurrentMagnification), Qt::BlockingQueuedConnection);
     QObject::connect(this, &Loader::Controller::markCubeAsModifiedSignal, worker.get(), &Loader::Worker::markCubeAsModified, Qt::BlockingQueuedConnection);
     QObject::connect(this, &Loader::Controller::snappyCacheSupplySnappySignal, worker.get(), &Loader::Worker::snappyCacheSupplySnappy, Qt::BlockingQueuedConnection);
+    QObject::connect(this, &Loader::Controller::snappyCacheReplaceSignal, worker.get(), &Loader::Worker::snappyCacheReplace, Qt::BlockingQueuedConnection);
     workerThread.start();
 }
 
@@ -109,6 +110,31 @@ void Loader::Controller::markCubeAsModified(const std::size_t layerId, const Coo
 
 bool Loader::Controller::isFinished() {
     return worker->isFinished.load();
+}
+
+Loader::Controller::MemoryReport Loader::Controller::memoryReport() {
+    MemoryReport report;
+    {
+        QMutexLocker lock{&state->protectCube2Pointer};
+        for (std::size_t layerId{0}; layerId < worker->slotChunk.size(); ++layerId) {
+            report.slotsTotal += worker->slotChunk[layerId].size();
+            report.slotsFree += worker->freeSlots[layerId].size();
+            for (const auto & chunk : worker->slotChunk[layerId]) {
+                report.slotBytes += chunk.size();
+            }
+        }
+    }
+    QMutexLocker lock{&worker->snappyCacheMutex};
+    for (const auto & layer : worker->snappyCache) {
+        for (const auto & mag : layer) {
+            report.snappyCubes += mag.size();
+            for (const auto & [cubeCoord, cube] : mag) {
+                (void)cubeCoord;
+                report.snappyBytes += cube.capacity();
+            }
+        }
+    }
+    return report;
 }
 
 bool Loader::Controller::hasSnappyCache() {
@@ -323,6 +349,33 @@ void Loader::Worker::snappyCacheSupplySnappy(const std::size_t layerId, const Co
         if (cubePtr != nullptr) {
             freeSlots[layerId].emplace_back(cubePtr);
             state->cube2Pointer[layerId][loaderMagnification].erase(cubeCoord);
+        }
+    }
+}
+
+void Loader::Worker::snappyCacheReplace(const std::size_t layerId, const quint64 cubeMagnification, const SnappySet cubes) {
+    QMutexLocker lock{&snappyCacheMutex};
+    if (cubeMagnification >= snappyCache[layerId].size()) {
+        qWarning() << "ignored snappy cube replacement for unavailable log2(mag)" << cubeMagnification;
+        return;
+    }
+    for (const auto & [cubeCoord, cube] : cubes) {
+        snappyCache[layerId][cubeMagnification][cubeCoord] = cube;// assign, don’t emplace
+        if (cubeMagnification == loaderMagnification) {//unload so it re-hydrates from what we just put there
+            if (auto openIt = slotOpen[layerId].find(cubeCoord); openIt != std::end(slotOpen[layerId])) {
+                openIt->second->cancel();
+            }
+            if (auto downloadIt = slotDownload[layerId].find(cubeCoord); downloadIt != std::end(slotDownload[layerId])) {
+                downloadIt->second->abort();
+            }
+            if (auto decompressionIt = slotDecompression[layerId].find(cubeCoord); decompressionIt != std::end(slotDecompression[layerId])) {
+                decompressionIt->second->waitForFinished();
+            }
+            QMutexLocker locker(&state->protectCube2Pointer);
+            if (auto * cubePtr = cubeQuery(state->cube2Pointer, layerId, loaderMagnification, cubeCoord); cubePtr != nullptr) {
+                freeSlots[layerId].emplace_back(cubePtr);
+                state->cube2Pointer[layerId][loaderMagnification].erase(cubeCoord);
+            }
         }
     }
 }

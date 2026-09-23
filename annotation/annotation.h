@@ -56,7 +56,10 @@ enum AnnotationMode {
     Mode_MergeTracing = (1 << 13) | NodeEditing | LinkedNodes | SkeletonCycles,
 
     Mode_Selection = (1 << 14) | NodeSelection | ObjectSelection,
-    Mode_CellSegmentation = (1 << 15) | Mode_Paint
+    Mode_CellSegmentation = (1 << 15) | Mode_Paint,
+    // shape interpolation composes Mode_Paint so it inherits Brush/ObjectSelection
+    // routing and satisfies the paint gate in writeVoxels()
+    Mode_ShapeInterpolation = (1 << 16) | Mode_Paint
 };
 
 class Annotation : public QObject {
