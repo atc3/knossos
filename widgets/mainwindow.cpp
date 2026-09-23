@@ -875,9 +875,19 @@ void MainWindow::createMenus() {
      * Off by default and stored with the annotation: it changes what every stroke does, and
      * whether that suits the work depends on what is being traced — an outline you close on
      * purpose wants it, a long process you happen to loop back over does not. */
-    fillEnclosedAction = actionMenu.addAction(tr("Fill Enclosed Areas After Each Stroke"), [this]() {
-        Segmentation::singleton().setFillEnclosedHoles(fillEnclosedAction->isChecked());
-    });
+    /* `H` for hole-filling, and it says which way it just went.
+     *
+     * A toggle on a hotkey needs to report itself: the menu tick is the only other
+     * indication, and nobody opens a menu to find out what the key they just pressed did.
+     * This one changes what every subsequent stroke does, so guessing wrong is a stroke
+     * that fills something it should not have. */
+    fillEnclosedAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Fill Enclosed Areas After Each Stroke"), this, [this]() {
+        auto & seg = Segmentation::singleton();
+        seg.setFillEnclosedHoles(fillEnclosedAction->isChecked());
+        statusBar()->showMessage(seg.fillEnclosedHoles
+            ? tr("Filling enclosed areas: close an outline and its inside joins the object when you let go.")
+            : tr("No longer filling enclosed areas — a closed outline stays hollow."), 6000);
+    }, Qt::Key_H);
     fillEnclosedAction->setCheckable(true);
     fillEnclosedAction->setChecked(Segmentation::singleton().fillEnclosedHoles);
     fillEnclosedAction->setToolTip(tr("Draw a closed outline and its inside becomes part of the object when you let go. "
