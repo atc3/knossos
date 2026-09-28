@@ -499,7 +499,17 @@ bool DatasetLoadWidget::loadDataset(QString data, const boost::optional<bool> lo
     if (Dataset::isGoogleBrainmaps(path)) {
         const auto pair = getBrainmapsToken();
         if (!pair.first) {
+            // was a bare return, which left the dialog sitting there looking broken
             qDebug() << "getBrainmapsToken failed";
+            if (!silent) {
+                QMessageBox warning{QApplication::activeWindow()};
+                warning.setIcon(QMessageBox::Warning);
+                warning.setText(tr("Unable to load Dataset."));
+                warning.setInformativeText(tr("%1 needs a Google Brainmaps access token, and this build cannot obtain one.")
+                                           .arg(path.toString()));
+                warning.exec();
+                open();
+            }
             return false;
         }
         token = pair.second;

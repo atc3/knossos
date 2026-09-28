@@ -84,7 +84,19 @@ QString Dataset::apiString() const {
 }
 
 bool Dataset::isGoogleBrainmaps(const QUrl & url) {
-    return url.toString().contains("google");
+    /* Brainmaps is one API on one host, not "anything with Google in the URL".
+     *
+     * This used to match the whole URL against "google", which also catches
+     * storage.googleapis.com — so an ordinary static dataset served out of a Google Cloud
+     * Storage bucket was taken for a Brainmaps volume. Opening one by its https address got
+     * as far as asking for a Brainmaps access token, failed to get one, and returned
+     * without saying anything, so the dataset dialog simply sat there when you pressed Load
+     * Dataset. The same file opened from disk worked, because the local config path has no
+     * "google" in it — only the layer URLs inside the file do, and those are never tested.
+     *
+     * The .k.toml exclusion is belt and braces: a config named as one format must not be
+     * handed to the parser for another, whatever the host. */
+    return !isToml(url) && url.host().endsWith("brainmaps.googleapis.com");
 }
 
 bool Dataset::isHeidelbrain(const QUrl & url) {
@@ -161,6 +173,10 @@ Dataset::list_t Dataset::parseGoogleJson(const QUrl & infoUrl, const QString & j
     for (auto scaleRef : jmap["geometry"].toArray()) {
         const auto & scale_json = scaleRef.toObject()["pixelSize"].toObject();
         info.scales.emplace_back(scale_json["x"].toDouble(1), scale_json["y"].toDouble(1), scale_json["z"].toDouble(1));
+    }
+    if (info.scales.empty()) {
+        // not a Brainmaps volume description, so say so rather than reading off the end
+        throw std::runtime_error("no geometry in this Brainmaps volume description — is it really one?");
     }
     info.scale = info.scales.front();
 
