@@ -136,6 +136,7 @@ signals:
     void appended(std::size_t firstIndex, std::vector<objinv::Record> records);
     void revised(std::vector<std::uint32_t> indices, std::vector<objinv::Record> records);
     void finished(objinv::State outcome, QString detail);
+    void warning(QString);
 
 private:
     void step();
@@ -147,6 +148,7 @@ private:
     Fetch readLocal(const CoordOfCube &, std::vector<std::uint64_t> & out);
     void requestRemote(const CoordOfCube &, std::uint64_t code);
     void completeCube(std::uint64_t code, bool decoded);
+    void abortInFlight();
     bool decode(const QByteArray & payload, std::vector<std::uint64_t> & out) const;
     void ingest(const CoordOfCube &, const std::vector<std::uint64_t> &);
     void flushDeltas(bool force);
@@ -173,6 +175,7 @@ private:
     std::unordered_map<std::uint64_t, QNetworkReply *> inFlight;
     std::unordered_map<std::uint64_t, int> attempts;
     int consecutiveGiveUps{0};
+    bool warnedAllAbsent{false};
     int scheduledRetries{0};      // blocks waiting out a backoff, so the walk is not yet done
     bool running{false}, paused{false}, loaderBusy{false}, stepQueued{false};
 

@@ -128,12 +128,13 @@ void ObjectInventoryModel::onRevised(const std::size_t first, const std::size_t 
      * go stale. Repainting the whole table for that would be tens of millions of cells; the
      * view asks for what it can see, so a blanket dataChanged over the row range it might
      * touch is enough and costs nothing for rows that are scrolled away. */
-    const auto lo = std::lower_bound(std::begin(rows), std::end(rows), static_cast<std::uint32_t>(first));
-    const auto hi = std::upper_bound(std::begin(rows), std::end(rows), static_cast<std::uint32_t>(last));
     if (activeOrder != Order::Scan) {
+        // rows are not in record order under any other one, so there is no range to narrow to
         emit dataChanged(index(0, Voxels), index(static_cast<int>(rows.size()) - 1, StateCol));
         return;
     }
+    const auto lo = std::lower_bound(std::begin(rows), std::end(rows), static_cast<std::uint32_t>(first));
+    const auto hi = std::upper_bound(std::begin(rows), std::end(rows), static_cast<std::uint32_t>(last));
     if (lo == std::end(rows) || lo == hi) {
         return;
     }

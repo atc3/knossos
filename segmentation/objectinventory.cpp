@@ -76,7 +76,7 @@ constexpr int STALL_AFTER = 3;                      // consecutive blocks given 
 constexpr qint64 FLUSH_INTERVAL_MS = 250;
 constexpr qint64 CHECKPOINT_MIN_MS = 30000;
 constexpr quint64 CHECKPOINT_MIN_CUBES = 256;
-constexpr int ALL_ABSENT_ABORT = 32;                // a wrong magnification, caught late
+constexpr quint64 ALL_ABSENT_WARN = 256;            // a wrong magnification, suspected late
 
 /* KNOSSOS can only sweep a layer whose blocks it can name and decode one at a time.
  *
@@ -431,6 +431,7 @@ void Scanner::startScan(ScanSpec s) {
     attempts.clear();
     consecutiveGiveUps = 0;
     scheduledRetries = 0;
+    warnedAllAbsent = false;
 
     // pick up where a previous run left off, if the cache is still valid
     const auto cached = readCache(spec.cachePath, spec.layer, spec.magnification);
@@ -480,27 +481,36 @@ void Scanner::setLoaderBusy(const bool busy) {
     }
 }
 
+/* Drops every outstanding request.
+ *
+ * The disconnect has to come first. abort() can emit finished() synchronously, and that
+ * handler erases the reply from `inFlight` — so aborting while iterating that map pulls the
+ * iterator out from under the loop. Severing the connections means the handlers never run,
+ * which also stops a cancelled request from calling step() back into a scan that is over.
+ * The map is moved out before any of it, so even a handler that did run finds nothing. */
+void Scanner::abortInFlight() {
+    auto outstanding = std::move(inFlight);
+    inFlight.clear();// moved-from is valid but unspecified; say what it is
+    for (auto & pair : outstanding) {
+        QObject::disconnect(pair.second, nullptr, this, nullptr);
+        pair.second->abort();
+        pair.second->deleteLater();
+    }
+}
+
 void Scanner::cancel() {
     if (!running) {
         return;
     }
     running = false;
-    for (auto & pair : inFlight) {
-        pair.second->abort();
-        pair.second->deleteLater();
-    }
-    inFlight.clear();
+    abortInFlight();
     flushDeltas(true);
     maybeCheckpoint(true);
 }
 
 void Scanner::stop(const State outcome, const QString & detail) {
     running = false;
-    for (auto & pair : inFlight) {
-        pair.second->abort();
-        pair.second->deleteLater();
-    }
-    inFlight.clear();
+    abortInFlight();
     flushDeltas(true);
     writeCache(outcome == State::Complete);
     emit finished(outcome, detail);
@@ -717,9 +727,17 @@ void Scanner::completeCube(const std::uint64_t code, bool) {
     ++cubesDone;
     attempts.erase(code);
     sweep.complete(code, covers());
-    if (cubesDone == ALL_ABSENT_ABORT && cubesAbsent == cubesDone) {
-        stop(State::Failed, QObject::tr("no segmentation blocks found at magnification %1 — try a finer one")
-             .arg(spec.magnification));
+    /* A long opening run of missing blocks usually means the magnification is not really
+     * there. Usually, not certainly: the walk starts at the volume corner, and a
+     * segmentation exported without empty blocks can legitimately have nothing there. So
+     * this says so once and carries on, rather than failing the scan — deciding whether the
+     * level exists is the probe's job, and it looks at three places spread through the
+     * volume instead of one corner. */
+    if (!warnedAllAbsent && cubesDone >= ALL_ABSENT_WARN && cubesAbsent == cubesDone) {
+        warnedAllAbsent = true;
+        emit warning(QObject::tr("The first %1 blocks at %2× are all missing — if the whole scan comes back "
+                                 "empty, that magnification probably has no segmentation.")
+                     .arg(cubesDone).arg(spec.magnification));
     }
 }
 
@@ -845,6 +863,7 @@ Inventory::Inventory() {
         }
         emit recordsRevised(indices.front(), indices.back());
     });
+    QObject::connect(worker.get(), &Scanner::warning, this, &Inventory::warning);
     QObject::connect(worker.get(), &Scanner::finished, this, [this](State outcome, QString detail) {
         if (outcome == State::Complete) {
             timestamp = QDateTime::currentDateTime();
@@ -859,6 +878,9 @@ Inventory::Inventory() {
 }
 
 void Inventory::suspend() {
+    if (!workerThread.isRunning()) {
+        return;// a blocking call into a thread with no event loop would never come back
+    }
     QMetaObject::invokeMethod(worker.get(), "cancel", Qt::BlockingQueuedConnection);
     workerThread.quit();
     workerThread.wait();
@@ -932,6 +954,9 @@ void Inventory::probe() {
         setState(State::Unsupported, why);
         return;
     }
+    if (currentState == State::Probing) {
+        return;// already asked; whatever wanted a scan is waiting in pendingScanMag
+    }
     const auto & layer = Dataset::datasets[Segmentation::singleton().layerId];
     setState(State::Probing);
     QMetaObject::invokeMethod(worker.get(), "probeMags", Qt::QueuedConnection,
@@ -968,9 +993,11 @@ void Inventory::startScan(const int requested) {
         emit warning(message);
         return;
     }
-    if (found->cubes > cubeBudget()) {
+    // by value: what follows emits, and an iterator into a QVector is not worth trusting across that
+    const MagOption option = *found;
+    if (option.cubes > cubeBudget()) {
         emit warning(tr("Scanning at %1× means %2 blocks, past the %3 the budget allows — this will take a while.")
-                     .arg(chosen).arg(found->cubes).arg(cubeBudget()));
+                     .arg(chosen).arg(option.cubes).arg(cubeBudget()));
     }
 
     pruneCache();
@@ -979,11 +1006,14 @@ void Inventory::startScan(const int requested) {
     index.clear();
     warnedTruncated = false;
     done = total = 0;
+    /* Said now rather than when the worker's first batch arrives: until then the table would
+     * still be indexing rows of a list that has just been emptied. */
+    emit recordsAppended(0, 0);
 
     QSettings settings;
     ScanSpec spec;
-    spec.layer = atMag(Dataset::datasets[Segmentation::singleton().layerId], found->magIndex);
-    spec.magIndex = found->magIndex;
+    spec.layer = atMag(Dataset::datasets[Segmentation::singleton().layerId], option.magIndex);
+    spec.magIndex = option.magIndex;
     spec.magnification = chosen;
     spec.backgroundId = Segmentation::singleton().getBackgroundId();
     spec.idCap = settings.value("objectInventoryIdCap", 500000).toULongLong();
