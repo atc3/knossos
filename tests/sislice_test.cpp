@@ -3,6 +3,8 @@
 // global coordinate keeps mapping to the same content.
 #include "segmentation/sislice.h"
 #include <cstdio>
+#include <algorithm>
+#include <random>
 #include <vector>
 
 static int failures = 0;
@@ -173,6 +175,91 @@ int main() {
         SISlice big; big.uMin = 0; big.vMin = 0; big.uStep = 1; big.vStep = 1;
         paint(big, 0, 0); paint(big, 2000, 2000);
         check(big.bytes() > 4u * 1000 * 1000, "a 2000² outline retains megabytes");
+    }
+
+    std::printf("which blocks a mask reaches into\n");
+    {
+        /* A block wrongly cleared means the write walk skips it and that part of the object
+         * silently never gets written, so this is checked against a brute-force reference
+         * over randomised masks, magnifications and origins rather than by inspection. */
+        std::mt19937 rng{20260930};
+        bool agrees = true, neverUnderReports = true;
+        int trials = 0;
+        for (int trial = 0; trial < 400 && agrees; ++trial) {
+            std::uniform_int_distribution<int> stepPick{0, 3};
+            const int uStep = 1 << stepPick(rng);
+            const int vStep = 1 << stepPick(rng);
+            std::uniform_int_distribution<int> sizePick{1, 40};
+            std::uniform_int_distribution<int> originPick{-300, 300};
+            std::uniform_int_distribution<int> blockPick{1, 6};
+            SISlice m;
+            m.uStep = uStep;
+            m.vStep = vStep;
+            m.uSize = sizePick(rng);
+            m.vSize = sizePick(rng);
+            // origins are on the magnification lattice, as every real slice's is
+            m.uMin = originPick(rng) * uStep;
+            m.vMin = originPick(rng) * vStep;
+            m.mask.assign(static_cast<std::size_t>(m.uSize) * m.vSize, 0);
+            std::uniform_int_distribution<int> fill{0, 6};
+            for (auto & cell : m.mask) { cell = fill(rng) == 0 ? 1 : 0; }
+
+            const int cubeExtentU = blockPick(rng) * uStep;
+            const int cubeExtentV = blockPick(rng) * vStep;
+            // a grid deliberately offset from, and sometimes smaller than, the mask
+            const int uCubeLo = siFloorDiv(m.uMin, cubeExtentU) - 1;
+            const int vCubeLo = siFloorDiv(m.vMin, cubeExtentV) - 1;
+            const int uCubes = (m.uSize * uStep) / cubeExtentU + 3;
+            const int vCubes = (m.vSize * vStep) / cubeExtentV + 3;
+
+            std::vector<std::uint8_t> got;
+            siReachedBlocks(m, uCubeLo, vCubeLo, uCubes, vCubes, cubeExtentU, cubeExtentV, got);
+
+            // the reference: every set voxel, mapped to the block holding it
+            std::vector<std::uint8_t> want(static_cast<std::size_t>(uCubes) * vCubes, 0);
+            for (int v = 0; v < m.vSize; ++v) {
+                for (int u = 0; u < m.uSize; ++u) {
+                    if (m.at(u, v) == 0) { continue; }
+                    const auto ui = siFloorDiv(m.uCoordOf(u), cubeExtentU) - uCubeLo;
+                    const auto vi = siFloorDiv(m.vCoordOf(v), cubeExtentV) - vCubeLo;
+                    if (ui >= 0 && ui < uCubes && vi >= 0 && vi < vCubes) {
+                        want[static_cast<std::size_t>(vi) * uCubes + ui] = 1;
+                    }
+                }
+            }
+            agrees = agrees && got == want;
+            for (std::size_t i = 0; i < want.size(); ++i) {
+                neverUnderReports = neverUnderReports && !(want[i] != 0 && got[i] == 0);
+            }
+            ++trials;
+        }
+        check(agrees, "400 randomised masks: agrees exactly with mapping every set voxel to its block");
+        check(neverUnderReports, "and never clears a block that holds part of the mask");
+
+        // a mask origin that does not line up with a block boundary is the case the run
+        // length has to get right
+        SISlice m;
+        m.uStep = 4; m.vStep = 4; m.uSize = 8; m.vSize = 1;
+        m.uMin = 4; m.vMin = 0;// half a 2-index block in
+        m.mask.assign(8, 0);
+        m.mask[0] = 1;// global u 4
+        m.mask[7] = 1;// global u 32
+        std::vector<std::uint8_t> got;
+        siReachedBlocks(m, 0, 0, 6, 1, 8, 8, got);// blocks of 8 global units
+        check(got.size() == 6 && got[0] != 0 && got[4] != 0, "an off-boundary origin maps to the right blocks");
+        check(got[1] == 0 && got[2] == 0 && got[3] == 0, "and leaves the blocks between them clear");
+
+        SISlice blank;
+        blank.uStep = blank.vStep = 1; blank.uSize = blank.vSize = 4;
+        blank.mask.assign(16, 0);
+        siReachedBlocks(blank, 0, 0, 2, 2, 2, 2, got);
+        check(std::count(std::begin(got), std::end(got), 0) == 4, "an empty mask reaches no block at all");
+
+        SISlice degenerate;
+        siReachedBlocks(degenerate, 0, 0, 2, 2, 2, 2, got);
+        check(got.size() == 4, "a degenerate mask is refused rather than read");
+        siReachedBlocks(blank, 0, 0, 0, 0, 2, 2, got);
+        check(got.empty(), "an empty block grid yields an empty answer");
     }
 
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "THERE WERE FAILURES");

@@ -28,6 +28,15 @@ downward shifts the origin so painted voxels keep reading back at the same globa
 coordinate, that the origin stays on the magnification lattice, erase accounting, and
 `shrinkToFit`.
 
+It also covers `siReachedBlocks`, which decides which blocks of the volume a mask actually
+reaches into so the write walk can skip the rest. That matters for speed — a block nothing
+is written to never enters the loader's cache, so every subsequent slice fetched it again,
+which for a wide object was gigabytes of downloads to write nothing — but a block wrongly
+cleared means part of the object is silently never written. So it is checked against a
+brute-force reference that maps every set voxel to its block, over 400 randomised masks
+with magnifications and grid origins that deliberately do not line up, plus an assertion
+that it never clears a block holding part of the mask.
+
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/sislice_test sislice_test.cpp && /tmp/sislice_test
 ```

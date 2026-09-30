@@ -772,10 +772,37 @@ void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, cons
     const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
     const auto cubeBegin = dataset.global2cube(first);
     const auto cubeEnd = dataset.global2cube(last) + 1;
+
+    /* Which blocks the mask actually reaches into.
+     *
+     * The grid a mask lives on is the union of both key slices' boxes plus a margin, so for
+     * anything that is not a filled rectangle most of its bounding box is empty — a vessel
+     * crossing the field diagonally touches under a fifth of the blocks in its own box.
+     * Walking an empty block did no harm to the result, but it cost a loader move, and a
+     * block with nothing written to it never enters the loader's cache, so *every depth*
+     * fetched it again from the server. Sixty depths over a 16×16 box is some 12 000
+     * redundant block downloads, around 1.8 GB, to write nothing. That is the slowness.
+     *
+     * One linear pass over the mask per depth answers it, which is milliseconds. */
+    const auto uCubeLo = axisGet(cubeBegin, uAxisIdx);
+    const auto vCubeLo = axisGet(cubeBegin, vAxisIdx);
+    const auto uCubes = std::max(0, axisGet(cubeEnd, uAxisIdx) - uCubeLo);
+    const auto vCubes = std::max(0, axisGet(cubeEnd, vAxisIdx) - vCubeLo);
+    const auto cubeExtentU = std::max(1, static_cast<int>(axisGet(cubeExtent, uAxisIdx)));
+    const auto cubeExtentV = std::max(1, static_cast<int>(axisGet(cubeExtent, vAxisIdx)));
+    std::vector<std::uint8_t> reached;
+    siReachedBlocks(mask, uCubeLo, vCubeLo, uCubes, vCubes, cubeExtentU, cubeExtentV, reached);
+
     for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
     for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
     for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
         const CoordOfCube cube{cx, cy, cz};
+        const auto uIdx = axisGet(cube, uAxisIdx) - uCubeLo;
+        const auto vIdx = axisGet(cube, vAxisIdx) - vCubeLo;
+        if (uIdx < 0 || uIdx >= uCubes || vIdx < 0 || vIdx >= vCubes
+                || reached[static_cast<std::size_t>(vIdx) * uCubes + uIdx] == 0) {
+            continue;// the mask has nothing here; don't load it, don't read it, don't count it
+        }
         const auto cubeFirst = dataset.cube2global(cube);
         const auto cubeLast = cubeFirst + cubeExtent - 1;
         const auto regionFirst = componentMax(first, cubeFirst);
