@@ -119,6 +119,13 @@ bool Dataset::isWebKnossos(const QUrl & url) {
     return url.host().contains("webknossos");
 }
 
+bool Dataset::mayUseCdnAuth(const QUrl & url) {
+    const auto host = url.host();
+    // a subdomain of googleapis.com, not merely a name ending in those letters
+    const auto google = host == "googleapis.com" || host.endsWith(".googleapis.com");
+    return !google;
+}
+
 Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_snappy) {
     Dataset::list_t infos;
     if (Dataset::isWebKnossos(url)) {
@@ -343,7 +350,7 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
         // annotation on a pre-segmented volume doesn't hand out ids that are already taken
         info.maxId = static_cast<std::uint64_t>(toml::find_or<std::int64_t>(vit, "MaxId", 0));
 
-        if (info.url.scheme() == "https" && !failfast) {
+        if (info.url.scheme() == "https" && mayUseCdnAuth(info.url) && !failfast) {
             QUrl authurl;
             authurl.setScheme(info.url.scheme());
             authurl.setHost(info.url.host());
