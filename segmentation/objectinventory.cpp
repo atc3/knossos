@@ -41,6 +41,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
+#include <QMetaMethod>
 #include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
@@ -834,7 +835,7 @@ Inventory::Inventory() {
         total = t;
         emit progressChanged(d, t, objects);
     });
-    QObject::connect(worker.get(), &Scanner::appended, this, [this](std::size_t first, std::vector<Record> batch) {
+    QObject::connect(worker.get(), &Scanner::appended, this, [this](const quint64 first, std::vector<Record> batch) {
         if (first == 0) {
             recs.clear();
             index.clear();
@@ -873,6 +874,30 @@ Inventory::Inventory() {
             emit warning(detail);
         }
     });
+
+    /* Every argument of a signal that crosses to the worker thread has to be a type Qt can
+     * queue, and it goes by the *name* moc recorded, not the type behind it — "std::size_t"
+     * is not a name Qt knows even though it is an unsigned long. Getting that wrong drops
+     * the call at emit time with a warning that is easy to miss, which is how the scan came
+     * to run, report its progress, and hand over none of what it found. Checked here so the
+     * next one says so at startup. */
+    for (const auto * mop : {&Scanner::staticMetaObject, &Inventory::staticMetaObject}) {
+    const auto & mo = *mop;
+    for (int i = mo.methodOffset(); i < mo.methodCount(); ++i) {
+        const auto method = mo.method(i);
+        if (method.methodType() != QMetaMethod::Signal && method.methodType() != QMetaMethod::Slot) {
+            continue;
+        }
+        for (int a = 0; a < method.parameterCount(); ++a) {
+            if (method.parameterType(a) == QMetaType::UnknownType) {
+                const auto types = method.parameterTypes();
+                qWarning() << "object inventory:" << method.methodSignature() << "argument"
+                           << (a < types.size() ? types.at(a) : QByteArray{"?"})
+                           << "has no metatype and cannot cross threads";
+            }
+        }
+    }
+    }
 
     workerThread.start();
 }

@@ -133,7 +133,13 @@ public slots:
 signals:
     void magsProbed(QVector<objinv::MagOption> options);
     void progress(quint64 cubesDone, quint64 cubesTotal, quint64 objects);
-    void appended(std::size_t firstIndex, std::vector<objinv::Record> records);
+    /* quint64, not std::size_t.
+     *
+     * moc records a parameter by the spelling in the declaration, and Qt has no metatype
+     * under the name "std::size_t" — so a queued connection carrying one is refused at emit
+     * time and the call is dropped. The scan then ran, reported its progress, and delivered
+     * none of what it found. Use names Qt knows for anything crossing the thread. */
+    void appended(quint64 firstIndex, std::vector<objinv::Record> records);
     void revised(std::vector<std::uint32_t> indices, std::vector<objinv::Record> records);
     void finished(objinv::State outcome, QString detail);
     void warning(QString);
@@ -234,8 +240,11 @@ public slots:
 signals:
     void stateChanged(objinv::State);
     void progressChanged(quint64 done, quint64 total, quint64 objects);
-    void recordsAppended(std::size_t first, std::size_t count);
-    void recordsRevised(std::size_t first, std::size_t last);
+    /* quint64 rather than std::size_t here too. These are delivered directly, both ends
+     * being on the GUI thread, so the name would not matter today — but it would the moment
+     * anything moved, and silently. Names Qt knows, on every signal. */
+    void recordsAppended(quint64 first, quint64 count);
+    void recordsRevised(quint64 first, quint64 last);
     void magOptionsChanged();
     void warning(QString);
 

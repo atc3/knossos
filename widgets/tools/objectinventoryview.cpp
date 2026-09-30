@@ -425,11 +425,11 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
         refreshStatus();
     });
 
-    QObject::connect(&inv, &objinv::Inventory::recordsAppended, this, [this](std::size_t first, std::size_t count) {
+    QObject::connect(&inv, &objinv::Inventory::recordsAppended, this, [this](const quint64 first, const quint64 count) {
         model.onAppended(first, count);
         refreshStatus();
     });
-    QObject::connect(&inv, &objinv::Inventory::recordsRevised, this, [this](std::size_t first, std::size_t last) {
+    QObject::connect(&inv, &objinv::Inventory::recordsRevised, this, [this](const quint64 first, const quint64 last) {
         model.onRevised(first, last);
     });
     QObject::connect(&inv, &objinv::Inventory::stateChanged, this, [this]() {
