@@ -140,3 +140,37 @@ silent wrap is indistinguishable from the key having done nothing.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/invfilter_test inventoryfilter_test.cpp && /tmp/invfilter_test
 ```
+
+## planarwrite_test
+
+Exercises `segmentation/planarwrite.h`, which works out the blocks one slice of an
+interpolation has to be written into and where in each. It is integer arithmetic over three
+axes in an order that changes with the viewing plane, a magnification lattice the block grid
+need not line up with, and a movement area whose upper bound is exclusive — and a mistake
+in it does not crash or warn, it quietly leaves part of the object unwritten.
+
+The central check is an equivalence one. Leaving out blocks the mask does not reach is a
+large speed-up, because a block nothing is written to never enters the loader's cache and
+so gets fetched again for every later slice. To show that the fast plan writes the same
+result as the exhaustive one, the test runs both through a simulated volume — stepping the
+lattice the way `processRegion` does, from the block's origin and capped to the region — and
+requires the two to come out identical, over 300 randomised cases covering magnifications
+1/2/4, block shapes that are not powers of two, mask origins off the block grid, and all
+three slice orientations.
+
+Density is what decides whether a mistake here is visible, so the randomised shapes include
+blobs (whole blocks fall empty, which is what the skip is for), salt and pepper (a *single*
+isolated voxel in a block, which catches any test for "reached" stricter than "at least
+one"), and a solid fill as the control where nothing may be skipped. There is also an
+explicit lone-voxel case at each magnification.
+
+Worth knowing if you change this: the test was checked by mutation, and the first two
+mutations tried — shortening the scan run by one, and requiring two set voxels — were *not*
+caught, because the shapes in the original version were too dense to expose them. The sparse
+shapes above were added for that reason. Mutations now caught include an off-by-one in the
+block index, not examining the last mask row, requiring a run longer than one voxel, and
+treating the movement area's maximum as inclusive.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/planarwrite_test planarwrite_test.cpp && /tmp/planarwrite_test
+```

@@ -26,6 +26,7 @@
 #include "segmentation/distancetransform.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
+#include "segmentation/planarwrite.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/undostack.h"
 #include "annotation/annotation.h"
@@ -696,16 +697,6 @@ void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std:
     distance_transform::blendSigned(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, out);
 }
 
-namespace {
-
-Coordinate componentMax(const Coordinate & a, const Coordinate & b) {
-    return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
-}
-Coordinate componentMin(const Coordinate & a, const Coordinate & b) {
-    return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
-}
-}
-
 ShapeInterpolation::WriteResult ShapeInterpolation::commit(QWidget * const parent) {
     if (slices.size() < 2) {
         WriteResult r;
@@ -751,62 +742,32 @@ void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
  * and still resident — costs no movement at all. */
 void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
                                      QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & dataset = Dataset::current();
     const auto & areaMin = Annotation::singleton().movementAreaMin;
     const auto & areaMax = Annotation::singleton().movementAreaMax;
-    // an interpolated grid is padded well beyond the shape; clip to the mask's own extent
-    Coordinate first, last;
-    axisSet(first, axis, depth);
-    axisSet(last, axis, depth);
-    axisSet(first, uAxisIdx, mask.uMin);
-    axisSet(last, uAxisIdx, mask.uCoordOf(mask.uSize) - mask.uStep);
-    axisSet(first, vAxisIdx, mask.vMin);
-    axisSet(last, vAxisIdx, mask.vCoordOf(mask.vSize) - mask.vStep);
-    first = first.capped(areaMin, areaMax);
-    last = last.capped(areaMin, areaMax);
+    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
+    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
+    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
+    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
+    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
+    /* Blocks the mask does not reach are left out.
+     *
+     * Not an accuracy trade: the plan without them covers exactly the same mask voxels,
+     * which tests/planarwrite_test.cpp asserts directly. It is a speed one, and a large
+     * one — a block nothing is written to never enters the loader's cache, so every later
+     * slice fetched it from the server again. */
+    const auto plan = planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
 
     const auto inside = [this, &mask](const Coordinate & pos){
         return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
     };
 
-    const auto & dataset = Dataset::current();
-    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
-    const auto cubeBegin = dataset.global2cube(first);
-    const auto cubeEnd = dataset.global2cube(last) + 1;
-
-    /* Which blocks the mask actually reaches into.
-     *
-     * The grid a mask lives on is the union of both key slices' boxes plus a margin, so for
-     * anything that is not a filled rectangle most of its bounding box is empty — a vessel
-     * crossing the field diagonally touches under a fifth of the blocks in its own box.
-     * Walking an empty block did no harm to the result, but it cost a loader move, and a
-     * block with nothing written to it never enters the loader's cache, so *every depth*
-     * fetched it again from the server. Sixty depths over a 16×16 box is some 12 000
-     * redundant block downloads, around 1.8 GB, to write nothing. That is the slowness.
-     *
-     * One linear pass over the mask per depth answers it, which is milliseconds. */
-    const auto uCubeLo = axisGet(cubeBegin, uAxisIdx);
-    const auto vCubeLo = axisGet(cubeBegin, vAxisIdx);
-    const auto uCubes = std::max(0, axisGet(cubeEnd, uAxisIdx) - uCubeLo);
-    const auto vCubes = std::max(0, axisGet(cubeEnd, vAxisIdx) - vCubeLo);
-    const auto cubeExtentU = std::max(1, static_cast<int>(axisGet(cubeExtent, uAxisIdx)));
-    const auto cubeExtentV = std::max(1, static_cast<int>(axisGet(cubeExtent, vAxisIdx)));
-    std::vector<std::uint8_t> reached;
-    siReachedBlocks(mask, uCubeLo, vCubeLo, uCubes, vCubes, cubeExtentU, cubeExtentV, reached);
-
-    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
-    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
-    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
-        const CoordOfCube cube{cx, cy, cz};
-        const auto uIdx = axisGet(cube, uAxisIdx) - uCubeLo;
-        const auto vIdx = axisGet(cube, vAxisIdx) - vCubeLo;
-        if (uIdx < 0 || uIdx >= uCubes || vIdx < 0 || vIdx >= vCubes
-                || reached[static_cast<std::size_t>(vIdx) * uCubes + uIdx] == 0) {
-            continue;// the mask has nothing here; don't load it, don't read it, don't count it
-        }
+    for (const auto & block : plan.blocks) {
+        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
+        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
+        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
         const auto cubeFirst = dataset.cube2global(cube);
-        const auto cubeLast = cubeFirst + cubeExtent - 1;
-        const auto regionFirst = componentMax(first, cubeFirst);
-        const auto regionLast = componentMin(last, cubeLast);
+        const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
 
         bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
         if (!resident) {
