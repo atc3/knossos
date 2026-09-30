@@ -508,7 +508,7 @@ std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos) {
     const auto last = dataset.cube2global({centre.x + half, centre.y + half, centre.z + half}) + cubeExtent - 1;
     const auto & areaMin = Annotation::singleton().movementAreaMin;
     const auto & areaMax = Annotation::singleton().movementAreaMax;
-    return {first.capped(areaMin, areaMax + 1), last.capped(areaMin, areaMax + 1)};
+    return {first.capped(areaMin, areaMax), last.capped(areaMin, areaMax)};
 }
 
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast) {
