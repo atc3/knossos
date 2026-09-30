@@ -50,6 +50,18 @@ struct Dataset {
     static bool isPyKnossos(const QUrl & url);
     static bool isToml(const QUrl & url);
     static bool isWebKnossos(const QUrl & url);
+    /* Whether asking this host for an access token could mean anything.
+     *
+     * KNOSSOS datasets behind a CDN hand out per-path tokens from /auth, and both the
+     * config parser and the downloader ask for one. Public object storage has no such
+     * endpoint — a request for /auth on storage.googleapis.com addresses a bucket called
+     * "auth" and is answered NoSuchBucket — so for those hosts it is a blocking round trip
+     * that can only fail, and it leaves a 404 in the log that reads like the reason the
+     * dataset would not load when it is nothing of the kind.
+     *
+     * A named list rather than a guess, so the CDN path is left exactly as it was. Other
+     * public object stores belong here too if datasets are ever served from them. */
+    static bool mayUseCdnAuth(const QUrl & url);
 
     static list_t parse(const QUrl & url, const QString &data, bool add_snappy);
     static list_t parseGoogleJson(const QUrl & infoUrl, const QString & json_raw);

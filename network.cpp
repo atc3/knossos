@@ -1,6 +1,7 @@
 ﻿#include "network.h"
 
 #include "buildinfo.h"
+#include "dataset.h"
 #include "stateInfo.h"
 #include "viewer.h"
 
@@ -88,7 +89,8 @@ QPair<bool, QByteArray> blockDownloadExtractData(QNetworkReply& reply,
                                                  QNetworkAccessManager* manager) {
     QEventLoop pause;
     auto lastDataReply = &reply;
-    if (manager != nullptr && !reply.request().url().path().endsWith("/auth")) {
+    if (manager != nullptr && !reply.request().url().path().endsWith("/auth")
+            && Dataset::mayUseCdnAuth(reply.request().url())) {
         // if the request failed for an auth/access error, we want to get an auth token for that
         // path then retry
         QObject::connect(
