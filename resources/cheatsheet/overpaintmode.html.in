@@ -7,7 +7,7 @@
 <body>
 	<h1>Segmentation Overpaint</h1>
 
-	<p><a href=#annotation_seg>Segmentation table view</a> | <a href=#pref_seg>Visibility preferences</a></p>
+	<p><a href=#annotation_seg>Segmentation table view</a> | <a href=#pref_seg>Visibility preferences</a> | <a href=#annotation_inventory>Object inventory</a></p>
 	<p><a href=#navi>Navigation preferences</a></p>
 
 	<p>
@@ -43,6 +43,7 @@
 		<tr><td><span class="sh">Ctrl + +</span></td><td>Zoom in</td></tr>
 		<tr><td><span class="sh">Ctrl + -</span></td><td>Zoom out</td></tr>
 		<tr><td><span class="sh">Ctrl + 0</span></td><td>Zoom reset</td></tr>
+		<tr><td><span class="sh">.</span> / <span class="sh">,</span></td><td>Next / previous object in the scanned inventory — jumps to it and selects it, so an existing annotation can be found rather than hunted for. The list is in scan order and is only ever added to, so repeated presses walk it once. Set a minimum size, hide what you have already annotated, and start the scan in <a href=#annotation_inventory>Annotation ▸ Inventory</a></td></tr>
 	</table>
 	</p>
 </body>

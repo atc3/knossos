@@ -26,6 +26,7 @@
 #include "segmentation/distancetransform.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
+#include "segmentation/planarwrite.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/undostack.h"
 #include "annotation/annotation.h"
@@ -171,8 +172,13 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
         auto last = first + cubeExtent - 1;
         axisSet(first, axis, depth);
         axisSet(last, axis, depth);
-        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
-        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+        /* capped() clamps to [min, max - 1] and movementAreaMax is exclusive — it equals
+         * the dataset boundary when the whole volume is in play — so the bound is areaMax
+         * itself. Passing areaMax + 1 reached one voxel past the last valid one, which put
+         * a whole block plane that cannot exist into the walk: it never loads, and gets
+         * reported as a block that could not be made resident. */
+        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
+        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
 
         if (!regionCubeResidency(first, last).second.empty()) {
             if (!mayLoad) {
@@ -189,21 +195,34 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
         }
 
         bool touchesU0{false}, touchesU1{false}, touchesV0{false}, touchesV1{false};
+        const auto uStep = slice.uStep;
+        const auto vStep = slice.vStep;
         readRegion(first, last, [&](const std::uint64_t voxel, const Coordinate & pos){
             if (voxel != soid) {
                 return;
             }
             slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
-            // a set voxel on a block edge means the object probably continues next door
-            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) <= axisGet(first, uAxisIdx);
-            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) >= axisGet(last, uAxisIdx);
-            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) <= axisGet(first, vAxisIdx);
-            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) >= axisGet(last, vAxisIdx);
+            /* A set voxel with no further sample beyond it inside this block means the
+             * object probably continues next door.
+             *
+             * "No further sample", not "on the block's last coordinate". The region ends at
+             * the block's last *voxel*, but a read steps by one voxel of the current
+             * magnification, so above magnification 1 the last sample falls short of it —
+             * at magnification 2 a 256-wide block ends at 255 and the last sample is 254.
+             * Testing against the coordinate therefore never fired, the walk never spread
+             * in +u or +v, and a plane wider than one block was silently adopted truncated
+             * on those two sides while spreading correctly on the other two. It reported
+             * success, because as far as it knew the object stopped there. */
+            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) - uStep < axisGet(first, uAxisIdx);
+            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) + uStep > axisGet(last, uAxisIdx);
+            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) - vStep < axisGet(first, vAxisIdx);
+            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) + vStep > axisGet(last, vAxisIdx);
         });
 
-        const auto enqueue = [&](const int axisIdx, const int delta){
+        const auto enqueue = [&](const int du, const int dv){
             auto neighbour = block;
-            axisSet(neighbour, axisIdx, axisGet(neighbour, axisIdx) + delta);
+            axisSet(neighbour, uAxisIdx, axisGet(neighbour, uAxisIdx) + du);
+            axisSet(neighbour, vAxisIdx, axisGet(neighbour, vAxisIdx) + dv);
             const auto corner = dataset.cube2global(neighbour);
             // a block off the edge of the dataset will never load; not finding it there is
             // not a shortfall, so don't queue it and don't report one
@@ -215,10 +234,21 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
                 queue.push_back(neighbour);
             }
         };
-        if (touchesU0) { enqueue(uAxisIdx, -1); }
-        if (touchesU1) { enqueue(uAxisIdx, +1); }
-        if (touchesV0) { enqueue(vAxisIdx, -1); }
-        if (touchesV1) { enqueue(vAxisIdx, +1); }
+        if (touchesU0) { enqueue(-1, 0); }
+        if (touchesU1) { enqueue(+1, 0); }
+        if (touchesV0) { enqueue(0, -1); }
+        if (touchesV1) { enqueue(0, +1); }
+        /* And the diagonals, when the object reaches both edges.
+         *
+         * A shape can pass through a block corner while missing both of the blocks that
+         * share an edge with this one — they get read, find nothing, and spread no further,
+         * so the far side was unreachable even though the object is continuous. Four extra
+         * block reads in the worst case, against a cutoff that looks like the object simply
+         * ending mid-air. */
+        if (touchesU0 && touchesV0) { enqueue(-1, -1); }
+        if (touchesU0 && touchesV1) { enqueue(-1, +1); }
+        if (touchesU1 && touchesV0) { enqueue(+1, -1); }
+        if (touchesU1 && touchesV1) { enqueue(+1, +1); }
     }
     progress.setValue(static_cast<int>(MAX_BLOCKS));
 
@@ -417,8 +447,8 @@ bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
     axisSet(last, uAxisIdx, baked.uCoordOf(baked.uSize) - baked.uStep);
     axisSet(first, vAxisIdx, baked.vMin);
     axisSet(last, vAxisIdx, baked.vCoordOf(baked.vSize) - baked.vStep);
-    first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
-    last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+    first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
+    last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
 
     const auto intended = regionCubeResidency(first, last);
     writeVoxelsWhere(first, last, [this, &baked](const Coordinate & pos){
@@ -667,16 +697,6 @@ void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std:
     distance_transform::blendSigned(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, out);
 }
 
-namespace {
-
-Coordinate componentMax(const Coordinate & a, const Coordinate & b) {
-    return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
-}
-Coordinate componentMin(const Coordinate & a, const Coordinate & b) {
-    return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
-}
-}
-
 ShapeInterpolation::WriteResult ShapeInterpolation::commit(QWidget * const parent) {
     if (slices.size() < 2) {
         WriteResult r;
@@ -722,35 +742,32 @@ void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
  * and still resident — costs no movement at all. */
 void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
                                      QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & dataset = Dataset::current();
     const auto & areaMin = Annotation::singleton().movementAreaMin;
     const auto & areaMax = Annotation::singleton().movementAreaMax;
-    // an interpolated grid is padded well beyond the shape; clip to the mask's own extent
-    Coordinate first, last;
-    axisSet(first, axis, depth);
-    axisSet(last, axis, depth);
-    axisSet(first, uAxisIdx, mask.uMin);
-    axisSet(last, uAxisIdx, mask.uCoordOf(mask.uSize) - mask.uStep);
-    axisSet(first, vAxisIdx, mask.vMin);
-    axisSet(last, vAxisIdx, mask.vCoordOf(mask.vSize) - mask.vStep);
-    first = first.capped(areaMin, areaMax + 1);
-    last = last.capped(areaMin, areaMax + 1);
+    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
+    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
+    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
+    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
+    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
+    /* Blocks the mask does not reach are left out.
+     *
+     * Not an accuracy trade: the plan without them covers exactly the same mask voxels,
+     * which tests/planarwrite_test.cpp asserts directly. It is a speed one, and a large
+     * one — a block nothing is written to never enters the loader's cache, so every later
+     * slice fetched it from the server again. */
+    const auto plan = planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
 
     const auto inside = [this, &mask](const Coordinate & pos){
         return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
     };
 
-    const auto & dataset = Dataset::current();
-    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
-    const auto cubeBegin = dataset.global2cube(first);
-    const auto cubeEnd = dataset.global2cube(last) + 1;
-    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
-    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
-    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
-        const CoordOfCube cube{cx, cy, cz};
+    for (const auto & block : plan.blocks) {
+        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
+        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
+        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
         const auto cubeFirst = dataset.cube2global(cube);
-        const auto cubeLast = cubeFirst + cubeExtent - 1;
-        const auto regionFirst = componentMax(first, cubeFirst);
-        const auto regionLast = componentMin(last, cubeLast);
+        const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
 
         bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
         if (!resident) {

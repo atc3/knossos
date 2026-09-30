@@ -33,6 +33,7 @@
 #include "scriptengine/scripting.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/floodfill.h"
+#include "segmentation/objectinventory.h"
 #include "segmentation/shapeinterpolation.h"
 #include "segmentation/undostack.h"
 #include "skeleton/swc.h"
@@ -130,6 +131,9 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
         resetWorkModes();
         adjustViewports();// apply 2d/3d default
         widgetContainer.annotationWidget.setSegmentationVisibility(Segmentation::singleton().enabled);
+        /* The inventory belongs to a dataset and a layer, so a change invalidates it. This
+         * also covers a layer switch, because the Layers panel re-emits datasetChanged. */
+        objinv::Inventory::singleton().onDatasetChanged();
 
         const auto scale = Dataset::current().scales[0];
         const auto boundary = Dataset::current().scales[0].componentMul(Dataset::current().boundary);
@@ -175,6 +179,37 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
         updateShapeInterpolationLabel();
     });
     QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::changed, this, &MainWindow::updateShapeInterpolationLabel);
+    inventoryScanProgressBar.setVisible(false);
+    inventoryScanProgressBar.setTextVisible(false);// same reason as networkProgressBar below
+    inventoryScanProgressBar.setToolTip(tr("Object inventory scan"));
+    statusBar()->addPermanentWidget(&inventoryScanProgressBar);
+    inventoryScanProgressBar.setMaximumWidth(inventoryScanProgressBar.sizeHint().width());
+    inventoryScanLabel.setVisible(false);
+    inventoryScanLabel.setMaximumWidth(320);// the permanent zone is shared
+    statusBar()->addPermanentWidget(&inventoryScanLabel);
+    QObject::connect(&objinv::Inventory::singleton(), &objinv::Inventory::progressChanged,
+                     this, &MainWindow::updateInventoryScanProgress);
+    QObject::connect(&objinv::Inventory::singleton(), &objinv::Inventory::stateChanged, this, [this](objinv::State state) {
+        const auto scanning = state == objinv::State::Scanning;
+        inventoryScanProgressBar.setVisible(scanning);
+        if (!scanning) {
+            // the label stays behind as a compact readout, so the list's existence is visible
+            inventoryScanLabel.setVisible(!objinv::Inventory::singleton().records().empty());
+            inventoryScanLabel.setText(tr("Inventory: %1 objects (%2×)")
+                                       .arg(objinv::Inventory::singleton().records().size())
+                                       .arg(objinv::Inventory::singleton().scanMag()));
+        }
+        if (state == objinv::State::Complete) {
+            statusBar()->showMessage(objinv::Inventory::singleton().statusLine(), 10000);
+        }
+    });
+    QObject::connect(&objinv::Inventory::singleton(), &objinv::Inventory::warning, this, [this](const QString & text) {
+        statusBar()->showMessage(text, 8000);
+    });
+    /* The brake. Any crosshair movement makes the loader report a non-zero backlog, so this
+     * one signal is enough to make the sweep stand aside for browsing and painting. */
+    QObject::connect(&Loader::Controller::singleton(), &Loader::Controller::progress,
+                     &objinv::Inventory::singleton(), &objinv::Inventory::onLoaderProgress);
     networkProgressBar.setVisible(false);
     networkProgressBar.setToolTip("Network progress");
     networkProgressBar.setTextVisible(false); // under windows percentage is shown next to progress bar (instead of on top of it) and is not visible on the dark status bar.
@@ -266,6 +301,8 @@ MainWindow::MainWindow(QWidget * parent) : QMainWindow{parent}, evilHack{[this](
         auto & prefWidget = widgetContainer.preferencesWidget;
         if(anchor.endsWith(ANNOTATION_SEG)) {
             annoWidget.tabs.setCurrentIndex(1); annoWidget.show(); annoWidget.raise();
+        } else if (anchor.endsWith(ANNOTATION_INVENTORY)) {
+            annoWidget.tabs.setCurrentIndex(3); annoWidget.show(); annoWidget.raise();
         } else if (anchor.endsWith(ANNOTATION_SKEL)) {
             annoWidget.tabs.setCurrentIndex(0); annoWidget.show(); annoWidget.raise();
         } else if(anchor.endsWith(PREF_NODE)) {
@@ -521,6 +558,24 @@ void MainWindow::updateLoaderProgress(int refCount) {
     loaderProgress->setAutoFillBackground(true);
     loaderProgress->setPalette(pal);
     loaderProgress->setText(QString::number(refCount));
+}
+
+/* Throttled the way updateLoaderProgress is: the sweep reports after every block, and at a
+ * few blocks a second that is a status bar repaint nobody asked for. */
+void MainWindow::updateInventoryScanProgress(const quint64 done, const quint64 total, const quint64 objects) {
+    const auto percent = total == 0 ? 0 : static_cast<int>(100 * done / total);
+    const auto scanning = objinv::Inventory::singleton().state() == objinv::State::Scanning;
+    if (percent == inventoryScanProgressBar.value() && done != total) {
+        return;
+    }
+    inventoryScanProgressBar.setRange(0, 100);
+    inventoryScanProgressBar.setValue(percent);
+    inventoryScanProgressBar.setVisible(scanning);
+    inventoryScanLabel.setVisible(scanning || objects != 0);
+    inventoryScanLabel.setText(scanning
+            ? tr("Inventory %1×: %2/%3 blocks · %4 objects")
+              .arg(objinv::Inventory::singleton().scanMag()).arg(done).arg(total).arg(objects)
+            : tr("Inventory: %1 objects (%2×)").arg(objects).arg(objinv::Inventory::singleton().scanMag()));
 }
 
 void MainWindow::setProofReadingUI(const bool on) {
@@ -927,6 +982,11 @@ void MainWindow::createMenus() {
      * re-hydrated from exactly this cache, so clearing it would make edits vanish from the
      * screen. So the footprint of a long session tracks how much of the volume has been
      * painted, and shape interpolation reaches a lot of it in one accept. */
+    actionMenu.addAction(tr("Object Inventory…"), [this]() {
+        widgetContainer.annotationWidget.setVisible(true);
+        widgetContainer.annotationWidget.tabs.setCurrentIndex(3);
+        widgetContainer.annotationWidget.raise();
+    })->setToolTip(tr("List every object in the segmentation layer, so an existing one can be found and refined."));
     actionMenu.addAction(tr("Memory Report"), [this]() {
         const auto loader = Loader::Controller::singleton().memoryReport();
         const auto & si = ShapeInterpolation::singleton();
@@ -1106,6 +1166,21 @@ void MainWindow::createMenus() {
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Node in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextNode(false);}, Qt::Key_P);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Next Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(true);}, Qt::Key_Z);
     addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Tree in Table"), this, [this](){widgetContainer.annotationWidget.skeletonTab.jumpToNextTree(false);}, Qt::SHIFT + Qt::Key_Z);
+    /* Next / previous object in the scanned inventory. Deliberately absent from every list
+     * in setWorkMode(): finding an existing object to refine is wanted in all of them, and
+     * unlike N and P above these two are not contended, so nothing has to yield. Comma and
+     * period read as < and > on the keycap and are bound nowhere else. */
+    nextInventoryObjectAction = &addApplicationShortcut(*viewMenu, QIcon(), tr("Next Object in Inventory"), this,
+        [this](){widgetContainer.annotationWidget.inventoryTab.jumpToNextEntry(true);}, Qt::Key_Period);
+    prevInventoryObjectAction = &addApplicationShortcut(*viewMenu, QIcon(), tr("Previous Object in Inventory"), this,
+        [this](){widgetContainer.annotationWidget.inventoryTab.jumpToNextEntry(false);}, Qt::Key_Comma);
+    for (auto * action : {nextInventoryObjectAction, prevInventoryObjectAction}) {
+        // a held shortcut otherwise repeats at the OS key rate, and every repeat is a
+        // recentering plus a fresh supercube
+        action->setAutoRepeat(false);
+    }
+    QObject::connect(&widgetContainer.annotationWidget.inventoryTab, &ObjectInventoryView::message,
+                     this, [this](const QString & text){ statusBar()->showMessage(text, 6000); });
 
     viewMenu->addSeparator();
 
@@ -1196,6 +1271,7 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     state->quitSignal = true;
     QApplication::processEvents();//ensure everything’s done
     Loader::Controller::singleton().suspendLoader();
+    objinv::Inventory::singleton().suspend();// checkpoints the sweep, then joins its thread
     saveSettings();
     // event loop will stop after this
     QApplication::closeAllWindows();// generates – otherwise missing – hideEvents for saveGeometry
@@ -1326,6 +1402,11 @@ bool MainWindow::openFileDispatch(QStringList fileNames, const bool mergeAll, co
             }
             statusBar()->showMessage(parts.join(" · "), 8000);
         }
+    }
+
+    if (Annotation::singleton().extraFiles.contains(OBJECT_INVENTORY_FILE)) {
+        // which objects have already been walked: a record of work, so it rides with the annotation
+        widgetContainer.annotationWidget.inventoryTab.importVisitedJson(Annotation::singleton().extraFiles[OBJECT_INVENTORY_FILE]);
     }
 
     Annotation::singleton().setUnsavedChanges(multipleFiles || mergeSkeleton || mergeSegmentation);// merge implies changes
@@ -1507,6 +1588,12 @@ try {
     } else {
         Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE] = layoutsJson;
     }
+    const auto visitedJson = widgetContainer.annotationWidget.inventoryTab.visitedJson();
+    if (visitedJson.isEmpty()) {
+        Annotation::singleton().extraFiles.remove(OBJECT_INVENTORY_FILE);
+    } else {
+        Annotation::singleton().extraFiles[OBJECT_INVENTORY_FILE] = visitedJson;
+    }
     annotationFileSave(filename, onlySelectedTrees, saveTime, saveDatasetPath);
     Annotation::singleton().annotationFilename = filename;
     updateRecentFile(filename);
@@ -1570,6 +1657,10 @@ void MainWindow::setWorkMode(AnnotationMode workMode) {
     const bool painting = mode.testFlag(AnnotationMode::Mode_Paint) || mode.testFlag(AnnotationMode::Mode_OverPaint);
     newObjectAction->setVisible(painting);
     // `N` is "new object" while painting; everywhere else it stays Next Node in Table
+    /* The inventory's next/previous pair is deliberately NOT in this function. Locating an
+     * existing object to refine is wanted in every mode, and unlike N here its keys collide
+     * with nothing, so there is no reason to yield them. Please do not "fix" that by adding
+     * them to one of these lists. */
     nextNodeInTableAction->setEnabled(!painting);
     pushBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
     popBranchAction->setVisible(mode.testFlag(AnnotationMode::NodeEditing));
