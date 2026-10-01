@@ -96,7 +96,13 @@ struct MagOption {
     std::size_t magIndex{0};
     quint64 cubes{0};
     quint64 estBytes{0};
-    bool present{false};
+    /* A sample block was found at this level.
+     *
+     * Only ever evidence *for*. A segmentation is usually sparse — the exporter writes a
+     * block only where something is labelled — so a sample that comes back missing says
+     * nothing about whether the level exists, only that nothing was labelled there. It is
+     * therefore not allowed to veto a scan; it orders the choice of default. */
+    bool sampled{false};
 };
 
 /* Everything the worker needs, handed over by value. There is deliberately no pointer back
@@ -120,7 +126,7 @@ public:
     void moveToThread(QThread * target);// reimplemented to carry qnam across, as the loader does
 
 public slots:
-    void probeMags(Dataset layer, int lowestMag, int highestMag);
+    void probeMags(Dataset layer, int lowestMag, int highestMag, Coordinate nearby);
     void startScan(objinv::ScanSpec spec);
     void setPaused(bool);
     void cancel();
@@ -222,6 +228,9 @@ public:
      * Called when the Inventory tab is first shown rather than on every dataset load: it is
      * network work, and a dataset is opened far more often than the list is wanted. */
     void ensureProbed();
+    /* Whether a dataset scan is possible at all: a volume can have no stored segmentation,
+     * with every label living in the annotation instead. */
+    bool datasetHasSegmentation() const;
 
     /* The finest magnification whose block count fits the budget, among those that were
      * found to exist. Falls back to the coarsest present one, and says so. */
@@ -230,6 +239,15 @@ public:
 
 public slots:
     void startScan(int mag = 0);// 0 = auto
+    /* Tallies the annotation's own cubes rather than the dataset's.
+     *
+     * The dataset sweep reads what the server stores, which on a volume whose segmentation
+     * was never baked out is nothing at all — there the annotation *is* the segmentation,
+     * and it is also the only part that is ever out of date in the other direction. Runs
+     * on this thread against the loader's cache of modified cubes: bounded by what has
+     * been painted, no network, and no magnification to choose, since those cubes are held
+     * at whatever magnification they were painted at. */
+    void scanAnnotation(QWidget * parent = nullptr);
     void pause();
     void resume();
     void cancel();
@@ -264,6 +282,7 @@ private:
     quint64 done{0}, total{0};
     QDateTime timestamp;
     bool probedThisDataset{false};
+    bool fromAnnotation{false};// the list came from the annotation, not from the dataset
     bool warnedTruncated{false};
     /* A scan asked for before the magnifications were known. Probing has to happen first —
      * it is what decides which levels exist — so the request waits here for it. -1 is no

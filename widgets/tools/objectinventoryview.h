@@ -116,6 +116,7 @@ class ObjectInventoryView : public QWidget {
 
     QPushButton scanButton{tr("Scan")};
     QPushButton rescanButton{tr("Rescan")};
+    QPushButton annotationButton{tr("Scan annotation")};
     QComboBox magCombo;
     QLabel magLabel{tr("detail")};
     QProgressBar progressBar;

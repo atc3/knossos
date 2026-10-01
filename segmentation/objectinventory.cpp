@@ -23,8 +23,10 @@
 #include "segmentation/objectinventory.h"
 
 #include "annotation/annotation.h"
+#include "loader.h"
 #include "segmentation/segmentation.h"
 #include "stateInfo.h"
+#include "viewer.h"
 
 #include <quazip.h>
 #include <quazipfile.h>
@@ -40,7 +42,9 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QCoreApplication>
 #include <QLockFile>
+#include <QProgressDialog>
 #include <QMetaMethod>
 #include <QSaveFile>
 #include <QSettings>
@@ -332,7 +336,7 @@ bool Scanner::inGrid(const std::uint64_t code) const {
  * Three probes per level rather than one, because a sparse volume may legitimately not have
  * a block at its centre. Runs inside a local event loop: this thread has nothing else to do
  * while probing, and cancel() still arrives, being a queued slot. */
-void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag) {
+void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag, const Coordinate nearby) {
     QVector<MagOption> options;
     QString why;
     if (!sweepable(layer, why)) {
@@ -357,14 +361,26 @@ void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag
         option.cubes = cubesFor(layer, magIndex);
         option.estBytes = option.cubes * BYTES_PER_CUBE_GUESS;
 
+        /* Where to look.
+         *
+         * The crosshair first, because the user is looking at their data and the block
+         * under it is the likeliest in the volume to hold something. Then a spread through
+         * the volume. Three points on one axis — what this used to do — is hopeless against
+         * a sparse segmentation: on a real dataset all three landed in empty regions, the
+         * level was written off as absent, and the scan refused to run on a volume that
+         * was full of objects. */
         std::vector<Coordinate> spots;
         const Coordinate b = probe.boundary;
-        spots.push_back({b.x / 2, b.y / 2, b.z / 2});
-        const auto longest = b.x >= b.y && b.x >= b.z ? 0 : (b.y >= b.z ? 1 : 2);
-        for (const auto frac : {1, 3}) {
-            Coordinate at{b.x / 2, b.y / 2, b.z / 2};
-            (longest == 0 ? at.x : longest == 1 ? at.y : at.z) = (longest == 0 ? b.x : longest == 1 ? b.y : b.z) * frac / 4;
-            spots.push_back(at);
+        if (nearby.x >= 0 && nearby.y >= 0 && nearby.z >= 0
+                && nearby.x < b.x && nearby.y < b.y && nearby.z < b.z) {
+            spots.push_back(nearby);
+        }
+        for (const auto fx : {1, 2, 3}) {
+            for (const auto fy : {1, 2, 3}) {
+                for (const auto fz : {1, 2, 3}) {
+                    spots.push_back({b.x * fx / 4, b.y * fy / 4, b.z * fz / 4});
+                }
+            }
         }
 
         Pending p;
@@ -377,7 +393,7 @@ void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag
                 break;// no file extension for this type; sweepable() should have caught it
             }
             if (probe.url.scheme() == "file") {
-                p.option.present = p.option.present || QFileInfo::exists(request.url().toLocalFile());
+                p.option.sampled = p.option.sampled || QFileInfo::exists(request.url().toLocalFile());
                 continue;
             }
             request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
@@ -398,7 +414,7 @@ void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag
     for (auto & p : pending) {
         for (auto * reply : p.replies) {
             const auto code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            p.option.present = p.option.present || (reply->error() == QNetworkReply::NoError && code == 200);
+            p.option.sampled = p.option.sampled || (reply->error() == QNetworkReply::NoError && code == 200);
             reply->deleteLater();
         }
         options.push_back(p.option);
@@ -946,21 +962,25 @@ std::size_t Inventory::cubeBudget() const {
 
 int Inventory::autoMag() const {
     const auto budget = cubeBudget();
-    int coarsestPresent = 0;
-    for (const auto & option : mags) {
-        if (option.present) {
-            coarsestPresent = std::max(coarsestPresent, option.mag);
-        }
-    }
-    // finest first, so the answer is the most detail the budget allows
     auto sorted = mags;
+    // finest first, so the answer is the most detail the budget allows
     std::sort(std::begin(sorted), std::end(sorted), [](const MagOption & a, const MagOption & b) { return a.mag < b.mag; });
-    for (const auto & option : sorted) {
-        if (option.present && option.cubes <= budget) {
-            return option.mag;
+    /* A level where a sample was found is preferred, but one where none was is still
+     * offered: a sparse segmentation can easily have nothing at any of the sampled blocks
+     * while being full of objects elsewhere, and refusing on that evidence is how a scan
+     * came to do nothing at all on a volume that had plenty to find. */
+    for (const auto requireSample : {true, false}) {
+        for (const auto & option : sorted) {
+            if ((option.sampled || !requireSample) && option.cubes <= budget) {
+                return option.mag;
+            }
         }
     }
-    return coarsestPresent;// nothing fits; the coarsest is the least bad, and it is reported
+    int coarsest = 0;// nothing fits the budget; the coarsest is the least bad, and it is reported
+    for (const auto & option : mags) {
+        coarsest = std::max(coarsest, option.mag);
+    }
+    return coarsest;
 }
 
 QString Inventory::cachePathFor(const int magnification) const {
@@ -984,9 +1004,11 @@ void Inventory::probe() {
     }
     const auto & layer = Dataset::datasets[Segmentation::singleton().layerId];
     setState(State::Probing);
+    // the block under the crosshair is the likeliest in the volume to hold something
+    const auto nearby = ::state->viewerState != nullptr ? ::state->viewerState->currentPosition : Coordinate{-1, -1, -1};
     QMetaObject::invokeMethod(worker.get(), "probeMags", Qt::QueuedConnection,
                               Q_ARG(Dataset, layer), Q_ARG(int, layer.lowestAvailableMag),
-                              Q_ARG(int, layer.highestAvailableMag));
+                              Q_ARG(int, layer.highestAvailableMag), Q_ARG(Coordinate, nearby));
 }
 
 void Inventory::startScan(const int requested) {
@@ -1005,18 +1027,26 @@ void Inventory::startScan(const int requested) {
     pendingScanMag = -1;
     const auto chosen = requested != 0 ? requested : autoMag();
     if (chosen == 0) {
-        const auto message = tr("No segmentation blocks were found at any magnification.");
+        /* Not necessarily an error: a dataset can have no stored segmentation at all, with
+         * every label living in the annotation instead. Say which, because the two call for
+         * completely different things from the reader. */
+        const auto message = tr("this dataset declares no magnifications to scan.");
         setState(State::Failed, message);
         emit warning(message);
         return;
     }
     const auto found = std::find_if(std::begin(mags), std::end(mags),
                                     [chosen](const MagOption & o) { return o.mag == chosen; });
-    if (found == std::end(mags) || !found->present) {
-        const auto message = tr("Magnification %1 has no segmentation blocks.").arg(chosen);
+    if (found == std::end(mags)) {
+        const auto message = tr("This dataset does not declare magnification %1.").arg(chosen);
         setState(State::Failed, message);
         emit warning(message);
         return;
+    }
+    if (!found->sampled) {
+        // worth saying, but not worth refusing over — see autoMag()
+        emit warning(tr("Nothing was found in the blocks sampled at %1×, which is normal for a sparse "
+                        "segmentation. Scanning anyway.").arg(chosen));
     }
     // by value: what follows emits, and an iterator into a QVector is not worth trusting across that
     const MagOption option = *found;
@@ -1027,6 +1057,7 @@ void Inventory::startScan(const int requested) {
 
     pruneCache();
     mag = chosen;
+    fromAnnotation = false;
     recs.clear();
     index.clear();
     warnedTruncated = false;
@@ -1094,6 +1125,7 @@ void Inventory::onDatasetChanged() {
     mags.clear();
     probedThisDataset = false;
     pendingScanMag = -1;
+    fromAnnotation = false;
     mag = 0;
     done = total = 0;
     timestamp = {};
@@ -1105,6 +1137,101 @@ void Inventory::onDatasetChanged() {
         loadCache();// local, cheap, and tells the user a list already exists
     } else {
         setState(State::Unsupported, why);
+    }
+}
+
+bool Inventory::datasetHasSegmentation() const {
+    return std::any_of(std::begin(mags), std::end(mags), [](const MagOption & o){ return o.sampled; });
+}
+
+void Inventory::scanAnnotation(QWidget * const parent) {
+    const auto layerId = Segmentation::singleton().layerId;
+    if (layerId >= Dataset::datasets.size() || !Dataset::datasets[layerId].isOverlay()) {
+        emit warning(tr("No segmentation layer is loaded."));
+        return;
+    }
+    const auto & layer = Dataset::datasets[layerId];
+    const auto voxels = static_cast<std::size_t>(layer.cubeShape.prod());
+    const auto expected = voxels * sizeof(std::uint64_t);
+
+    /* Holds the loader's cache for the duration, which stalls block loading — so it runs
+     * behind a modal dialog, where nothing is browsing anyway, the way mesh generation
+     * does the same walk. */
+    const auto guard = Loader::Controller::singleton().getAllModifiedCubes(layerId);
+    const auto & byMag = guard.cubes;
+    std::size_t total = 0;
+    for (const auto & set : byMag) {
+        total += set.size();
+    }
+    if (total == 0) {
+        setState(State::Idle, {});
+        emit warning(tr("The annotation has no painted blocks yet."));
+        return;
+    }
+
+    QSettings settings;
+    Accumulator acc;
+    acc.setIdCap(settings.value("objectInventoryIdCap", 500000).toULongLong());
+    const auto background = Segmentation::singleton().getBackgroundId();
+    std::vector<std::uint64_t> buffer(voxels, 0);
+
+    QProgressDialog progress(tr("Reading the annotation…"), tr("Cancel"), 0, static_cast<int>(total), parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(400);
+    int donePieces = 0;
+    bool cancelled = false;
+
+    for (std::size_t magIndex = 0; magIndex < byMag.size() && !cancelled; ++magIndex) {
+        const auto atThisMag = atMag(layer, magIndex);
+        CubeGeometry geom;
+        geom.shape[0] = layer.cubeShape.x;
+        geom.shape[1] = layer.cubeShape.y;
+        geom.shape[2] = layer.cubeShape.z;
+        for (int a = 0; a < 3; ++a) {
+            geom.step[a] = stepAlong(atThisMag, a);
+        }
+        geom.nmPerVoxel[0] = atThisMag.scale.x;
+        geom.nmPerVoxel[1] = atThisMag.scale.y;
+        geom.nmPerVoxel[2] = atThisMag.scale.z;
+
+        for (const auto & entry : byMag[magIndex]) {
+            progress.setValue(donePieces++);
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+            if (progress.wasCanceled()) {
+                cancelled = true;
+                break;
+            }
+            std::size_t uncompressed{0};
+            if (!snappy::GetUncompressedLength(entry.second.data(), entry.second.size(), &uncompressed)
+                    || uncompressed != expected
+                    || !snappy::RawUncompress(entry.second.data(), entry.second.size(),
+                                              reinterpret_cast<char *>(buffer.data()))) {
+                continue;// a block that will not decode tells us nothing; skip it
+            }
+            const auto origin = atThisMag.cube2global(entry.first);
+            geom.origin[0] = origin.x;
+            geom.origin[1] = origin.y;
+            geom.origin[2] = origin.z;
+            acc.ingestCube(buffer.data(), geom, background);
+        }
+    }
+    progress.setValue(static_cast<int>(total));
+
+    recs = acc.records();
+    index.clear();
+    for (std::size_t i = 0; i < recs.size(); ++i) {
+        index.emplace(recs[i].id, i);
+    }
+    mag = 1;// annotation cubes carry their own magnification; the list is in mag-1 coordinates
+    done = total;
+    this->total = total;
+    timestamp = QDateTime::currentDateTime();
+    fromAnnotation = true;
+    setState(cancelled ? State::Idle : State::Complete, {});
+    emit recordsAppended(0, recs.size());
+    emit progressChanged(done, this->total, recs.size());
+    if (acc.truncated()) {
+        emit warning(tr("Stopped at %1 objects — raise the ceiling to list more.").arg(recs.size()));
     }
 }
 
@@ -1171,13 +1298,19 @@ QString Inventory::statusLine() const {
     if (currentState == State::Unsupported) {
         return tr("Object inventory unavailable: %1").arg(currentDetail);
     }
+    if (currentState == State::Failed && recs.empty()) {
+        /* A refusal has to stay on screen. This used to be an eight-second message in the
+         * status bar while the tab went on saying "press Scan to build one", so pressing
+         * Scan on a dataset with no stored segmentation looked like a dead button. */
+        return tr("Nothing to scan: %1").arg(currentDetail);
+    }
     if (recs.empty()) {
         return currentState == State::Scanning
                 ? tr("Scanning at %1× — %2 of %3 blocks, nothing found yet").arg(mag).arg(done).arg(total)
                 : tr("No object inventory yet — press Scan to build one");
     }
     QString line = tr("%n object(s)", "", static_cast<int>(recs.size()));
-    line += tr(" · %1×").arg(mag);
+    line += fromAnnotation ? tr(" · from the annotation") : tr(" · %1×").arg(mag);
     if (currentState == State::Scanning) {
         line += tr(" · scanning, %1 of %2 blocks").arg(done).arg(total);
     } else if (timestamp.isValid()) {
@@ -1186,13 +1319,19 @@ QString Inventory::statusLine() const {
     if (currentState == State::Stalled || currentState == State::Paused) {
         line += tr(" · %1").arg(stateName(currentState));
     }
-    /* Said out loud rather than left to be discovered: a coarse sweep cannot see small
-     * objects, and no sweep can see edits that have not been written back. */
-    line += tr(" · excludes unsaved edits");
-    if (mag > 1) {
-        line += tr(" and objects under about %1 voxels").arg(mag * mag * mag);
+    /* Said out loud rather than left to be discovered. The two sources have opposite
+     * blind spots: a dataset sweep sees what the server stores and misses everything
+     * painted since, while an annotation scan sees exactly what has been painted and
+     * nothing that was already baked into the volume. */
+    if (fromAnnotation) {
+        line += tr(" · everything painted in this annotation, and nothing already in the dataset");
+    } else {
+        line += tr(" · excludes unsaved edits");
+        if (mag > 1) {
+            line += tr(" and objects under about %1 voxels").arg(mag * mag * mag);
+        }
     }
-    if (mayBeStale()) {
+    if (mayBeStale() && !fromAnnotation) {
         line += tr(" · may be out of date");
     }
     return line;

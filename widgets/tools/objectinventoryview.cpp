@@ -315,6 +315,9 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
 
     scanButton.setToolTip(tr("Read the segmentation layer in the background and list every object it finds."));
     rescanButton.setToolTip(tr("Throw the list away and read the layer again."));
+    annotationButton.setToolTip(tr("List what this annotation has painted, rather than what the dataset stores.\n"
+                                   "Reads the blocks you have edited — no network, and it sees unsaved work,\n"
+                                   "but nothing that was already baked into the volume."));
     magCombo.setToolTip(tr("How much detail to read. Coarser is much faster but misses small objects."));
     minVoxelsSpin.setRange(0, 1000000000);
     minVoxelsSpin.setSingleStep(50);
@@ -336,6 +339,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
 
     controlLayout.addWidget(&scanButton);
     controlLayout.addWidget(&rescanButton);
+    controlLayout.addWidget(&annotationButton);
     controlLayout.addWidget(&magLabel);
     controlLayout.addWidget(&magCombo);
     controlLayout.addStretch();
@@ -411,6 +415,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
         }
     });
     QObject::connect(&rescanButton, &QPushButton::clicked, this, [&inv]() { inv.rescan(); });
+    QObject::connect(&annotationButton, &QPushButton::clicked, this, [this, &inv]() { inv.scanAnnotation(this); });
     QObject::connect(&magCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshStatus(); });
 
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
@@ -507,12 +512,14 @@ void ObjectInventoryView::rebuildMagCombo() {
     std::sort(std::begin(options), std::end(options),
               [](const objinv::MagOption & a, const objinv::MagOption & b) { return a.mag < b.mag; });
     for (const auto & option : options) {
-        if (!option.present) {
-            continue;
-        }
-        // the cost is shown beside the choice, because it is the whole basis for making it
-        magCombo.addItem(tr("%1× — %2 blocks, about %3 MB").arg(option.mag).arg(option.cubes)
-                         .arg(option.estBytes / (1024 * 1024)), option.mag);
+        // every declared level is offered. A sparse segmentation can have nothing at any
+        // sampled block and still be full of objects, so "not sampled" is a note, not a bar.
+        const auto label = option.sampled
+                ? tr("%1× — %2 blocks, about %3 MB")
+                  .arg(option.mag).arg(option.cubes).arg(option.estBytes / (1024 * 1024))
+                : tr("%1× — %2 blocks, about %3 MB (nothing at the sampled blocks)")
+                  .arg(option.mag).arg(option.cubes).arg(option.estBytes / (1024 * 1024));
+        magCombo.addItem(label, option.mag);
     }
     const auto restore = magCombo.findData(previous);
     magCombo.setCurrentIndex(restore >= 0 ? restore : 0);
@@ -526,6 +533,7 @@ void ObjectInventoryView::refreshControls() {
     scanButton.setText(scanning ? tr("Pause") : resumable ? tr("Resume") : tr("Scan"));
     scanButton.setEnabled(usable);
     rescanButton.setEnabled(usable && !inv.records().empty());
+    annotationButton.setEnabled(!scanning);
     magCombo.setEnabled(usable && !scanning);
     progressBar.setVisible(scanning);
 }
