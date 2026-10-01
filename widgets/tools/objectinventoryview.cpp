@@ -24,16 +24,19 @@
 
 #include "dataset.h"
 #include "segmentation/segmentation.h"
+#include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
 #include "viewer.h"
 #include "widgets/GuiConstants.h"
 
 #include <QBrush>
 #include <QHeaderView>
+#include <QMessageBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QStringList>
 #include <QSettings>
 
 #include <algorithm>
@@ -73,19 +76,35 @@ bool ObjectInventoryModel::accepts(const std::size_t recordIndex) const {
     }
     return objinv::accepts(records[recordIndex], recordIndex, activeFilter,
                            [&records](const std::size_t i) {
-                               // read-only: subobjectExists() is a plain find and creates nothing
-                               return Segmentation::singleton().subobjectExists(records[i].id);
+                               /* Dealt with, by any route. subobjectExists() alone misses a
+                                * false positive removed with the bucket on background, which
+                                * never selects anything — hence the flags too. Read-only:
+                                * subobjectExists() is a plain find and creates nothing. */
+                               const auto bits = objinv::Inventory::singleton().flagsFor(records[i].id);
+                               return (bits & (objinv::Flag::Painted | objinv::Flag::Erased)) != 0
+                                       || Segmentation::singleton().subobjectExists(records[i].id);
                            },
-                           [this](const std::size_t i) { return i < visited.size() && visited[i]; });
+                           [](const std::size_t i) {
+                               const auto & recs = objinv::Inventory::singleton().records();
+                               return i < recs.size()
+                                       && (objinv::Inventory::singleton().flagsFor(recs[i].id) & objinv::Flag::Visited) != 0;
+                           });
 }
 
 void ObjectInventoryModel::rebuild() {
     const auto & records = objinv::Inventory::singleton().records();
     beginResetModel();
-    visited.resize(records.size(), false);
     rows = objinv::buildRows(records, activeFilter,
-                             [&records](const std::size_t i) { return Segmentation::singleton().subobjectExists(records[i].id); },
-                             [this](const std::size_t i) { return i < visited.size() && visited[i]; });
+                             [&records](const std::size_t i) {
+                                 const auto bits = objinv::Inventory::singleton().flagsFor(records[i].id);
+                                 return (bits & (objinv::Flag::Painted | objinv::Flag::Erased)) != 0
+                                         || Segmentation::singleton().subobjectExists(records[i].id);
+                             },
+                             [](const std::size_t i) {
+                                 const auto & r = objinv::Inventory::singleton().records();
+                                 return i < r.size()
+                                         && (objinv::Inventory::singleton().flagsFor(r[i].id) & objinv::Flag::Visited) != 0;
+                             });
     if (activeOrder != Order::Scan) {
         sortRows();
     }
@@ -99,7 +118,6 @@ void ObjectInventoryModel::onAppended(const std::size_t first, const std::size_t
         rebuild();
         return;
     }
-    visited.resize(records.size(), false);
     std::vector<std::uint32_t> passing;
     for (std::size_t i = first; i < records.size(); ++i) {
         if (accepts(i)) {
@@ -220,49 +238,24 @@ int ObjectInventoryModel::rowOfRecord(const std::size_t recordIndex) const {
 }
 
 bool ObjectInventoryModel::visitedAt(const int row) const {
-    const auto i = recordIndexAt(row);
-    return i != objinv::Accumulator::npos && i < visited.size() && visited[i];
+    const auto * r = recordAt(row);
+    return r != nullptr && (objinv::Inventory::singleton().flagsFor(r->id) & objinv::Flag::Visited) != 0;
 }
 
 void ObjectInventoryModel::markVisited(const std::size_t recordIndex, const bool on) {
-    if (recordIndex >= visited.size()) {
-        visited.resize(objinv::Inventory::singleton().records().size(), false);
+    const auto & recs = objinv::Inventory::singleton().records();
+    if (recordIndex >= recs.size()) {
+        return;
     }
-    if (recordIndex < visited.size()) {
-        visited[recordIndex] = on;
-        const auto row = rowOfRecord(recordIndex);
-        if (row >= 0 && row < static_cast<int>(rows.size()) && rows[row] == recordIndex) {
-            emit dataChanged(index(row, StateCol), index(row, StateCol));
-        }
+    objinv::Inventory::singleton().setFlag(recs[recordIndex].id, objinv::Flag::Visited, on);
+    const auto row = rowOfRecord(recordIndex);
+    if (row >= 0 && row < static_cast<int>(rows.size()) && rows[row] == recordIndex) {
+        emit dataChanged(index(row, StateCol), index(row, StateCol));
     }
 }
 
 std::size_t ObjectInventoryModel::visitedCount() const {
-    return static_cast<std::size_t>(std::count(std::begin(visited), std::end(visited), true));
-}
-
-std::vector<std::uint64_t> ObjectInventoryModel::visitedIds() const {
-    const auto & records = objinv::Inventory::singleton().records();
-    std::vector<std::uint64_t> ids;
-    for (std::size_t i = 0; i < visited.size() && i < records.size(); ++i) {
-        if (visited[i]) {
-            ids.push_back(records[i].id);
-        }
-    }
-    return ids;
-}
-
-void ObjectInventoryModel::adoptVisitedIds(const std::vector<std::uint64_t> & ids) {
-    auto & inv = objinv::Inventory::singleton();
-    visited.assign(inv.records().size(), false);
-    for (const auto id : ids) {
-        if (const auto i = inv.indexOfId(id)) {
-            if (*i < visited.size()) {
-                visited[*i] = true;
-            }
-        }
-    }
-    rebuild();
+    return objinv::Inventory::singleton().countWith(objinv::Flag::Visited);
 }
 
 QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int role) const {
@@ -270,7 +263,9 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
     if (r == nullptr) {
         return {};
     }
-    const auto annotated = Segmentation::singleton().subobjectExists(r->id);
+    const auto bitsNow = objinv::Inventory::singleton().flagsFor(r->id);
+    const auto annotated = Segmentation::singleton().subobjectExists(r->id)
+            || (bitsNow & (objinv::Flag::Painted | objinv::Flag::Erased)) != 0;
     const auto seen = visitedAt(modelIndex.row());
 
     if (role == Qt::TextAlignmentRole) {
@@ -299,11 +294,18 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
         const auto p = positionOf(*r);
         return QString("%1, %2, %3").arg(p.x).arg(p.y).arg(p.z);
     }
-    case StateCol:
-        if (annotated && seen) { return tr("annotated · visited"); }
-        if (annotated) { return tr("annotated"); }
-        if (seen) { return tr("visited"); }
-        return QString{};
+    case StateCol: {
+        /* What is known to have happened to it, in the order it is useful to scan: whether
+         * it has been worked on at all, then whether it has merely been looked at. */
+        const auto bits = objinv::Inventory::singleton().flagsFor(r->id);
+        QStringList what;
+        if ((bits & objinv::Flag::Painted) != 0) { what << tr("painted"); }
+        if ((bits & objinv::Flag::Erased) != 0) { what << tr("erased"); }
+        if ((bits & objinv::Flag::Skeleton) != 0) { what << tr("skeleton"); }
+        if (annotated && what.isEmpty()) { what << tr("annotated"); }
+        if (seen) { what << tr("visited"); }
+        return what.join(" · ");
+    }
     }
     return {};
 }
@@ -315,6 +317,9 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
 
     scanButton.setToolTip(tr("Read the segmentation layer in the background and list every object it finds."));
     rescanButton.setToolTip(tr("Throw the list away and read the layer again."));
+    deleteButton.setToolTip(tr("Set every voxel of the selected object to background, for removing a\n"
+                               "false positive outright. Walks the object's own bounding box and is\n"
+                               "one undo step."));
     annotationButton.setToolTip(tr("List what this annotation has painted, rather than what the dataset stores.\n"
                                    "Reads the blocks you have edited — no network, and it sees unsaved work,\n"
                                    "but nothing that was already baked into the volume."));
@@ -340,6 +345,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     controlLayout.addWidget(&scanButton);
     controlLayout.addWidget(&rescanButton);
     controlLayout.addWidget(&annotationButton);
+    controlLayout.addWidget(&deleteButton);
     controlLayout.addWidget(&magLabel);
     controlLayout.addWidget(&magCombo);
     controlLayout.addStretch();
@@ -388,6 +394,8 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
 
     QObject::connect(&table, &QTreeView::customContextMenuRequested, this, &ObjectInventoryView::showContextMenu);
     QObject::connect(&table, &QTreeView::doubleClicked, this, [this](const QModelIndex & i) { jumpToRow(i.row()); });
+    QObject::connect(table.selectionModel(), &QItemSelectionModel::currentRowChanged, this, [this]() { refreshControls(); });
+    QObject::connect(&inv, &objinv::Inventory::flagsChanged, this, [this]() { repaintTimer.start(); });
     QObject::connect(jumpAction, &QAction::triggered, this, [this]() { jumpToRow(currentRow()); });
     QObject::connect(markVisitedAction, &QAction::triggered, this, [this]() {
         model.markVisited(model.recordIndexAt(currentRow()), true);
@@ -416,6 +424,25 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     });
     QObject::connect(&rescanButton, &QPushButton::clicked, this, [&inv]() { inv.rescan(); });
     QObject::connect(&annotationButton, &QPushButton::clicked, this, [this, &inv]() { inv.scanAnnotation(this); });
+    QObject::connect(&deleteButton, &QPushButton::clicked, this, [this, &inv]() {
+        const auto * record = model.recordAt(currentRow());
+        if (record == nullptr) {
+            emit message(tr("Select an object in the list first."));
+            return;
+        }
+        const auto soid = record->id;
+        const auto voxels = record->voxels;
+        QMessageBox ask{QMessageBox::Question, tr("Erase object"),
+                        tr("Set every voxel of object %1 to background?").arg(soid),
+                        QMessageBox::Cancel, this};
+        ask.setInformativeText(tr("About %1 voxels at the scanned magnification. This is one undo step.").arg(voxels));
+        const auto * erase = ask.addButton(tr("Erase"), QMessageBox::DestructiveRole);
+        ask.exec();
+        if (ask.clickedButton() == erase) {
+            inv.eraseObject(soid, this);
+            refreshVisibleRows();
+        }
+    });
     QObject::connect(&magCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshStatus(); });
 
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
@@ -466,7 +493,12 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     QObject::connect(&Segmentation::singleton(), &Segmentation::resetData, this, [this]() { repaintTimer.start(); });
     repaintTimer.setSingleShot(true);
     repaintTimer.setInterval(400);
-    QObject::connect(&repaintTimer, &QTimer::timeout, this, [this]() { refreshVisibleRows(); });
+    QObject::connect(&repaintTimer, &QTimer::timeout, this, [this]() {
+        objinv::Inventory::singleton().refreshSkeletonFlags();
+        refreshVisibleRows();
+    });
+    QObject::connect(&Skeletonizer::singleton(), &Skeletonizer::resetData, this, [this]() { repaintTimer.start(); });
+    QObject::connect(&Skeletonizer::singleton(), &Skeletonizer::nodeAddedSignal, this, [this]() { repaintTimer.start(); });
 
     rebuildMagCombo();
     refreshControls();
@@ -528,14 +560,20 @@ void ObjectInventoryView::rebuildMagCombo() {
 void ObjectInventoryView::refreshControls() {
     const auto & inv = objinv::Inventory::singleton();
     const auto scanning = inv.state() == objinv::State::Scanning;
+    const auto probing = inv.state() == objinv::State::Probing;
     const auto resumable = inv.state() == objinv::State::Paused || inv.state() == objinv::State::Stalled;
     const auto usable = inv.state() != objinv::State::Unsupported;
-    scanButton.setText(scanning ? tr("Pause") : resumable ? tr("Resume") : tr("Scan"));
-    scanButton.setEnabled(usable);
+    scanButton.setText(scanning ? tr("Pause") : probing ? tr("Checking…") : resumable ? tr("Resume") : tr("Scan"));
+    scanButton.setEnabled(usable && !probing);
     rescanButton.setEnabled(usable && !inv.records().empty());
     annotationButton.setEnabled(!scanning);
+    deleteButton.setEnabled(!scanning && table.currentIndex().isValid());
     magCombo.setEnabled(usable && !scanning);
     progressBar.setVisible(scanning);
+    if (scanning && progressBar.maximum() == 0) {
+        progressBar.setRange(0, 100);
+        progressBar.setValue(0);
+    }
 }
 
 void ObjectInventoryView::refreshStatus() {
@@ -638,7 +676,14 @@ void ObjectInventoryView::jumpToRow(const int row) {
     } else {
         seg.selectMergedObjectFromSubObject(record.id, position);
     }
-    state->viewer->setPositionWithRecentering(position);
+    /* Instant, not animated.
+     *
+     * setPositionWithRecentering() hands over to Remote::process(), which only teleports
+     * past roughly half a supercube — 448 voxels at magnification 1 — and animates anything
+     * closer. Stepping through a list is the one case where that is pure delay: you already
+     * know where you are going, and neighbouring entries in scan order are usually near
+     * each other, which is exactly the range that animates. This is what jumpToNode() does. */
+    state->viewer->setPosition(position, USERMOVE_NEUTRAL);
 
     /* Marked, but the row is not re-filtered away underneath the cursor even when "hide
      * visited" is on — it disappears at the next rebuild instead. Having the row you are
@@ -679,37 +724,11 @@ void ObjectInventoryView::saveSettings() {
     settings.endGroup();
 }
 
-/* Which objects have been walked belongs to the *annotation* — it is a record of work done,
- * not a property of the dataset — so it rides along inside the .k.zip. Stored as ids rather
- * than list positions, so a rescan that discovers things in a different order keeps it. */
-QByteArray ObjectInventoryView::visitedJson() const {
-    const auto ids = model.visitedIds();
-    if (ids.empty()) {
-        return {};
-    }
-    QJsonArray array;
-    for (const auto id : ids) {
-        array.append(QString::number(id));// as text: a quint64 does not survive a JSON double
-    }
-    QJsonObject root;
-    root["mag"] = objinv::Inventory::singleton().scanMag();
-    root["visited"] = array;
-    return QJsonDocument{root}.toJson(QJsonDocument::Compact);
+QByteArray ObjectInventoryView::stateJson() const {
+    return objinv::Inventory::singleton().flagsJson();
 }
 
-void ObjectInventoryView::importVisitedJson(const QByteArray & json) {
-    const auto document = QJsonDocument::fromJson(json);
-    if (!document.isObject()) {
-        return;
-    }
-    std::vector<std::uint64_t> ids;
-    for (const auto value : document.object()["visited"].toArray()) {
-        bool ok = false;
-        const auto id = value.toString().toULongLong(&ok);
-        if (ok) {
-            ids.push_back(id);
-        }
-    }
-    model.adoptVisitedIds(ids);
+void ObjectInventoryView::importStateJson(const QByteArray & json) {
+    objinv::Inventory::singleton().importStateJson(json);
     refreshStatus();
 }

@@ -60,6 +60,7 @@
 #include "segmentation/inventoryaccumulator.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
@@ -90,7 +91,23 @@ enum class State {
 };
 QString stateName(State);
 
-// What one magnification would cost, and whether it is really there.
+/* What is known to have been done to an object.
+ *
+ * Kept by subobject id rather than by position in the list, so it survives a rescan that
+ * discovers things in a different order, and stored with the annotation — it is a record of
+ * work, not a property of the dataset.
+ *
+ * Painted and Erased are both "you have dealt with this": a false positive removed with the
+ * bucket on background never gets selected, so going only by what Segmentation knows about
+ * would leave it looking untouched for ever. */
+enum Flag : quint8 {
+    Visited  = 1 << 0,// stepped to with the navigation keys
+    Painted  = 1 << 1,// voxels written with this id
+    Erased   = 1 << 2,// voxels of this id overwritten by something else, background included
+    Skeleton = 1 << 3,// a skeleton node sits on it
+};
+
+// What one magnification would cost, and whether anything was found in the blocks sampled.
 struct MagOption {
     int mag{1};
     std::size_t magIndex{0};
@@ -221,8 +238,29 @@ public:
     bool complete() const { return currentState == State::Complete; }
     quint64 cubesDone() const { return done; }
     quint64 cubesTotal() const { return total; }
+    int percentDone() const { return total == 0 ? 0 : static_cast<int>(100 * done / total); }
+    /* Seconds still to go, or nothing when there is not enough to go on yet.
+     *
+     * From the rate achieved so far over the blocks still to do. It is a rough figure by
+     * nature — the sweep stands aside whenever the loader is busy, so it speeds up and
+     * slows down with whatever else is happening — but "about four minutes" is the thing
+     * worth knowing, and a progress bar alone does not say it. */
+    std::optional<int> etaSeconds() const;
+    QString progressLine() const;
     // Whether the annotation has been edited since the sweep, i.e. whether the list may lag.
     bool mayBeStale() const;
+    quint8 flagsFor(std::uint64_t soid) const;
+    void setFlag(std::uint64_t soid, Flag, bool on);
+    std::size_t countWith(Flag) const;
+    /* Re-reads which objects carry a skeleton node.
+     *
+     * A tree already counts the subobject ids its nodes sit on, so this is a walk over the
+     * trees rather than over the volume. It only knows about nodes whose subobject was
+     * recorded when they were placed, which is what happens in the segmentation-aware
+     * tracing modes — a node dropped with no segmentation loaded leaves no trace to find. */
+    void refreshSkeletonFlags();
+    QByteArray flagsJson() const;
+    void importStateJson(const QByteArray &);
     QString statusLine() const;
     /* Finds out which magnifications exist, if that has not been done for this dataset yet.
      * Called when the Inventory tab is first shown rather than on every dataset load: it is
@@ -248,6 +286,13 @@ public slots:
      * been painted, no network, and no magnification to choose, since those cubes are held
      * at whatever magnification they were painted at. */
     void scanAnnotation(QWidget * parent = nullptr);
+    /* Sets every voxel of one object to background.
+     *
+     * For removing a false positive outright rather than painting over it. Walks the
+     * object's own bounding box, which the scan already recorded, making each block
+     * resident first — the same discipline the interpolation commit uses, because a write
+     * to a block that is not loaded is dropped without a word. Undoable as one step. */
+    bool eraseObject(quint64 soid, QWidget * parent = nullptr);
     void pause();
     void resume();
     void cancel();
@@ -255,8 +300,13 @@ public slots:
     void onDatasetChanged();
     void onLoaderProgress(int count);
 
+public slots:
+    void noteSubobjectPainted(quint64 soid);
+    void noteSubobjectOverwritten(quint64 soid);
+
 signals:
     void stateChanged(objinv::State);
+    void flagsChanged();
     void progressChanged(quint64 done, quint64 total, quint64 objects);
     /* quint64 rather than std::size_t here too. These are delivered directly, both ends
      * being on the GUI thread, so the name would not matter today — but it would the moment
@@ -272,9 +322,16 @@ private:
     void loadCache();
     QString cachePathFor(int mag) const;
     void probe();
+    /* The magnification list, without asking the network anything.
+     *
+     * Block counts come from the dataset's own declared extent and voxel sizes, so the
+     * choice of level needs no round trip. Sampling only adds the note about whether
+     * anything was found at a few blocks, which is why a scan no longer waits for it. */
+    void buildMagOptions();
 
     std::vector<Record> recs;
     std::unordered_map<std::uint64_t, std::size_t> index;
+    std::unordered_map<std::uint64_t, quint8> flags;
     QVector<MagOption> mags;
     State currentState{State::Idle};
     QString currentDetail;
@@ -289,6 +346,8 @@ private:
      * request pending, 0 means "whatever the budget picks". */
     int pendingScanMag{-1};
     qint64 loaderIdleSince{0};
+    QElapsedTimer scanClock;
+    quint64 doneAtStart{0};// a resumed scan must not count the blocks it inherited
 };
 
 }

@@ -40,6 +40,7 @@
 #include <random>
 #include <tuple>
 #include <optional>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -256,6 +257,7 @@ public:
     bool paintingBackground() const { return paintsBackground; }
     void setPaintingBackground(const bool paint);
     void setFillEnclosedHoles(const bool fill);
+    void notePainted(std::uint64_t written, const std::unordered_set<std::uint64_t> & replaced);
     decltype(lockNewObjects) getLockNewObjects() const;
     void setLockNewObjects(const decltype(lockNewObjects));
     using color_t = std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>;
@@ -389,6 +391,12 @@ signals:
     void backgroundIdChanged(uint64_t backgroundId);
     void paintingBackgroundChanged(bool paintsBackground);
     void fillEnclosedHolesChanged(bool fill);
+    /* Which subobject ids a write touched: one painted with, and one for each distinct id
+     * it overwrote. Scalars, emitted once per id per operation, so a listener can record
+     * that an object has been worked on without anything having to be selected first —
+     * removing a false positive with the bucket on background never selects anything. */
+    void subobjectPainted(quint64 soid);
+    void subobjectOverwritten(quint64 soid);
     void lockNewObjectsChanged(const bool lockNewObjects);
     void categoriesChanged();
     void todosLeftChanged();

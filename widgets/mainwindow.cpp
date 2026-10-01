@@ -570,12 +570,14 @@ void MainWindow::updateInventoryScanProgress(const quint64 done, const quint64 t
     }
     inventoryScanProgressBar.setRange(0, 100);
     inventoryScanProgressBar.setValue(percent);
+    inventoryScanProgressBar.setFormat(QString("%1%").arg(percent));
+    inventoryScanProgressBar.setTextVisible(true);
     inventoryScanProgressBar.setVisible(scanning);
     inventoryScanLabel.setVisible(scanning || objects != 0);
+    const auto & inv = objinv::Inventory::singleton();
     inventoryScanLabel.setText(scanning
-            ? tr("Inventory %1×: %2/%3 blocks · %4 objects")
-              .arg(objinv::Inventory::singleton().scanMag()).arg(done).arg(total).arg(objects)
-            : tr("Inventory: %1 objects (%2×)").arg(objects).arg(objinv::Inventory::singleton().scanMag()));
+            ? tr("Inventory %1×: %2 · %3 objects").arg(inv.scanMag()).arg(inv.progressLine()).arg(objects)
+            : tr("Inventory: %1 objects (%2×)").arg(objects).arg(inv.scanMag()));
 }
 
 void MainWindow::setProofReadingUI(const bool on) {
@@ -1406,7 +1408,7 @@ bool MainWindow::openFileDispatch(QStringList fileNames, const bool mergeAll, co
 
     if (Annotation::singleton().extraFiles.contains(OBJECT_INVENTORY_FILE)) {
         // which objects have already been walked: a record of work, so it rides with the annotation
-        widgetContainer.annotationWidget.inventoryTab.importVisitedJson(Annotation::singleton().extraFiles[OBJECT_INVENTORY_FILE]);
+        widgetContainer.annotationWidget.inventoryTab.importStateJson(Annotation::singleton().extraFiles[OBJECT_INVENTORY_FILE]);
     }
 
     Annotation::singleton().setUnsavedChanges(multipleFiles || mergeSkeleton || mergeSegmentation);// merge implies changes
@@ -1588,7 +1590,7 @@ try {
     } else {
         Annotation::singleton().extraFiles[VIEWPORT_LAYOUTS_FILE] = layoutsJson;
     }
-    const auto visitedJson = widgetContainer.annotationWidget.inventoryTab.visitedJson();
+    const auto visitedJson = widgetContainer.annotationWidget.inventoryTab.stateJson();
     if (visitedJson.isEmpty()) {
         Annotation::singleton().extraFiles.remove(OBJECT_INVENTORY_FILE);
     } else {

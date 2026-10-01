@@ -261,6 +261,18 @@ void Segmentation::setPaintingBackground(const bool paint) {
     emit paintingBackgroundChanged(paintsBackground);
 }
 
+void Segmentation::notePainted(const std::uint64_t written, const std::unordered_set<std::uint64_t> & replaced) {
+    const auto background = getBackgroundId();
+    if (written != background) {
+        emit subobjectPainted(written);
+    }
+    for (const auto soid : replaced) {
+        if (soid != background && soid != written) {
+            emit subobjectOverwritten(soid);
+        }
+    }
+}
+
 void Segmentation::setFillEnclosedHoles(const bool fill) {
     if (fillEnclosedHoles != fill) {
         fillEnclosedHoles = fill;

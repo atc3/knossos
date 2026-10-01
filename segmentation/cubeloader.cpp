@@ -465,13 +465,24 @@ CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate &
     const std::unique_ptr<const ForeignProximity> gap = guard.needsGap(value)
             ? std::make_unique<const ForeignProximity>(globalFirst, globalLast, value, Segmentation::singleton().getBackgroundId())
             : nullptr;
-    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){
+    /* The distinct ids this write replaced, so an object can be recorded as worked on
+     * without ever having been selected — which is what happens when a false positive is
+     * removed with the bucket set to background. Only distinct ids, so the set stays tiny
+     * however many voxels are written. */
+    std::unordered_set<std::uint64_t> replaced;
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, &replaced, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){
         if (guard.allows(voxel, value) && (gapPtr == nullptr || !gapPtr->blocked(globalPos)) && inside(globalPos)) {
+            if (voxel != value) {
+                replaced.insert(voxel);
+            }
             voxel = value;
         }
     });
     if (markChanged) {
         coordCubesMarkChanged(cubeChangeSet);
+    }
+    if (!cubeChangeSet.empty()) {
+        Segmentation::singleton().notePainted(value, replaced);
     }
     return cubeChangeSet;
 }
@@ -486,6 +497,9 @@ std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordin
     });
     if (markChanged && changed != 0) {
         coordCubesMarkChanged(cubeChangeSet);
+    }
+    if (changed != 0) {
+        Segmentation::singleton().notePainted(to, {from});
     }
     return changed;
 }
@@ -632,6 +646,11 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
     }
 
     coordCubesMarkChanged(result.cubes);
+    if (!result.cubes.empty()) {
+        // the fill knows both ids outright, which is how erasing a false positive with the
+        // bucket on background gets recorded against the object it removed
+        Segmentation::singleton().notePainted(fillsoid, {targetSoid});
+    }
     return result;
 }
 

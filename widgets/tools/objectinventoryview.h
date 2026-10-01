@@ -77,8 +77,6 @@ public:
     int rowOfRecord(std::size_t recordIndex) const;
     bool visitedAt(int row) const;
     void markVisited(std::size_t recordIndex, bool);
-    std::vector<std::uint64_t> visitedIds() const;
-    void adoptVisitedIds(const std::vector<std::uint64_t> &);
 
     void setFilter(const objinv::Filter &);
     const objinv::Filter & filter() const { return activeFilter; }
@@ -117,6 +115,7 @@ class ObjectInventoryView : public QWidget {
     QPushButton scanButton{tr("Scan")};
     QPushButton rescanButton{tr("Rescan")};
     QPushButton annotationButton{tr("Scan annotation")};
+    QPushButton deleteButton{tr("Erase object")};
     QComboBox magCombo;
     QLabel magLabel{tr("detail")};
     QProgressBar progressBar;
@@ -149,8 +148,9 @@ public:
     void loadSettings();
     void saveSettings();
     // The visited set travels with the annotation, keyed by id so a rescan does not lose it.
-    QByteArray visitedJson() const;
-    void importVisitedJson(const QByteArray &);
+    // what has been done to each object; travels with the annotation
+    QByteArray stateJson() const;
+    void importStateJson(const QByteArray &);
 
 signals:
     void message(const QString &);

@@ -24,9 +24,15 @@
 
 #include "annotation/annotation.h"
 #include "loader.h"
+#include "segmentation/cubeloader.h"
+#include "segmentation/labelonlyloading.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/undostack.h"
+#include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
 #include "viewer.h"
+
+#include <QProgressDialog>
 
 #include <quazip.h>
 #include <quazipfile.h>
@@ -43,6 +49,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLockFile>
 #include <QProgressDialog>
 #include <QMetaMethod>
@@ -375,12 +384,13 @@ void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag
                 && nearby.x < b.x && nearby.y < b.y && nearby.z < b.z) {
             spots.push_back(nearby);
         }
-        for (const auto fx : {1, 2, 3}) {
-            for (const auto fy : {1, 2, 3}) {
-                for (const auto fz : {1, 2, 3}) {
-                    spots.push_back({b.x * fx / 4, b.y * fy / 4, b.z * fz / 4});
-                }
-            }
+        // seven more, spread through the volume. Enough to usually find sparse data, few
+        // enough that the whole sampling pass is one round trip's worth of latency.
+        spots.push_back({b.x / 2, b.y / 2, b.z / 2});
+        for (const auto f : {1, 3}) {
+            spots.push_back({b.x * f / 4, b.y / 2, b.z / 2});
+            spots.push_back({b.x / 2, b.y * f / 4, b.z / 2});
+            spots.push_back({b.x / 2, b.y / 2, b.z * f / 4});
         }
 
         Pending p;
@@ -834,19 +844,24 @@ Inventory::Inventory() {
     worker->moveToThread(&workerThread);
 
     QObject::connect(worker.get(), &Scanner::magsProbed, this, [this](QVector<MagOption> options) {
-        mags = std::move(options);
+        // only the sampled flags are taken; the counts were worked out locally
+        for (const auto & probed : options) {
+            for (auto & known : mags) {
+                if (known.mag == probed.mag) {
+                    known.sampled = probed.sampled;
+                }
+            }
+        }
         probedThisDataset = true;
         if (currentState == State::Probing) {
             setState(State::Idle);
         }
         emit magOptionsChanged();
-        if (pendingScanMag >= 0) {
-            const auto requested = pendingScanMag;
-            pendingScanMag = -1;
-            startScan(requested);
-        }
     });
     QObject::connect(worker.get(), &Scanner::progress, this, [this](quint64 d, quint64 t, quint64 objects) {
+        if (doneAtStart == 0 && done == 0) {
+            doneAtStart = d;// whatever the cache already had; the rate must not include it
+        }
         done = d;
         total = t;
         emit progressChanged(d, t, objects);
@@ -881,6 +896,12 @@ Inventory::Inventory() {
         emit recordsRevised(indices.front(), indices.back());
     });
     QObject::connect(worker.get(), &Scanner::warning, this, &Inventory::warning);
+    /* Recorded whoever did the writing and whatever was selected at the time, which is the
+     * point: a false positive removed with the bucket on background never selects anything. */
+    QObject::connect(&Segmentation::singleton(), &Segmentation::subobjectPainted,
+                     this, &Inventory::noteSubobjectPainted);
+    QObject::connect(&Segmentation::singleton(), &Segmentation::subobjectOverwritten,
+                     this, &Inventory::noteSubobjectOverwritten);
     QObject::connect(worker.get(), &Scanner::finished, this, [this](State outcome, QString detail) {
         if (outcome == State::Complete) {
             timestamp = QDateTime::currentDateTime();
@@ -993,6 +1014,27 @@ QString Inventory::cachePathFor(const int magnification) const {
     return cacheDir() + "/" + QString::fromLatin1(hash) + ".knoinv";
 }
 
+void Inventory::buildMagOptions() {
+    mags.clear();
+    const auto layerId = Segmentation::singleton().layerId;
+    if (layerId >= Dataset::datasets.size()) {
+        return;
+    }
+    const auto & layer = Dataset::datasets[layerId];
+    for (int mag = std::max(1, layer.lowestAvailableMag); mag <= std::max(1, layer.highestAvailableMag); mag *= 2) {
+        const auto magIndex = static_cast<std::size_t>(std::lround(std::log2(mag)));
+        if (layer.scales.size() <= magIndex) {
+            continue;// no voxel size declared for this level, so its coordinates are meaningless
+        }
+        MagOption option;
+        option.mag = mag;
+        option.magIndex = magIndex;
+        option.cubes = cubesFor(layer, magIndex);
+        option.estBytes = option.cubes * BYTES_PER_CUBE_GUESS;
+        mags.push_back(option);
+    }
+}
+
 void Inventory::probe() {
     QString why;
     if (!layerUsable(why)) {
@@ -1018,11 +1060,9 @@ void Inventory::startScan(const int requested) {
         emit warning(why);
         return;
     }
-    if (!probedThisDataset) {
-        // probing is a prerequisite, and it is fast; the request waits for it to report back
-        pendingScanMag = requested;
-        probe();
-        return;
+    if (mags.empty()) {
+        buildMagOptions();// needs no network, so the scan never waits on one
+        emit magOptionsChanged();
     }
     pendingScanMag = -1;
     const auto chosen = requested != 0 ? requested : autoMag();
@@ -1055,6 +1095,10 @@ void Inventory::startScan(const int requested) {
                      .arg(chosen).arg(option.cubes).arg(cubeBudget()));
     }
 
+    /* Announced first. Everything below — pruning the cache directory, clearing the list,
+     * reading settings — happens on this thread, and until the state changed the button
+     * still said "Scan", so a click looked like it had been ignored. */
+    setState(State::Scanning);
     pruneCache();
     mag = chosen;
     fromAnnotation = false;
@@ -1076,7 +1120,8 @@ void Inventory::startScan(const int requested) {
     spec.maxInFlight = settings.value("objectInventoryMaxInFlight", 4).toInt();
     spec.cachePath = cachePathFor(chosen);
 
-    setState(State::Scanning);
+    scanClock.start();
+    doneAtStart = 0;// set from the first progress report, which carries the resumed count
     QMetaObject::invokeMethod(worker.get(), "startScan", Qt::QueuedConnection, Q_ARG(objinv::ScanSpec, spec));
 }
 
@@ -1134,6 +1179,8 @@ void Inventory::onDatasetChanged() {
     emit recordsAppended(0, 0);
     QString why;
     if (layerUsable(why)) {
+        buildMagOptions();
+        emit magOptionsChanged();
         loadCache();// local, cheap, and tells the user a list already exists
     } else {
         setState(State::Unsupported, why);
@@ -1235,6 +1282,95 @@ void Inventory::scanAnnotation(QWidget * const parent) {
     }
 }
 
+bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
+    const auto at = indexOfId(soid);
+    if (!at) {
+        emit warning(tr("That object is not in the list."));
+        return false;
+    }
+    const auto layerId = Segmentation::singleton().layerId;
+    if (layerId >= Dataset::datasets.size()) {
+        return false;
+    }
+    const auto & layer = Dataset::datasets[layerId];
+    const auto background = Segmentation::singleton().getBackgroundId();
+    if (soid == background) {
+        emit warning(tr("That is the background id; there is nothing to erase."));
+        return false;
+    }
+    const auto record = recs[*at];// by value: the walk below moves the crosshair and loads blocks
+    const Coordinate first{record.bboxMin[0], record.bboxMin[1], record.bboxMin[2]};
+    const Coordinate last{record.bboxMax[0], record.bboxMax[1], record.bboxMax[2]};
+
+    const auto cubeExtent = layer.scaleFactor.componentMul(layer.cubeShape);
+    const auto cubeBegin = layer.global2cube(first);
+    const auto cubeEnd = layer.global2cube(last) + 1;
+    const auto blocks = static_cast<int>(std::max(1, (cubeEnd.x - cubeBegin.x))
+                                       * std::max(1, (cubeEnd.y - cubeBegin.y))
+                                       * std::max(1, (cubeEnd.z - cubeBegin.z)));
+
+    const UndoScope undoScope(tr("Erase object %1").arg(soid));
+    QProgressDialog progress(tr("Erasing object %1…").arg(soid), tr("Cancel"), 0, blocks, parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(400);
+    const LabelOnlyLoading labelOnly;// the image data is irrelevant here
+
+    const auto startPosition = ::state->viewerState->currentPosition;
+    std::size_t erased = 0, missing = 0;
+    int visited = 0;
+    bool cancelled = false;
+    for (int cz = cubeBegin.z; cz < cubeEnd.z && !cancelled; ++cz)
+    for (int cy = cubeBegin.y; cy < cubeEnd.y && !cancelled; ++cy)
+    for (int cx = cubeBegin.x; cx < cubeEnd.x && !cancelled; ++cx) {
+        progress.setValue(visited++);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+        if (progress.wasCanceled()) {
+            cancelled = true;
+            break;
+        }
+        const CoordOfCube cube{cx, cy, cz};
+        const auto cubeFirst = layer.cube2global(cube);
+        const auto cubeLast = cubeFirst + cubeExtent - 1;
+        const Coordinate regionFirst{std::max(first.x, cubeFirst.x), std::max(first.y, cubeFirst.y), std::max(first.z, cubeFirst.z)};
+        const Coordinate regionLast{std::min(last.x, cubeLast.x), std::min(last.y, cubeLast.y), std::min(last.z, cubeLast.z)};
+
+        if (!regionCubeResidency(regionFirst, regionLast).second.empty()) {
+            ::state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
+            // the loader needs a moment; asked again afterwards rather than assumed
+            QElapsedTimer waited;
+            waited.start();
+            while (!Loader::Controller::singleton().isFinished() && waited.elapsed() < 30000) {
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+                if (progress.wasCanceled()) {
+                    cancelled = true;
+                    break;
+                }
+            }
+            if (!regionCubeResidency(regionFirst, regionLast).second.empty()) {
+                ++missing;
+                continue;
+            }
+        }
+        erased += processRegionReplacing(regionFirst, regionLast, soid, background);
+    }
+    progress.setValue(blocks);
+    ::state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
+
+    if (erased != 0) {
+        setFlag(soid, Flag::Erased, true);
+    }
+    if (missing != 0) {
+        // never silently: a skipped block means part of the object is still there
+        emit warning(tr("Erased %1 voxels of object %2, but %3 block(s) would not load and were skipped — "
+                        "some of it may remain.").arg(erased).arg(soid).arg(missing));
+    } else if (cancelled) {
+        emit warning(tr("Cancelled after erasing %1 voxels of object %2. What was erased is kept.").arg(erased).arg(soid));
+    } else {
+        emit warning(tr("Erased %1 voxels of object %2.").arg(erased).arg(soid));
+    }
+    return erased != 0;
+}
+
 void Inventory::ensureProbed() {
     if (probedThisDataset || currentState == State::Probing || currentState == State::Scanning) {
         return;
@@ -1290,8 +1426,153 @@ void Inventory::onLoaderProgress(const int count) {
     }
 }
 
+quint8 Inventory::flagsFor(const std::uint64_t soid) const {
+    const auto it = flags.find(soid);
+    return it == std::end(flags) ? 0 : it->second;
+}
+
+void Inventory::setFlag(const std::uint64_t soid, const Flag flag, const bool on) {
+    auto & bits = flags[soid];
+    const auto before = bits;
+    bits = on ? static_cast<quint8>(bits | flag) : static_cast<quint8>(bits & ~flag);
+    if (bits == 0) {
+        flags.erase(soid);
+    }
+    if (bits != before) {
+        emit flagsChanged();
+    }
+}
+
+std::size_t Inventory::countWith(const Flag flag) const {
+    return static_cast<std::size_t>(std::count_if(std::begin(flags), std::end(flags),
+                                                  [flag](const auto & pair){ return (pair.second & flag) != 0; }));
+}
+
+void Inventory::noteSubobjectPainted(const quint64 soid) {
+    // only ids the list knows about; a brand new object is not part of this inventory
+    if (index.count(soid) != 0) {
+        setFlag(soid, Flag::Painted, true);
+    }
+}
+
+void Inventory::noteSubobjectOverwritten(const quint64 soid) {
+    if (index.count(soid) != 0) {
+        setFlag(soid, Flag::Erased, true);
+    }
+}
+
+void Inventory::refreshSkeletonFlags() {
+    bool changed = false;
+    std::unordered_set<std::uint64_t> withNodes;
+    for (const auto & tree : Skeletonizer::singleton().skeletonState.trees) {
+        for (auto it = std::begin(tree.subobjectCount); it != std::end(tree.subobjectCount); ++it) {
+            if (it.value() > 0) {
+                withNodes.insert(it.key());
+            }
+        }
+    }
+    for (const auto soid : withNodes) {
+        if (index.count(soid) != 0 && (flagsFor(soid) & Flag::Skeleton) == 0) {
+            flags[soid] |= Flag::Skeleton;
+            changed = true;
+        }
+    }
+    // a tree being deleted takes the mark with it, so this is a refresh rather than a union
+    for (auto it = std::begin(flags); it != std::end(flags); ) {
+        if ((it->second & Flag::Skeleton) != 0 && withNodes.count(it->first) == 0) {
+            it->second = static_cast<quint8>(it->second & ~Flag::Skeleton);
+            changed = true;
+        }
+        it = it->second == 0 ? flags.erase(it) : std::next(it);
+    }
+    if (changed) {
+        emit flagsChanged();
+    }
+}
+
+/* Travels with the annotation, keyed by id.
+ *
+ * It is a record of what has been done, not a property of the dataset, so it belongs to the
+ * annotation rather than to the per-dataset cache — and keying on the id means a rescan that
+ * finds things in a different order keeps all of it. */
+QByteArray Inventory::flagsJson() const {
+    if (flags.empty()) {
+        return {};
+    }
+    QJsonObject bits;
+    for (const auto & [soid, value] : flags) {
+        if (value != 0) {
+            bits[QString::number(soid)] = value;
+        }
+    }
+    QJsonObject root;
+    root["version"] = 2;
+    root["mag"] = mag;
+    root["flags"] = bits;
+    return QJsonDocument{root}.toJson(QJsonDocument::Compact);
+}
+
+void Inventory::importStateJson(const QByteArray & json) {
+    const auto document = QJsonDocument::fromJson(json);
+    if (!document.isObject()) {
+        return;
+    }
+    const auto root = document.object();
+    flags.clear();
+    const auto bits = root["flags"].toObject();
+    for (auto it = bits.begin(); it != bits.end(); ++it) {
+        bool ok = false;
+        const auto soid = it.key().toULongLong(&ok);
+        const auto value = static_cast<quint8>(it.value().toInt());
+        if (ok && value != 0) {
+            flags[soid] = value;
+        }
+    }
+    // version 1 stored only the visited ids, as a list
+    for (const auto value : root["visited"].toArray()) {
+        bool ok = false;
+        const auto soid = value.toString().toULongLong(&ok);
+        if (ok) {
+            flags[soid] |= Flag::Visited;
+        }
+    }
+    emit flagsChanged();
+}
+
 bool Inventory::mayBeStale() const {
     return !recs.empty() && Annotation::singleton().unsavedChanges;
+}
+
+std::optional<int> Inventory::etaSeconds() const {
+    if (currentState != State::Scanning || total == 0 || done <= doneAtStart || !scanClock.isValid()) {
+        return std::nullopt;
+    }
+    const auto elapsed = scanClock.elapsed();
+    if (elapsed < 2000) {
+        return std::nullopt;// too early for the rate to mean anything
+    }
+    const auto didThisRun = done - doneAtStart;
+    const auto left = total > done ? total - done : 0;
+    if (left == 0) {
+        return 0;
+    }
+    const auto perBlockMs = static_cast<double>(elapsed) / static_cast<double>(didThisRun);
+    return static_cast<int>(perBlockMs * static_cast<double>(left) / 1000.0);
+}
+
+QString Inventory::progressLine() const {
+    if (total == 0) {
+        return {};
+    }
+    auto line = tr("%1% — %2 of %3 blocks").arg(percentDone()).arg(done).arg(total);
+    if (const auto eta = etaSeconds()) {
+        const auto secs = *eta;
+        const auto pretty = secs < 60 ? tr("under a minute")
+                          : secs < 3600 ? tr("about %n minute(s)", "", (secs + 30) / 60)
+                                        : tr("about %1 h %2 m").arg(secs / 3600).arg((secs % 3600) / 60);
+        line += tr(" · %1 left").arg(pretty);
+    }
+    return line;
 }
 
 QString Inventory::statusLine() const {
@@ -1306,13 +1587,13 @@ QString Inventory::statusLine() const {
     }
     if (recs.empty()) {
         return currentState == State::Scanning
-                ? tr("Scanning at %1× — %2 of %3 blocks, nothing found yet").arg(mag).arg(done).arg(total)
+                ? tr("Scanning at %1× — %2, nothing found yet").arg(mag).arg(progressLine())
                 : tr("No object inventory yet — press Scan to build one");
     }
     QString line = tr("%n object(s)", "", static_cast<int>(recs.size()));
     line += fromAnnotation ? tr(" · from the annotation") : tr(" · %1×").arg(mag);
     if (currentState == State::Scanning) {
-        line += tr(" · scanning, %1 of %2 blocks").arg(done).arg(total);
+        line += tr(" · scanning, %1").arg(progressLine());
     } else if (timestamp.isValid()) {
         line += tr(" · scanned %1").arg(timestamp.toString(Qt::ISODate));
     }
