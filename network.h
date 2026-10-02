@@ -58,6 +58,13 @@ class Network : public QObject {
     QPair<bool, QByteArray> login(const QUrl& url, const QString& username,
                                   const QString& password);
     QPair<bool, QByteArray> refresh(const QUrl& url);
+    /* A byte range of one object, for formats that pack many things into one file.
+     *
+     * A Neuroglancer shard holds its index and its chunks in a single object, so reading
+     * one chunk means asking for its bytes rather than the whole thing — a shard runs to
+     * hundreds of megabytes. Goes through the same blocking download as refresh(), token
+     * retry included. */
+    QPair<bool, QByteArray> refreshRange(const QUrl& url, quint64 begin, quint64 end);
     QPair<bool, QByteArray> send(const QUrl& url, const QString& method,
                                  const QString& contentTypeHeader, const QByteArray& data);
     std::pair<int, int> checkOnlineMags(const QUrl& url);

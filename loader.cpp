@@ -25,6 +25,7 @@
 #include "brainmaps.h"
 #include "functions.h"
 #include "network.h"
+#include "segmentation/precomputed.h"
 #include "segmentation/segmentation.h"
 #include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
@@ -539,6 +540,78 @@ Loader::DecompressionResult decompressCube(void * currentSlot, QIODevice & reply
             }
             archive.close();
         }
+    } else if (dataset.type == Dataset::CubeType::SEGMENTATION_PRECOMPUTED) {
+        /* One precomputed chunk.
+         *
+         * For a sharded volume the reply is the whole shard, so the chunk has to be found
+         * inside it first: 16 bytes per minishard at the front say where that minishard's
+         * index is, and the index is three delta-encoded arrays giving each chunk's id,
+         * offset and size. Unsharded, the reply is the chunk itself.
+         *
+         * A chunk the index does not mention is an empty one — most of a segmentation is
+         * empty and those chunks are not stored — so that fills with background rather
+         * than failing. */
+        const auto & volume = dataset.precomputed;
+        if (volume && dataset.magIndex < volume->scales.size()) {
+            const auto & scale = volume->scales[dataset.magIndex];
+            const auto * bytes = reinterpret_cast<const std::uint8_t *>(data.constData());
+            auto payload = bytes;
+            auto payloadSize = static_cast<std::size_t>(data.size());
+            bool present = true;
+
+            if (scale.sharded) {
+                const std::uint64_t grid[3]{static_cast<std::uint64_t>(cubeCoord.x),
+                                            static_cast<std::uint64_t>(cubeCoord.y),
+                                            static_cast<std::uint64_t>(cubeCoord.z)};
+                const auto target = precomputed::shardFor(scale, grid);
+                const auto minishards = 1ull << scale.minishardBits;
+                const auto headerBytes = minishards * 16;
+                present = false;
+                if (payloadSize >= headerBytes) {
+                    const std::vector<std::uint8_t> header(bytes, bytes + headerBytes);
+                    const auto indexRange = precomputed::minishardIndexRange(header, target.minishard, scale.minishardBits);
+                    if (!indexRange.empty() && indexRange.end <= payloadSize) {
+                        const std::vector<std::uint8_t> index(bytes + indexRange.begin, bytes + indexRange.end);
+                        const auto at = precomputed::chunkRange(index, target.chunkId, headerBytes);
+                        if (!at.empty() && at.end <= payloadSize) {
+                            payload = bytes + at.begin;
+                            payloadSize = at.size();
+                            present = true;
+                        }
+                    }
+                }
+            }
+
+            const std::int32_t extent[3]{scale.clippedExtent(0, cubeCoord.x),
+                                         scale.clippedExtent(1, cubeCoord.y),
+                                         scale.clippedExtent(2, cubeCoord.z)};
+            std::vector<std::uint64_t> voxels;
+            const auto decoded = !present ? false
+                    : scale.encoding == precomputed::Encoding::CompressedSegmentation
+                      ? precomputed::decodeCompressedSegmentation(payload, payloadSize, extent,
+                                                                  scale.csegBlock, 0, volume->numChannels, voxels)
+                      : scale.encoding == precomputed::Encoding::Raw
+                        ? precomputed::decodeRaw(payload, payloadSize, extent, voxels)
+                        : false;
+            auto * slot = reinterpret_cast<std::uint64_t *>(currentSlot);
+            std::fill(slot, slot + cubeVxCount, 0);
+            if (decoded) {
+                /* A chunk on the volume's far face is stored clipped rather than padded, so
+                 * it goes into the cube's corner and the rest stays background. */
+                for (int z = 0; z < extent[2]; ++z) {
+                    for (int y = 0; y < extent[1]; ++y) {
+                        const auto * src = voxels.data() + (static_cast<std::size_t>(z) * extent[1] + y) * extent[0];
+                        auto * dst = slot + (static_cast<std::size_t>(z) * dataset.cubeShape.y + y) * dataset.cubeShape.x;
+                        std::copy(src, src + extent[0], dst);
+                    }
+                }
+                success = true;
+            } else if (!present) {
+                success = true;// absent chunk, left as background
+            } else {
+                qDebug() << layerId << cubeCoord << "precomputed chunk did not decode";
+            }
+        }
     } else {
         qDebug() << "unsupported format";
     }
@@ -746,6 +819,29 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                 return;
             }
 
+            if (dataset.api == Dataset::API::NeuroglancerPrecomputed) {
+                /* Most of a segmentation is empty and those chunks are simply not stored,
+                 * so "not in the index" is the ordinary case, not a failure. Filled here
+                 * rather than by asking for something that is not there, the same way a
+                 * SNAPPY layer is filled above. */
+                bool known = false;
+                static_cast<void>(dataset.precomputedRequest(cubeCoord, known));
+                if (!known) {
+                    if (!freeSlots.empty()) {
+                        auto * currentSlot = freeSlots.front();
+                        freeSlots.pop_front();
+                        auto * slot = reinterpret_cast<std::uint64_t *>(currentSlot);
+                        std::fill(slot, slot + dataset.cubeShape.prod(), Segmentation::singleton().getBackgroundId());
+                        state->protectCube2Pointer.lock();
+                        cubeHash[cubeCoord] = currentSlot;
+                        state->protectCube2Pointer.unlock();
+                        state->viewer->reslice_notify_all(layerId, cubeCoord);
+                    } else {
+                        qCritical() << layerId << cubeCoord << "no slots for an empty precomputed chunk";
+                    }
+                    return;
+                }
+            }
             auto request = dataset.apiSwitch(cubeCoord);
 //            request.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, true);
 //            request.setAttribute(QNetworkRequest::SpdyAllowedAttribute, true);

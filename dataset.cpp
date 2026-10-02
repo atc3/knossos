@@ -50,6 +50,7 @@ static boost::bimap<QString, Dataset::CubeType> typeMap = boost::assign::list_of
         (".j2k", Dataset::CubeType::RAW_J2K)
         (".6.jp2", Dataset::CubeType::RAW_JP2_6)
         (".seg.sz.zip", Dataset::CubeType::SEGMENTATION_SZ_ZIP)
+    (".precomputed", Dataset::CubeType::SEGMENTATION_PRECOMPUTED)
         (".seg", Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_64);
 
 QString Dataset::compressionString() const {
@@ -321,8 +322,12 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
     for (const auto & vit : toml::find(config, "Layer").as_array()) {
         Dataset info;
         const auto & value = toml::find_or(vit, "ServerFormat", "");
-        info.api = value == "knossos" ? API::Heidelbrain : value == "1" ? API::OpenConnectome : API::PyKnossos;
-        if (!value.empty() && value != "knossos" && value != "1" && value != "pyknossos") {
+        info.api = value == "knossos" ? API::Heidelbrain
+                 : value == "1" ? API::OpenConnectome
+                 : value == "precomputed" ? API::NeuroglancerPrecomputed
+                 : API::PyKnossos;
+        if (!value.empty() && value != "knossos" && value != "1" && value != "pyknossos"
+                && value != "precomputed") {
             /* Falling through to PyKnossos is a guess, and for a store that is not laid out
              * in KNOSSOS cubes it is a wrong one — a Neuroglancer "precomputed" volume keeps
              * one chunk per coordinate range, not a file per cube, so every request misses
@@ -595,6 +600,51 @@ QUrl Dataset::openConnectomeCubeUrl(CoordOfCube coord) const {
     return base;
 }
 
+/* The shard holding one chunk. No network, no index: just arithmetic.
+ *
+ * A cube coordinate is already the chunk's grid position, because a precomputed layer is
+ * only usable at all if its chunk size and KNOSSOS's cubeShape agree. `inVolume` comes back
+ * false for a cube outside the volume, which the caller fills with background rather than
+ * asking for. */
+QNetworkRequest Dataset::precomputedRequest(const CoordOfCube cubeCoord, bool & inVolume) const {
+    inVolume = false;
+    if (!precomputed || magIndex >= precomputed->scales.size()) {
+        return QNetworkRequest{};
+    }
+    const auto & scale = precomputed->scales[magIndex];
+    const std::uint64_t grid[3]{static_cast<std::uint64_t>(cubeCoord.x),
+                                static_cast<std::uint64_t>(cubeCoord.y),
+                                static_cast<std::uint64_t>(cubeCoord.z)};
+    for (int a = 0; a < 3; ++a) {
+        if (cubeCoord.x < 0 || cubeCoord.y < 0 || cubeCoord.z < 0
+                || static_cast<std::int64_t>(grid[a]) >= scale.gridSize(a)) {
+            return QNetworkRequest{};
+        }
+    }
+    QString leaf;
+    if (scale.sharded) {
+        const auto target = precomputed::shardFor(scale, grid);
+        leaf = QString::fromStdString(precomputed::shardName(target.shard, scale.shardBits));
+    } else {
+        // unsharded: the chunk is its own object, named by the voxel range it covers
+        QStringList parts;
+        for (int a = 0; a < 3; ++a) {
+            const auto begin = static_cast<std::int64_t>(grid[a]) * scale.chunk[a] + scale.voxelOffset[a];
+            parts << QString("%1-%2").arg(begin).arg(begin + scale.clippedExtent(a, static_cast<std::int64_t>(grid[a])));
+        }
+        leaf = parts.join("_");
+    }
+    auto base = url;
+    base.setPath(url.path() + "/" + QString::fromStdString(scale.key) + "/" + leaf);
+    if (!token.isEmpty()) {
+        auto query = base.query();
+        query += (query.isEmpty() ? "" : "&") + token;
+        base.setQuery(query);
+    }
+    inVolume = true;
+    return QNetworkRequest{base};
+}
+
 QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     switch (api) {
     case API::GoogleBrainmaps: {
@@ -605,6 +655,10 @@ QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     case API::Heidelbrain:
     case API::PyKnossos: {
         return QNetworkRequest{knossosCubeUrl(cubeCoord)};
+    }
+    case API::NeuroglancerPrecomputed: {
+        bool inVolume = false;
+        return precomputedRequest(cubeCoord, inVolume);
     }
     case API::OpenConnectome:
         return QNetworkRequest{openConnectomeCubeUrl(cubeCoord)};
@@ -618,5 +672,6 @@ bool Dataset::isOverlay() const {
     return type == CubeType::SEGMENTATION_UNCOMPRESSED_16
             || type == CubeType::SEGMENTATION_UNCOMPRESSED_64
             || type == CubeType::SEGMENTATION_SZ_ZIP
+            || type == CubeType::SEGMENTATION_PRECOMPUTED
             || type == CubeType::SNAPPY;
 }

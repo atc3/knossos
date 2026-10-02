@@ -23,6 +23,7 @@
 #include "datasetloadwidget.h"
 
 #include "brainmaps.h"
+#include "precomputedload.h"
 #include "dataset.h"
 #include "GuiConstants.h"
 #include "loader.h"
@@ -40,6 +41,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QMimeData>
 #include <QPainter>
 #include <QProcess>
@@ -584,6 +586,63 @@ bool DatasetLoadWidget::loadDataset(QString data, const boost::optional<bool> lo
             layer.token = token;
         }
     }
+    /* A precomputed layer needs its own info read before it can be loaded at all: the
+     * resolution levels, the chunk size, and — for a sharded volume — where every chunk
+     * lives. Done here, once, so that afterwards one cube is one ranged GET and the loader
+     * needs no knowledge of any of it. */
+    for (auto & layer : layers) {
+        if (layer.api != Dataset::API::NeuroglancerPrecomputed) {
+            continue;
+        }
+        auto infoUrl = layer.url;
+        infoUrl.setPath(layer.url.path() + "/info");
+        const auto info = Network::singleton().refresh(infoUrl);
+        auto volume = std::make_shared<Dataset::Precomputed>();
+        QString why;
+        if (!info.first || !precomputedload::parseInfo(info.second, *volume, why)) {
+            layer.unsupportedFormat = why.isEmpty() ? tr("its info could not be read") : why;
+            continue;
+        }
+        /* KNOSSOS's magnifications are powers of two of one base voxel size, so the levels
+         * are taken while they keep doubling and the chunk size holds. A volume that steps
+         * differently is read at the levels that do fit rather than refused outright. */
+        const auto & finest = volume->scales.front();
+        std::size_t usable = 1;
+        while (usable < volume->scales.size()) {
+            const auto & step = volume->scales[usable];
+            const auto expected = finest.resolution[0] * (1 << usable);
+            const bool doubles = std::abs(step.resolution[0] - expected) < 1e-6 * expected;
+            const bool sameChunk = step.chunk[0] == finest.chunk[0] && step.chunk[1] == finest.chunk[1]
+                    && step.chunk[2] == finest.chunk[2];
+            if (!doubles || !sameChunk) {
+                break;
+            }
+            ++usable;
+        }
+        volume->scales.resize(usable);
+        layer.boundary = {static_cast<int>(finest.size[0]), static_cast<int>(finest.size[1]), static_cast<int>(finest.size[2])};
+        layer.cubeShape = {finest.chunk[0], finest.chunk[1], finest.chunk[2]};
+        layer.gpuCubeShape = layer.cubeShape;
+        layer.scales.clear();
+        for (const auto & scale : volume->scales) {
+            layer.scales.emplace_back(scale.resolution[0], scale.resolution[1], scale.resolution[2]);
+        }
+        layer.scale = layer.scales.front();
+        layer.magnification = layer.lowestAvailableMag = 1;
+        layer.magIndex = 0;
+        layer.scaleFactor = {1, 1, 1};
+        layer.highestAvailableMag = 1 << (usable - 1);
+        layer.type = Dataset::CubeType::SEGMENTATION_PRECOMPUTED;
+
+        volume->note = tr("%1 level(s), %2 to %3 nm, chunks of %4")
+                .arg(volume->scales.size())
+                .arg(volume->scales.front().resolution[0])
+                .arg(volume->scales.back().resolution[0])
+                .arg(volume->scales.front().chunk[0]);
+        layer.precomputed = volume;
+        qDebug() << "precomputed segmentation:" << volume->note.toUtf8().constData();
+    }
+
     QStringList unsupported;
     for (const auto & layer : layers) {
         if (!layer.unsupportedFormat.isEmpty()) {
