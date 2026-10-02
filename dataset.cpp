@@ -322,6 +322,13 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
         Dataset info;
         const auto & value = toml::find_or(vit, "ServerFormat", "");
         info.api = value == "knossos" ? API::Heidelbrain : value == "1" ? API::OpenConnectome : API::PyKnossos;
+        if (!value.empty() && value != "knossos" && value != "1" && value != "pyknossos") {
+            /* Falling through to PyKnossos is a guess, and for a store that is not laid out
+             * in KNOSSOS cubes it is a wrong one — a Neuroglancer "precomputed" volume keeps
+             * one chunk per coordinate range, not a file per cube, so every request misses
+             * and the layer loads empty. Noted rather than guessed at silently. */
+            info.unsupportedFormat = QString::fromStdString(value);
+        }
         info.url = QString::fromStdString(toml::find_or(vit, "URL", std::string{}));
         info.experimentname = QString::fromStdString(toml::find(vit, "Name").as_string());
         const auto & extent = toml::find(vit, "Extent_px").as_array();
