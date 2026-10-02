@@ -808,9 +808,9 @@ void MainWindow::createMenus() {
     newObjectAction->setShortcuts({QKeySequence{Qt::Key_C}, QKeySequence{Qt::Key_N}});
     actionMenu.addSeparator();
     //cell mode
-    cytoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell with cyoplasm"), this, [](){ Segmentation::singleton().cell(true); }, Qt::Key_1);
-    plusNucAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Add nucleus to current cell"), this, [](){ Segmentation::singleton().plusNuc(); }, Qt::Key_2);
-    nucAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell (nucleus only)"), this, [](){ Segmentation::singleton().cell(false); }, Qt::Key_3);
+    cytoAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell with cyoplasm"), this, [](){ Segmentation::singleton().cell(true); }, Qt::SHIFT + Qt::Key_1);
+    plusNucAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Add nucleus to current cell"), this, [](){ Segmentation::singleton().plusNuc(); }, Qt::SHIFT + Qt::Key_2);
+    nucAction = &addApplicationShortcut(actionMenu, QIcon(), tr("New cell (nucleus only)"), this, [](){ Segmentation::singleton().cell(false); }, Qt::SHIFT + Qt::Key_3);
     actionMenu.addSeparator();
     auto changeOverlayOpacity = [](int value) {
         Segmentation::singleton().alpha = static_cast<uint8_t>(std::max(0, std::min(255, static_cast<int>(Segmentation::singleton().alpha) + value)));
@@ -1126,11 +1126,34 @@ void MainWindow::createMenus() {
     clearMergelistAction = actionMenu.addAction(QIcon(":/resources/icons/menubar/trash.png"), "Clear Merge List", &Segmentation::singleton(), &Segmentation::clear);
     //proof reading mode
     modeSwitchSeparator = actionMenu.addSeparator();
-    setMergeModeAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Switch to Segmentation Merge Mode"), this, [this]() { setWorkMode(AnnotationMode::Mode_Merge); }, Qt::Key_1);
-    setPaintModeAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Switch to Paint Mode"), this, [this]() { setWorkMode(AnnotationMode::Mode_Paint); }, Qt::Key_2);
+    /* No shortcuts on these two: 1 and 2 now switch to whatever the mode list's first and
+     * second entries are, and in proof reading that list is exactly these two modes. Two
+     * visible actions sharing a shortcut means neither fires. */
+    setMergeModeAction = actionMenu.addAction(tr("Switch to Segmentation Merge Mode"), this, [this]() { setWorkMode(AnnotationMode::Mode_Merge); });
+    setPaintModeAction = actionMenu.addAction(tr("Switch to Paint Mode"), this, [this]() { setWorkMode(AnnotationMode::Mode_Paint); });
     modeSwitchSeparator->setVisible(false);
     setMergeModeAction->setVisible(false);
     setPaintModeAction->setVisible(false);
+
+    /* 1 to 9 switch to that entry of the mode list.
+     *
+     * By position in the list rather than by a table of modes, because the list already
+     * shows those numbers — WorkModeModel::recreate() sorts the modes by name and prefixes
+     * each with its index — and because the list changes: with no segmentation layer it is
+     * just the two tracing modes, and in proof reading just merge and paint. Driving the
+     * combo box means the key and what the dropdown reads can never disagree.
+     *
+     * No menu entries: nine of them would swamp the Action menu, and the numbers are
+     * already visible where it matters, in the dropdown itself. */
+    for (int slot = 1; slot <= 9; ++slot) {
+        createGlobalAction(this, Qt::Key_0 + slot, [this, slot]() {
+            if (slot <= modeCombo.count()) {
+                modeCombo.setCurrentIndex(slot - 1);// the combo's handler does the rest
+            } else {
+                statusBar()->showMessage(tr("There are only %n mode(s) for this dataset.", "", modeCombo.count()), 4000);
+            }
+        });
+    }
 
     menuBar()->addMenu(&actionMenu);
 

@@ -119,6 +119,13 @@ struct Dataset {
     // Edge length of one cube in pixels: 2^N
     Coordinate cubeShape{128, 128, 128};
     Coordinate gpuCubeShape{128, 128, 128};
+    /* A ServerFormat the parser does not understand, or empty.
+     *
+     * parseToml() maps "knossos" to Heidelbrain, "1" to OpenConnectome and *anything else*
+     * to PyKnossos, which means a layer in some other store is read as KNOSSOS cubes: the
+     * requests go to mag<N>/x…/y…/z…/<name>_mag<N>_…, nothing is there, and the layer comes
+     * up empty with no explanation. Recorded so the load can say so. */
+    QString unsupportedFormat;
     QString description;
     // Current dataset identifier string
     QString experimentname;

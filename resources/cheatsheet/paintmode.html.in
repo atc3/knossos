@@ -44,6 +44,7 @@
 		<tr><td><span class="sh">Ctrl + -</span></td><td>Zoom out</td></tr>
 		<tr><td><span class="sh">Ctrl + 0</span></td><td>Zoom reset</td></tr>
 		<tr><td><span class="sh">.</span> / <span class="sh">,</span></td><td>Next / previous object in the scanned inventory — jumps to it and selects it, so an existing annotation can be found rather than hunted for. The list is in scan order and is only ever added to, so repeated presses walk it once. Set a minimum size, hide what you have already annotated, and start the scan in <a href=#annotation_inventory>Annotation ▸ Inventory</a></td></tr>
+		<tr><td><span class="sh">1</span>…<span class="sh">9</span></td><td>Switch to that mode of the mode list — the numbers are the ones shown in the mode dropdown, so 1 is always its first entry. Which modes are listed depends on the dataset: with no segmentation layer only the two tracing modes are offered</td></tr>
 	</table>
 	</p>
 </body>

@@ -584,6 +584,24 @@ bool DatasetLoadWidget::loadDataset(QString data, const boost::optional<bool> lo
             layer.token = token;
         }
     }
+    QStringList unsupported;
+    for (const auto & layer : layers) {
+        if (!layer.unsupportedFormat.isEmpty()) {
+            unsupported << tr("%1 (%2)").arg(layer.description.isEmpty() ? layer.experimentname : layer.description)
+                                        .arg(layer.unsupportedFormat);
+        }
+    }
+    if (!unsupported.isEmpty() && !silent) {
+        // otherwise the layer simply comes up empty and there is nothing to go on
+        QMessageBox warning{QApplication::activeWindow()};
+        warning.setIcon(QMessageBox::Warning);
+        warning.setText(tr("A layer is in a format KNOSSOS cannot read."));
+        warning.setInformativeText(tr("%1\n\nKNOSSOS reads layers laid out as its own cubes — one file per block, "
+                                      "mag<N>/x…/y…/z…/<name>_mag<N>_…. A store in another layout will load empty, "
+                                      "because every request for a cube misses. The rest of the dataset is loaded.")
+                                   .arg(unsupported.join("\n")));
+        warning.exec();
+    }
     if (std::any_of(std::next(std::cbegin(layers)), std::cend(layers), [&layers](auto & layer){ return layer.cubeShape.x != layers[0].cubeShape.x; })) {
         QMessageBox warning{QApplication::activeWindow()};
         warning.setIcon(QMessageBox::Warning);
