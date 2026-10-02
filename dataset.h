@@ -31,16 +31,42 @@
 #include <QString>
 #include <QUrl>
 
+#include "segmentation/precomputed.h"
+
 #include <boost/container/small_vector.hpp>
+
+#include <memory>
+#include <unordered_map>
 
 struct Dataset {
     using list_t = boost::container::small_vector<Dataset, 2>;
     enum class API {
-        Heidelbrain, WebKnossos, GoogleBrainmaps, PyKnossos, OpenConnectome
+        Heidelbrain, WebKnossos, GoogleBrainmaps, PyKnossos, OpenConnectome, NeuroglancerPrecomputed
     };
     enum class CubeType {
-        RAW_UNCOMPRESSED, RAW_JPG, RAW_J2K, RAW_JP2_6, RAW_PNG, SEGMENTATION_UNCOMPRESSED_16, SEGMENTATION_UNCOMPRESSED_64, SEGMENTATION_SZ_ZIP, SNAPPY
+        RAW_UNCOMPRESSED, RAW_JPG, RAW_J2K, RAW_JP2_6, RAW_PNG, SEGMENTATION_UNCOMPRESSED_16, SEGMENTATION_UNCOMPRESSED_64, SEGMENTATION_SZ_ZIP, SNAPPY, SEGMENTATION_PRECOMPUTED
     };
+
+    /* What a Neuroglancer precomputed volume is, read from its info once at load.
+     *
+     * Behind a shared pointer because a Dataset is copied by value all over, not least to
+     * the loader thread on every move. Read-only once built, so sharing it is safe. */
+    struct Precomputed {
+        std::vector<precomputed::Scale> scales;
+        int numChannels{1};
+        QString note;// what the volume turned out to be, for the log
+    };
+    std::shared_ptr<const Precomputed> precomputed;
+    /* The shard file holding this cube's chunk.
+     *
+     * Which shard a chunk is in is pure arithmetic — a compressed Morton code and some bit
+     * shifts — so forming this needs nothing from the network. Finding the chunk *within*
+     * the shard needs the shard's own two index levels, which come down with it: a shard
+     * holds about one chunk on the volume this was built against, so fetching the whole
+     * thing costs barely more than the chunk and keeps one cube to one request, which is
+     * the shape the loader already has. Resolving the indices in advance instead was
+     * measured at over five minutes for one volume, for no gain. */
+    QNetworkRequest precomputedRequest(const CoordOfCube cubeCoord, bool & inVolume) const;
     QString compressionString() const;
     QString apiString() const;
 
