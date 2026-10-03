@@ -89,3 +89,35 @@ ring as open.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/holefill_test holefill_test.cpp && /tmp/holefill_test
 ```
+
+## precomputed_test
+
+Exercises `segmentation/precomputed.h`, which reads a Neuroglancer precomputed
+segmentation — the format a dataset declares with `ServerFormat = 'precomputed'`, and which
+KNOSSOS previously loaded as an empty layer because every request for a KNOSSOS-style cube
+path missed.
+
+Two things in it are worth testing on their own. The `compressed_segmentation` encoding is
+bit-packed, and an off-by-one in the packing yields a plausible-looking volume of wrong
+labels rather than a failure — so the decoder is checked by round trip against an encoder
+written in the test from the spec, over 28 volumes covering every index width the format
+allows (including the zero-bit case, where a block of one label costs 8 bytes and no bits
+per voxel) and extents that are not multiples of the block size, so blocks get clipped at
+the volume's far face. And chunk addressing in a sharded store needs a *compressed* Morton
+code, where each axis contributes only as many bits as its grid needs and the others close
+up once one is exhausted: a plain three-way interleave is wrong for any grid that is not a
+cube, which is every real grid.
+
+The shard filename cases come from a real store rather than from reading the spec: 8 and 5
+shard bits were observed to give two lowercase hex digits (`0f.shard`, `01.shard`, and
+`10.shard`), 2 and 0 bits to give one (`0.shard`). Shards holding no chunks are simply
+absent, so a 404 there is ordinary.
+
+The decoder was also validated against a real sharded dataset — one 121×54×77 chunk at the
+coarsest level, 2272 distinct labels, 99.5% background — by decoding it independently in
+Python from the spec and requiring the two to agree byte for byte. That data is somebody
+else's and is not in the repository, so what is kept here is the synthetic round trip.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/precomputed_test precomputed_test.cpp && /tmp/precomputed_test
+```

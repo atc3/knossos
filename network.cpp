@@ -164,6 +164,15 @@ QPair<bool, QByteArray> Network::refresh(const QUrl& url) {
     return blockDownloadExtractData(reply, &manager);
 }
 
+QPair<bool, QByteArray> Network::refreshRange(const QUrl& url, const quint64 begin, const quint64 end) {
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QApplication::applicationName() + "/" + KREVISION);
+    request.setRawHeader("Range", QString("bytes=%1-%2").arg(begin).arg(end).toUtf8());
+    auto& reply = *manager.get(request);
+    return blockDownloadExtractData(reply, &manager);
+}
+
 QPair<bool, QByteArray> Network::login(const QUrl& url, const QString& username,
                                        const QString& password) {
     QNetworkRequest request(url);
