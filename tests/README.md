@@ -206,3 +206,77 @@ else's and is not in the repository, so what is kept here is the synthetic round
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/precomputed_test precomputed_test.cpp && /tmp/precomputed_test
 ```
+
+## morphology_test
+
+Exercises `segmentation/morphology.h`, which dilates, erodes and smooths one object in 3D.
+It is a port of Paintera's morph package, so the test's job is partly to pin the decisions
+that were carried over and would otherwise be invisible choices.
+
+The separable Voronoi distance transform is the part worth testing hardest: three axis
+passes that have to compose into a real 3-D answer, with an argmin threaded through each of
+them, and when it is wrong it is wrong by a voxel or two in a way that looks entirely
+plausible on screen. So it is checked against brute force — every voxel against every seed —
+over randomised blocks with anisotropic spacing, and the reported nearest voxel has to
+*achieve* the minimum rather than be the particular one brute force found first, because
+ties are legitimate and common. Dilate and erode are then checked the same way, including
+that a voxel survives erosion exactly when nothing outside the object is within the radius.
+
+Two properties are worth having pinned for their own sake. The radius is a *length*: there
+is a case with one voxel on 10×10×40 nm sampling where a 20 nm radius reaches two voxels
+sideways, none at all through the section, and the 14.1 nm diagonal but not the 22.4 nm one.
+And a merged object grows as its own fragments — two fragments of one selection must each
+claim the voxels nearer to them, rather than the whole group collapsing onto one id, which
+is what the argmin is carried through the transform for.
+
+The smoothing tests use a slab with a one-voxel spur on one face and a one-voxel dent bitten
+out of the other, and require Both to take the spur *and* fill the dent while leaving the
+flat faces and the interior alone — that is the whole difference between a smooth and a
+dilate followed by an erode. In/Out are checked to move the boundary one way only.
+
+Worth knowing if you change this: the suite was checked by mutation, and eight of eight
+mutations are now caught — a mis-weighted axis pass, a dropped argmin, either radius bound
+made exclusive, a skipped axis pass, a Gaussian tap lost off the end, and a shrink pass
+reading the wrong mask. The eighth, flipping the smoothing threshold from `>=` to `>`,
+survived the first version of the suite: no case put a voxel exactly on the threshold, which
+is Paintera's documented boundary. The test that catches it now reads the threshold back off
+the very blur the operation will compute, so one chosen voxel lands on it exactly without
+depending on float luck.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/morphology_test morphology_test.cpp && /tmp/morphology_test
+```
+
+## morphregion_test
+
+Exercises `segmentation/morphregion.h`, which decides which box a morphology run reads,
+which box it writes, and how both sit on the magnification lattice. Split out of
+objectmorphology.cpp for the same reason `planarwrite.h` was split out of shape
+interpolation: it is integer arithmetic over three axes where a mistake neither crashes nor
+warns, it quietly puts voxels one place over.
+
+The central check simulates `processRegion()`'s own traversal — stepping the lattice from
+each *block's* origin rather than the region's, capping the reported coordinate to the
+region, exactly as segmentation/cubeloader.cpp does — and requires every coordinate it hands
+back to land on a distinct, in-range index of the read grid. That is a property, not an
+example: it is checked over ~400 randomised plans at magnifications 1, 2, 4 and 8, with
+anisotropic steps, small blocks so several are crossed, and region bounds that do not line
+up with anything.
+
+It earns its keep. The first version of the driver took the write box straight from the
+requested bounds instead of pinning it to the read origin, so at magnification 2 and above
+`processRegion` reported the region's first plane at a capped, off-lattice position, the
+index truncated onto the neighbouring cell, and that plane was written with the wrong
+voxel's answer. At magnification 1 the step is 1, nothing can be off the lattice, and the
+entire class of mistake is unreachable — which is why it was found by reading the traversal
+rather than by using the feature, and why the test reinstates that exact mutation to confirm
+it is caught.
+
+The rest pins the apron: with room on every side it is exactly the requested depth and
+reported complete, and against a limit it is reported incomplete rather than silently
+truncated, because a zero-extended Gaussian falls to about 0.63 at a face and that is enough
+to move a voxel across a 0.5 threshold.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/morphregion_test morphregion_test.cpp && /tmp/morphregion_test
+```

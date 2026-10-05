@@ -487,6 +487,50 @@ CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate &
     return cubeChangeSet;
 }
 
+CubeCoordSet writeVoxelsFrom(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelValuer & value, const bool markChanged, const bool respectPaintTarget) {
+    const auto guard = respectPaintTarget ? currentPaintGuard() : PaintGuard{Segmentation::PaintTarget::Anything, Segmentation::singleton().getBackgroundId()};
+    const auto background = Segmentation::singleton().getBackgroundId();
+    /* One gap map per id actually written, built the first time that id comes up. The map
+     * costs a region scan, so the laziness matters: a dilate that turns out to write a
+     * single fragment pays for one, and an erase — which never needs a gap — pays for none. */
+    std::unordered_map<std::uint64_t, std::unique_ptr<const ForeignProximity>> gaps;
+    std::unordered_set<std::uint64_t> replaced;
+    std::unordered_set<std::uint64_t> written;
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&](uint64_t & voxel, Coordinate globalPos){
+        const auto wanted = value(globalPos);
+        if (!wanted || *wanted == voxel) {
+            return;
+        }
+        if (!guard.allows(voxel, *wanted)) {
+            return;
+        }
+        if (guard.needsGap(*wanted)) {
+            auto it = gaps.find(*wanted);
+            if (it == std::end(gaps)) {
+                it = gaps.emplace(*wanted, std::make_unique<const ForeignProximity>(globalFirst, globalLast, *wanted, background)).first;
+            }
+            if (it->second->blocked(globalPos)) {
+                return;
+            }
+        }
+        replaced.insert(voxel);
+        written.insert(*wanted);
+        voxel = *wanted;
+    });
+    if (markChanged) {
+        coordCubesMarkChanged(cubeChangeSet);
+    }
+    /* notePainted() takes one written id at a time, so a multi-fragment write reports each.
+     * The replaced set goes with the first: it is only used to mark the objects that lost
+     * voxels as worked on, and which of the written ids took them is not part of that. */
+    bool first = true;
+    for (const auto id : written) {
+        Segmentation::singleton().notePainted(id, first ? replaced : std::unordered_set<std::uint64_t>{});
+        first = false;
+    }
+    return cubeChangeSet;
+}
+
 std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordinate & globalLast, const std::uint64_t from, const std::uint64_t to, const bool markChanged) {
     std::size_t changed{0};
     const auto cubeChangeSet = processRegion(globalFirst, globalLast, [from, to, &changed](uint64_t & voxel, Coordinate){

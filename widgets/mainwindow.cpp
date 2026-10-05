@@ -34,6 +34,7 @@
 #include "segmentation/cubeloader.h"
 #include "segmentation/floodfill.h"
 #include "segmentation/objectinventory.h"
+#include "segmentation/objectmorphology.h"
 #include "segmentation/shapeinterpolation.h"
 #include "segmentation/undostack.h"
 #include "skeleton/swc.h"
@@ -1019,6 +1020,32 @@ void MainWindow::createMenus() {
     });
 
     actionMenu.addSeparator();
+    /* Morphology on the selected object.
+     *
+     * Dilate and erode get plain entries that act at once, because at a fixed radius they
+     * are something you press two or three times in a row and watch — putting them behind a
+     * dialog would make the common case the slow one. Everything they read lives in the
+     * panel the third entry opens, which is also where smoothing is driven from, since that
+     * has a direction, an infill and a threshold to decide and no sensible single default.
+     *
+     * No shortcuts. Every letter near the painting keys is taken and these are not worth
+     * displacing one; they are also the only operations here that can change a few thousand
+     * voxels from a single keystroke, which is a poor fit for a key pressed by accident. */
+    const auto applyMorph = [this](const morphology::Operation op){
+        statusBar()->showMessage(widgetContainer.morphologyWidget.apply(op), 8000);
+    };
+    dilateObjectAction = actionMenu.addAction(tr("Dilate Object"), [applyMorph](){ applyMorph(morphology::Operation::Dilate); });
+    dilateObjectAction->setToolTip(tr("Grow the selected object by the radius set in Dilate, Erode, Smooth…, over a region "
+                                      "about the crosshair. The radius is a distance, so on anisotropic data it reaches "
+                                      "further in plane than through it."));
+    erodeObjectAction = actionMenu.addAction(tr("Erode Object"), [applyMorph](){ applyMorph(morphology::Operation::Erode); });
+    erodeObjectAction->setToolTip(tr("Shrink the selected object by the same radius, over the same region."));
+    actionMenu.addAction(tr("Dilate, Erode, Smooth…"), [this]() {
+        widgetContainer.morphologyWidget.setVisible(true);
+        widgetContainer.morphologyWidget.raise();
+    })->setToolTip(tr("Radius, direction, what eroded voxels become, and the smoothing threshold."));
+
+    actionMenu.addSeparator();
     // shape interpolation. Bindings mirror Paintera's so the muscle memory carries over;
     // `S` collides with Jump to Active Node, which is a skeleton action and is therefore
     // yielded while a painting mode is active (see setWorkMode).
@@ -1976,6 +2003,7 @@ void MainWindow::loadSettings() {
     widgetContainer.datasetLoadWidget.loadSettings();
     widgetContainer.layerDialogWidget.loadSettings();
     widgetContainer.preferencesWidget.loadSettings();
+    widgetContainer.morphologyWidget.loadSettings();
     widgetContainer.pythonInterpreterWidget.loadSettings();
     widgetContainer.pythonPropertyWidget.loadSettings();
     refreshScriptingMenu();

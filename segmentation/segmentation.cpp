@@ -431,6 +431,27 @@ std::optional<uint64_t> Segmentation::objectIndexOfSubobject(const uint64_t subO
     return largestObjectContainingSubobject(it->second);
 }
 
+std::vector<std::uint64_t> Segmentation::selectedSubobjectIds(const bool fragmentsOnly) const {
+    std::vector<std::uint64_t> ids;
+    if (fragmentsOnly) {
+        if (const auto one = currentPaintSubobjectId(); one && *one != backgroundId) {
+            ids.push_back(*one);
+        }
+        return ids;
+    }
+    for (const auto objectIndex : selectedObjectIndices) {
+        for (const auto & subobject : objects[objectIndex].subobjects) {
+            ids.push_back(subobject.get().id);
+        }
+    }
+    /* Sorted and deduplicated because two selected objects can share a subobject — the
+     * mergelist permits it, and a mask that counted one twice would be no different, but a
+     * caller sizing a palette by this list would be off. */
+    std::sort(std::begin(ids), std::end(ids));
+    ids.erase(std::unique(std::begin(ids), std::end(ids)), std::end(ids));
+    return ids;
+}
+
 uint64_t Segmentation::smallestImmutableObjectContainingSubobject(const Segmentation::SubObject & subobject) const {
     auto comparitor = std::bind(&Segmentation::objectOrder, this, std::placeholders::_1, std::placeholders::_2);
     const auto objectIndex = *std::min_element(std::begin(subobject.objects), std::end(subobject.objects), comparitor);

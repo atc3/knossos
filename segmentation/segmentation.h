@@ -329,6 +329,19 @@ public:
      * that one sets the object's location as a side effect, so using it merely to look
      * something up would overwrite wherever the user last painted. */
     std::optional<uint64_t> objectIndexOfSubobject(const uint64_t subObjectId) const;
+    /* Every subobject id the selection covers, in a stable order.
+     *
+     * Paintera's distinction between "active fragments" and "active segments", which is a
+     * real one for any operation that reads a mask rather than painting a single id: a
+     * merged object is several ids that render alike, so morphology over the fragment alone
+     * would treat its own merge partners as foreign tissue and erode the seam between them.
+     * The default is therefore every id of every selected object; `fragmentsOnly` narrows it
+     * to the one id a brush stroke would write, which is what you want when the merge was a
+     * mistake you are about to undo by hand.
+     *
+     * Creates nothing and moves nothing — unlike subobjectIdOfFirstSelectedObject(), which
+     * sets the object's location as a side effect. */
+    std::vector<std::uint64_t> selectedSubobjectIds(bool fragmentsOnly = false) const;
     uint64_t smallestImmutableObjectContainingSubobject(const SubObject & subobject) const;
     decltype(defaultMergeClass) getDefaultMergeClass() const;
     void setDefaultMergeClass(const QString & mergeClass);

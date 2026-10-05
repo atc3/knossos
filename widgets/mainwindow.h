@@ -166,6 +166,8 @@ class MainWindow : public QMainWindow {
     // flood fill
     QAction *fill2dAction{};
     QAction *fill3dAction{};
+    QAction *dilateObjectAction{};
+    QAction *erodeObjectAction{};
     QAction *fillMayLoadAction{};
     // shape interpolation
     QAction *shapeInterpolationAcceptAction{};
