@@ -341,7 +341,9 @@ void DatasetLoadWidget::datasetCellChanged(const QModelIndex & topLeft, const QM
 }
 
 void DatasetLoadWidget::updateDatasetInfo(const QUrl & url, const QString & info) try {
-    updateDatasetInfo(Dataset::parse(url, info, segmentationOverlayCheckbox.isChecked()));
+    // a preview: only the layer count, cube shape and info text are read from this, so the
+    // auth tokens a real load needs are not fetched here — see Dataset::parse
+    updateDatasetInfo(Dataset::parse(url, info, segmentationOverlayCheckbox.isChecked(), false));
 } catch (std::exception &) {
     infoLabel.setText("");
 }

@@ -127,7 +127,7 @@ bool Dataset::mayUseCdnAuth(const QUrl & url) {
     return !google;
 }
 
-Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_snappy) {
+Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_snappy, const bool fetchAuth) {
     Dataset::list_t infos;
     if (Dataset::isWebKnossos(url)) {
         infos = Dataset::parseWebKnossosJson(url, data);
@@ -138,7 +138,7 @@ Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_
     } else if (Dataset::isPyKnossos(url)) {
         infos = Dataset::parsePyKnossosConf(url, data);
     } else if (Dataset::isToml(url)) {
-        infos = Dataset::parseToml(url, data);
+        infos = Dataset::parseToml(url, data, fetchAuth);
     } else {
         infos = Dataset::fromLegacyConf(url, data);
     }
@@ -314,7 +314,7 @@ Dataset::list_t Dataset::parsePyKnossosConf(const QUrl & configUrl, QString conf
 
 extern toml::value toml_parse(const std::vector<unsigned char> & blob, const std::string & filename);
 
-Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
+Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData, const bool fetchAuth) {
     const auto data = configData.toStdString();
     auto config = toml_parse({std::cbegin(data), std::cend(data)}, configUrl.toString().toStdString());
     Dataset::list_t infos;
@@ -362,7 +362,7 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
         // annotation on a pre-segmented volume doesn't hand out ids that are already taken
         info.maxId = static_cast<std::uint64_t>(toml::find_or<std::int64_t>(vit, "MaxId", 0));
 
-        if (info.url.scheme() == "https" && mayUseCdnAuth(info.url) && !failfast) {
+        if (fetchAuth && info.url.scheme() == "https" && mayUseCdnAuth(info.url) && !failfast) {
             QUrl authurl;
             authurl.setScheme(info.url.scheme());
             authurl.setHost(info.url.host());
