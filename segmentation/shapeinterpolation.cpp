@@ -60,14 +60,43 @@ constexpr int PAD = 16;
  * alternative is silently declining to interpolate. Beyond this the honest answer is still
  * no, and the message says what to do about it. */
 constexpr std::size_t MAX_PIXELS = 4096 * 4096;
-/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes).
+/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes, so
+ * 256 MiB).
  *
- * The cache is cleared *before* the new pair is inserted, so a pair larger than this on its
- * own is still cached — deliberately, since otherwise a wide object would recompute two
- * distance transforms per depth. The practical effect is that retention is one pair, which
- * at the MAX_PIXELS limit is ~134 MiB held for as long as the chain is live. Walking depths
- * in order, as both the preview and the commit do, hits that one pair repeatedly. */
-constexpr std::size_t MAX_CACHED_FLOATS = 16 * 1024 * 1024;
+ * Over budget, the entries furthest from the pair being added are evicted until it fits,
+ * and the new pair is always kept — a pair larger than this on its own is still cached,
+ * since otherwise a wide object would recompute two distance transforms per depth.
+ * Evicting by distance rather than clearing everything is what a walk in depth order
+ * wants: the pairs behind it go, the ones it is about to reach stay.
+ *
+ * It is also the line the cross-section preview will not cross. A cross-section needs
+ * every pair at once, so a chain whose pairs total more than this can never be held, and
+ * would recompute the whole chain on every pan; buildCrossSection() declines it instead.
+ * Raised from 16 Mi floats, below which a single wide pair was enough to trigger that. */
+constexpr std::size_t MAX_CACHED_FLOATS = 64 * 1024 * 1024;
+
+/* The common grid two slices are interpolated on: the union of their bounding boxes plus
+ * a margin. Shared by interpolantFor(), which builds the distance transforms on it, and
+ * buildCrossSection(), which only needs its extent — so the extent can be had without
+ * computing a single transform, and the two cannot drift apart. */
+struct PairGrid {
+    int uMin{0}, vMin{0}, uSize{0}, vSize{0};
+    std::size_t pixels() const {
+        return (uSize > 0 && vSize > 0) ? static_cast<std::size_t>(uSize) * vSize : 0;
+    }
+};
+PairGrid pairGrid(const SISlice & s1, const SISlice & s2) {
+    const auto uStep = s1.uStep;
+    const auto vStep = s1.vStep;
+    PairGrid g;
+    g.uMin = std::min(s1.uMin, s2.uMin) - PAD * uStep;
+    g.vMin = std::min(s1.vMin, s2.vMin) - PAD * vStep;
+    const auto uMax = std::max(s1.uCoordOf(s1.uSize), s2.uCoordOf(s2.uSize)) + PAD * uStep;
+    const auto vMax = std::max(s1.vCoordOf(s1.vSize), s2.vCoordOf(s2.vSize)) + PAD * vStep;
+    g.uSize = (uMax - g.uMin) / uStep;
+    g.vSize = (vMax - g.vMin) / vStep;
+    return g;
+}
 
 // How long to wait for the loader to make a cube resident before giving up on it. A miss
 // is reported as a shortfall rather than silently dropping voxels, which is what
@@ -524,7 +553,7 @@ void ShapeInterpolation::restoreState(const State & state) {
     slices = state.slices;
     interpolants.clear();
     previewValid = false;
-    crossSectionValid = false;
+    invalidateCrossSections();
     ++gen;
     emit changed();
 }
@@ -538,7 +567,7 @@ void ShapeInterpolation::reset() {
     wasEdited = false;
     soid = 0;
     interpolants.clear();
-    crossSectionValid = false;
+    invalidateCrossSections();
     previewValid = false;
     error.clear();
     ++gen;
@@ -569,12 +598,11 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     // to the same lattice (see absorbStamp), so index arithmetic is exact.
     const auto uStep = s1.uStep;
     const auto vStep = s1.vStep;
-    const auto uMin = std::min(s1.uMin, s2.uMin) - PAD * uStep;
-    const auto vMin = std::min(s1.vMin, s2.vMin) - PAD * vStep;
-    const auto uMax = std::max(s1.uCoordOf(s1.uSize), s2.uCoordOf(s2.uSize)) + PAD * uStep;
-    const auto vMax = std::max(s1.vCoordOf(s1.vSize), s2.vCoordOf(s2.vSize)) + PAD * vStep;
-    const auto uSize = (uMax - uMin) / uStep;
-    const auto vSize = (vMax - vMin) / vStep;
+    const auto grid = pairGrid(s1, s2);
+    const auto uMin = grid.uMin;
+    const auto vMin = grid.vMin;
+    const auto uSize = grid.uSize;
+    const auto vSize = grid.vSize;
     if (uSize <= 0 || vSize <= 0) {
         error = QObject::tr("Shape interpolation: empty region.");
         return nullptr;
@@ -623,14 +651,22 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     in.vSize = vSize;
     error.clear();
 
-    // keep the cache from growing without bound on a long chain
+    // keep the cache from growing without bound on a long chain: evict whatever is furthest
+    // from this pair until it fits, and keep this pair regardless — see MAX_CACHED_FLOATS
     std::size_t cachedFloats = 2 * pixels;
     for (const auto & [key, entry] : interpolants) {
         (void)key;
         cachedFloats += entry.d1.size() + entry.d2.size();
     }
-    if (cachedFloats > MAX_CACHED_FLOATS) {
-        interpolants.clear();
+    while (cachedFloats > MAX_CACHED_FLOATS && !interpolants.empty()) {
+        auto furthest = std::begin(interpolants);
+        for (auto it = std::begin(interpolants); it != std::end(interpolants); ++it) {
+            if (std::abs(it->first - z1) > std::abs(furthest->first - z1)) {
+                furthest = it;
+            }
+        }
+        cachedFloats -= furthest->second.d1.size() + furthest->second.d2.size();
+        interpolants.erase(furthest);
     }
     return &(interpolants[z1] = std::move(in));
 }
@@ -861,7 +897,7 @@ ShapeInterpolation::WriteResult ShapeInterpolation::pasteSliceAt(const int depth
     slices[depth] = std::move(pasted);
     wasEdited = true;
     previewValid = false;
-    crossSectionValid = false;
+    invalidateCrossSections();
     ++gen;
     emit changed();
 
@@ -1007,14 +1043,15 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
     if (previewDeferred) {
         return false;// mid-stroke; a cross-section walks every pair and is the worst offender
     }
-    if (crossSectionValid && crossSectionAxis == fixedAxis && crossSectionCoord == fixedCoord && crossSectionGen == gen) {
+    auto & slot = crossSections[fixedAxis];
+    auto & crossSection = slot.slice;
+    if (slot.valid && slot.coord == fixedCoord && slot.gen == gen) {
         return crossSection.count() != 0;
     }
     crossSection = SISlice{};
-    crossSectionValid = true;
-    crossSectionAxis = fixedAxis;
-    crossSectionCoord = fixedCoord;
-    crossSectionGen = gen;
+    slot.valid = true;// a declined build is cached too, so it is not re-declined every frame
+    slot.coord = fixedCoord;
+    slot.gen = gen;
     if (slices.size() < 2) {
         return false;
     }
@@ -1034,10 +1071,29 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
      * transforms exceed their byte budget, so from the first pair past that budget onwards
      * every pointer already collected was dangling and the extents came out of freed
      * memory. Long chains are precisely the ones that exceed it. */
+    /* Extents come from the pair grids alone, not from the distance transforms. This pass
+     * used to call interpolantFor() for every pair just to read its extent, which computed
+     * the whole chain once here and then — the cache having overflowed on the way — again in
+     * the drawing loop below. The grid is pure arithmetic on the two slices' bounds. */
+    std::size_t chainFloats = 0;
     for (auto it = std::begin(slices); std::next(it) != std::end(slices); ++it) {
-        if (const auto * in = interpolantFor(it->first, std::next(it)->first); in != nullptr) {
-            extend(fixedIsU ? in->vMin : in->uMin, fixedIsU ? in->vSize : in->uSize, fixedIsU ? in->vStep : in->uStep);
+        const auto & s1 = it->second;
+        const auto grid = pairGrid(s1, std::next(it)->second);
+        if (grid.pixels() == 0) {
+            continue;
         }
+        chainFloats += 2 * grid.pixels();
+        extend(fixedIsU ? grid.vMin : grid.uMin, fixedIsU ? grid.vSize : grid.uSize, fixedIsU ? s1.vStep : s1.uStep);
+    }
+    if (chainFloats > MAX_CACHED_FLOATS) {
+        /* Every pair is needed at once, so this chain's distance transforms cannot all be
+         * held, and building it would recompute the whole chain on every pan of either
+         * perpendicular view — the freeze this guard exists to prevent. The preview in the
+         * plane being painted is per depth and unaffected, and so is the commit. */
+        error = QObject::tr("Shape interpolation: this chain is too large to preview across slices "
+                            "(about %1 MiB of distance transforms). The preview in the painting plane, "
+                            "and accepting, still work.").arg((chainFloats * sizeof(float)) >> 20);
+        return false;
     }
     for (const auto & [depth, slice] : slices) {
         (void)depth;
@@ -1132,6 +1188,7 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
     if (!buildCrossSection(planeNormal, fixedCoord)) {
         return false;
     }
+    const auto & crossSection = crossSections[planeNormal].slice;
     const auto wAxis = (planeNormal == uAxisIdx) ? vAxisIdx : uAxisIdx;
     out = {planeNormal, fixedCoord, std::min(axis, wAxis), std::max(axis, wAxis),
            crossSection.uMin, crossSection.vMin, crossSection.uStep, crossSection.vStep,
