@@ -60,11 +60,17 @@ QVariant DatasetModel::data(const QModelIndex & index, int role) const {
     return {};
 }
 
+/* Whitespace around a dataset path or URL is never part of it — a URL parser strips it
+ * anyway — but it is easily pasted along with one, a trailing newline especially, and then
+ * the entry neither loads nor matches the same dataset already in the list. Every way a
+ * string gets into the list goes through add() or setData(), so trimming here covers typing,
+ * pasting, editing a row, dropping a URL and lists saved before this was done. */
 bool DatasetModel::setData(const QModelIndex & index, const QVariant & value, int role) {
     if (index.isValid()) {
-        QUrl url{value.toString()};
+        const auto path = value.toString().trimmed();
+        QUrl url{path};
         url.setScheme(url.scheme().isEmpty() && !url.url().isEmpty()? "file" : url.scheme());
-        datasets[index.row()] = value.toString();
+        datasets[index.row()] = path;
         if (index.row() == rowCount() - 1 && !index.data().toString().isEmpty()) {
             beginInsertRows({}, datasets.size(), datasets.size());
             datasets.push_back("");
@@ -84,7 +90,8 @@ int DatasetModel::rowCount(const QModelIndex &) const {
     return datasets.size();
 }
 
-void DatasetModel::add(const QString & datasetPath) {
+void DatasetModel::add(const QString & untrimmedPath) {
+    const auto datasetPath = untrimmedPath.trimmed();// see setData()
     if (datasets.empty()) {
         beginInsertRows({}, datasets.size(), datasets.size() + 1);
         datasets.push_back(datasetPath);
@@ -265,9 +272,10 @@ DatasetLoadWidget::DatasetLoadWidget(QWidget *parent) : DialogVisibilityNotify(D
 
     setLayout(&mainLayout);
     QObject::connect(&searchField, &QLineEdit::textChanged, [this](const QString & text) {
-        tableWidget.filterString = text;
+        tableWidget.filterString = text.trimmed();// re-applied after a drop, so trimmed the same way
         const QPersistentModelIndex previouslySelected((tableWidget.selectionModel()->selectedIndexes().isEmpty())? QModelIndex() : tableWidget.selectionModel()->selectedIndexes()[0]);
-        sortAndFilterProxy.setFilterFixedStringWrap(text);
+        // trimmed, so a path pasted with a stray space or newline still finds its entry
+        sortAndFilterProxy.setFilterFixedStringWrap(text.trimmed());
         auto currentlySelected = (tableWidget.selectionModel()->selectedIndexes().isEmpty())? QModelIndex() : tableWidget.selectionModel()->selectedIndexes()[0];
         if (previouslySelected != currentlySelected) {
             tableWidget.selectionModel()->select(currentlySelected, QItemSelectionModel::Deselect);
@@ -277,8 +285,8 @@ DatasetLoadWidget::DatasetLoadWidget(QWidget *parent) : DialogVisibilityNotify(D
     });
     QObject::connect(&searchField, &QLineEdit::returnPressed, [this] () {
         if (sortAndFilterProxy.rowCount() == 0) {
-            datasetModel.add(searchField.text());
-            sortAndFilterProxy.setFilterFixedStringWrap(searchField.text());
+            datasetModel.add(searchField.text());// trimmed inside
+            sortAndFilterProxy.setFilterFixedStringWrap(searchField.text().trimmed());
             tableWidget.selectionModel()->select(sortAndFilterProxy.index(0, 0), QItemSelectionModel::ClearAndSelect);
         }
     });
