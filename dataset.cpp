@@ -64,6 +64,7 @@ QString Dataset::compressionString() const {
     case Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_64: return "64 bit id";
     case Dataset::CubeType::SEGMENTATION_SZ_ZIP: return "seg.sz.zip";
     case Dataset::CubeType::SNAPPY: return "snappy";
+    case Dataset::CubeType::SEGMENTATION_PRECOMPUTED: return "precomputed";
     }
     throw std::runtime_error(QObject::tr("no compressions string for %1").arg(static_cast<int>(type)).toUtf8()); ;
 }
@@ -80,6 +81,8 @@ QString Dataset::apiString() const {
         return "PyKnossos";
     case Dataset::API::WebKnossos:
         return "WebKnossos";
+    case Dataset::API::NeuroglancerPrecomputed:
+        return "Neuroglancer precomputed";
     }
     throw std::runtime_error(QObject::tr("no api string for %1").arg(static_cast<int>(type)).toUtf8()); ;
 }
