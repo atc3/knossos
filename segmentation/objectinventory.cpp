@@ -26,6 +26,7 @@
 #include "loader.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
+#include "segmentation/precomputed.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/undostack.h"
 #include "skeleton/skeletonizer.h"
@@ -106,6 +107,16 @@ bool sweepable(const Dataset & layer, QString & why) {
     if (layer.type == Dataset::CubeType::SNAPPY) {
         why = QObject::tr("this segmentation has no stored data — it exists only as unsaved annotation");
         return false;
+    }
+    if (layer.type == Dataset::CubeType::SEGMENTATION_PRECOMPUTED) {
+        /* A Neuroglancer precomputed volume: apiSwitch() names the shard for a block by
+         * arithmetic alone, and precomputed::chunkIntoCube() cuts the block out of it —
+         * the same two steps the loader takes, so a sweep reads exactly what is drawn. */
+        if (layer.api != Dataset::API::NeuroglancerPrecomputed || !layer.precomputed) {
+            why = QObject::tr("this precomputed layer's info was not read, so its blocks cannot be found");
+            return false;
+        }
+        return true;
     }
     if (layer.type != Dataset::CubeType::SEGMENTATION_SZ_ZIP
             && layer.type != Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_64) {
@@ -369,6 +380,14 @@ void Scanner::probeMags(Dataset layer, const int lowestMag, const int highestMag
         option.magIndex = magIndex;
         option.cubes = cubesFor(layer, magIndex);
         option.estBytes = option.cubes * BYTES_PER_CUBE_GUESS;
+        if (layer.api == Dataset::API::NeuroglancerPrecomputed) {
+            /* Nothing to probe: a precomputed volume's info lists its levels, and the load
+             * kept only the ones that fit KNOSSOS's magnifications — `scales` is that list,
+             * and the guard above has already skipped anything past it. */
+            option.sampled = layer.precomputed && magIndex < layer.precomputed->scales.size();
+            pending.push_back(Pending{option, {}});
+            continue;
+        }
 
         /* Where to look.
          *
@@ -601,16 +620,18 @@ void Scanner::issue() {
 Scanner::Fetch Scanner::readLocal(const CoordOfCube & cube, std::vector<std::uint64_t> & out) {
     QString path;
     try {
-        path = spec.layer.knossosCubeUrl(cube).toLocalFile();
+        // a precomputed block lives in a shard named by apiSwitch(), not at a cube path
+        path = (spec.layer.api == Dataset::API::NeuroglancerPrecomputed ? spec.layer.apiSwitch(cube).url()
+                                                                         : spec.layer.knossosCubeUrl(cube)).toLocalFile();
     } catch (const std::exception & e) {
         qDebug() << "object inventory: cannot address block" << cube << e.what();
         return Fetch::Corrupt;
     }
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
+    if (path.isEmpty() || !file.open(QIODevice::ReadOnly)) {
         return Fetch::Absent;
     }
-    return decode(file.readAll(), out) ? Fetch::Decoded : Fetch::Corrupt;
+    return decode(cube, file.readAll(), out);
 }
 
 void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) {
@@ -621,6 +642,16 @@ void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) 
         ++cubesCorrupt;
         completeCube(code, false);
         qDebug() << "object inventory: cannot address block" << cube << e.what();
+        return;
+    }
+    if (request.url().isEmpty()) {
+        /* Outside the volume's own chunk grid. KNOSSOS rounds its block grid from the
+         * declared extent and a precomputed level rounds its own, so at the far face the
+         * two can differ by a block; there is nothing there to fetch. Sending the empty
+         * request would fail as a network error and be retried, and enough of those in a
+         * row stall the sweep. */
+        ++cubesAbsent;
+        completeCube(code, false);
         return;
     }
     request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::PreferNetwork);
@@ -645,10 +676,16 @@ void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) 
             consecutiveGiveUps = 0;
             completeCube(code, false);
         } else if (error == QNetworkReply::NoError) {
-            if (decode(payload, decodeBuffer)) {
+            const auto fetched = decode(cube, payload, decodeBuffer);
+            if (fetched == Fetch::Decoded) {
                 ingest(cube, decodeBuffer);
                 consecutiveGiveUps = 0;
                 completeCube(code, true);
+            } else if (fetched == Fetch::Absent) {
+                // a shard that does not hold this chunk: the precomputed form of a 404
+                ++cubesAbsent;
+                consecutiveGiveUps = 0;
+                completeCube(code, false);
             } else {
                 ++cubesCorrupt;
                 if (cubesCorrupt % 100 == 1) {
@@ -686,18 +723,35 @@ void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) 
     });
 }
 
-bool Scanner::decode(const QByteArray & payload, std::vector<std::uint64_t> & out) const {
+Scanner::Fetch Scanner::decode(const CoordOfCube & cube, const QByteArray & payload, std::vector<std::uint64_t> & out) const {
     const auto voxels = static_cast<std::size_t>(spec.layer.cubeShape.prod());
     const auto expected = voxels * sizeof(std::uint64_t);
     if (out.size() != voxels) {
         out.assign(voxels, 0);
     }
+    if (spec.layer.type == Dataset::CubeType::SEGMENTATION_PRECOMPUTED) {
+        const auto & volume = spec.layer.precomputed;
+        if (!volume || spec.layer.magIndex >= volume->scales.size()) {
+            return Fetch::Corrupt;
+        }
+        const std::uint64_t grid[3]{static_cast<std::uint64_t>(cube.x), static_cast<std::uint64_t>(cube.y),
+                                    static_cast<std::uint64_t>(cube.z)};
+        const std::int32_t cubeShape[3]{spec.layer.cubeShape.x, spec.layer.cubeShape.y, spec.layer.cubeShape.z};
+        switch (precomputed::chunkIntoCube(volume->scales[spec.layer.magIndex], volume->numChannels, grid,
+                                           reinterpret_cast<const std::uint8_t *>(payload.constData()),
+                                           static_cast<std::size_t>(payload.size()), cubeShape, out.data())) {
+        case precomputed::ChunkOutcome::Decoded: return Fetch::Decoded;
+        case precomputed::ChunkOutcome::Absent: return Fetch::Absent;
+        case precomputed::ChunkOutcome::Corrupt: break;
+        }
+        return Fetch::Corrupt;
+    }
     if (spec.layer.type == Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_64) {
         if (static_cast<std::size_t>(payload.size()) != expected) {
-            return false;
+            return Fetch::Corrupt;
         }
         std::memcpy(out.data(), payload.constData(), expected);
-        return true;
+        return Fetch::Decoded;
     }
     // SEGMENTATION_SZ_ZIP: a zip holding one snappy stream. Same as the loader does, minus
     // the residency bookkeeping and the reslice notification, which would be wrong here.
@@ -705,7 +759,7 @@ bool Scanner::decode(const QByteArray & payload, std::vector<std::uint64_t> & ou
     QBuffer buffer(&data);
     QuaZip archive(&buffer);// QuaZip needs random access, hence the buffer
     if (!archive.open(QuaZip::mdUnzip)) {
-        return false;
+        return Fetch::Corrupt;
     }
     bool ok = false;
     archive.goToFirstFile();
@@ -718,7 +772,7 @@ bool Scanner::decode(const QByteArray & payload, std::vector<std::uint64_t> & ou
         }
     }
     archive.close();
-    return ok;
+    return ok ? Fetch::Decoded : Fetch::Corrupt;
 }
 
 void Scanner::ingest(const CoordOfCube & cube, const std::vector<std::uint64_t> & voxels) {

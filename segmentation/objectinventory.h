@@ -178,7 +178,7 @@ private:
     void requestRemote(const CoordOfCube &, std::uint64_t code);
     void completeCube(std::uint64_t code, bool decoded);
     void abortInFlight();
-    bool decode(const QByteArray & payload, std::vector<std::uint64_t> & out) const;
+    Fetch decode(const CoordOfCube & cube, const QByteArray & payload, std::vector<std::uint64_t> & out) const;
     void ingest(const CoordOfCube &, const std::vector<std::uint64_t> &);
     void flushDeltas(bool force);
     void maybeCheckpoint(bool force);
