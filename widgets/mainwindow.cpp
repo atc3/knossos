@@ -990,6 +990,14 @@ void MainWindow::createMenus() {
         widgetContainer.annotationWidget.tabs.setCurrentIndex(3);
         widgetContainer.annotationWidget.raise();
     })->setToolTip(tr("List every object in the segmentation layer, so an existing one can be found and refined."));
+    /* ⌘⌫ — the platform's "delete this item" — rather than Delete or Backspace alone, which
+     * already delete the active node in the viewports and a key slice in shape interpolation.
+     * Application-wide because the object it acts on is chosen with . and , from the viewport,
+     * where focus stays; see ObjectInventoryView::eraseCurrentEntry() for the safeguards. */
+    eraseInventoryObjectAction = &addApplicationShortcut(actionMenu, QIcon(), tr("Erase Current Inventory Object"), this,
+        [this](){ widgetContainer.annotationWidget.inventoryTab.eraseCurrentEntry(); }, Qt::CTRL + Qt::Key_Backspace);
+    eraseInventoryObjectAction->setAutoRepeat(false);
+    eraseInventoryObjectAction->setToolTip(tr("Set every voxel of the object the inventory is on to background, after asking."));
     actionMenu.addAction(tr("Memory Report"), [this]() {
         const auto loader = Loader::Controller::singleton().memoryReport();
         const auto & si = ShapeInterpolation::singleton();

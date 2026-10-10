@@ -31,6 +31,7 @@
 
 #include <QBrush>
 #include <QHeaderView>
+#include <QKeySequence>
 #include <QMessageBox>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -319,7 +320,8 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     rescanButton.setToolTip(tr("Throw the list away and read the layer again."));
     deleteButton.setToolTip(tr("Set every voxel of the selected object to background, for removing a\n"
                                "false positive outright. Walks the object's own bounding box and is\n"
-                               "one undo step."));
+                               "one undo step. %1 does the same from anywhere, on the object . and ,\n"
+                               "last moved to.").arg(QKeySequence(Qt::CTRL + Qt::Key_Backspace).toString(QKeySequence::NativeText)));
     annotationButton.setToolTip(tr("List what this annotation has painted, rather than what the dataset stores.\n"
                                    "Reads the blocks you have edited — no network, and it sees unsaved work,\n"
                                    "but nothing that was already baked into the volume."));
@@ -424,25 +426,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     });
     QObject::connect(&rescanButton, &QPushButton::clicked, this, [&inv]() { inv.rescan(); });
     QObject::connect(&annotationButton, &QPushButton::clicked, this, [this, &inv]() { inv.scanAnnotation(this); });
-    QObject::connect(&deleteButton, &QPushButton::clicked, this, [this, &inv]() {
-        const auto * record = model.recordAt(currentRow());
-        if (record == nullptr) {
-            emit message(tr("Select an object in the list first."));
-            return;
-        }
-        const auto soid = record->id;
-        const auto voxels = record->voxels;
-        QMessageBox ask{QMessageBox::Question, tr("Erase object"),
-                        tr("Set every voxel of object %1 to background?").arg(soid),
-                        QMessageBox::Cancel, this};
-        ask.setInformativeText(tr("About %1 voxels at the scanned magnification. This is one undo step.").arg(voxels));
-        const auto * erase = ask.addButton(tr("Erase"), QMessageBox::DestructiveRole);
-        ask.exec();
-        if (ask.clickedButton() == erase) {
-            inv.eraseObject(soid, this);
-            refreshVisibleRows();
-        }
-    });
+    QObject::connect(&deleteButton, &QPushButton::clicked, this, &ObjectInventoryView::eraseCurrentEntry);
     QObject::connect(&magCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshStatus(); });
 
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
@@ -616,6 +600,43 @@ void ObjectInventoryView::showContextMenu(const QPoint & pos) {
     unmarkVisitedAction->setEnabled(have && model.visitedAt(row));
     markAboveAction->setEnabled(have);
     contextMenu.exec(table.viewport()->mapToGlobal(pos));
+}
+
+/* Erase the object on the current row.
+ *
+ * Reached from the button and from an application-wide shortcut, so that the false-positive
+ * loop — press . to go to the next object, look, erase it if it is not real — never needs the
+ * mouse. Focus is in a viewport for that whole loop, which is why the key is not scoped to
+ * this list: it acts on the row the list is on, which is the row . and , moved to.
+ *
+ * Still asks first, with Erase as the default button, so the keyboard path is the shortcut
+ * then Return. It is a chord rather than a bare key, it is confirmed, and it is one undo
+ * step — three separate chances to stop a stray keypress taking an object with it. */
+void ObjectInventoryView::eraseCurrentEntry() {
+    auto & inv = objinv::Inventory::singleton();
+    const auto * record = model.recordAt(currentRow());
+    if (record == nullptr) {
+        emit message(tr("Erase: select an object in the inventory first, or move to one with . and ,"));
+        return;
+    }
+    if (inv.state() == objinv::State::Scanning) {
+        emit message(tr("Erase: pause the inventory scan first."));
+        return;
+    }
+    const auto soid = record->id;
+    const auto voxels = record->voxels;
+    QMessageBox ask{QMessageBox::Question, tr("Erase object"),
+                    tr("Set every voxel of object %1 to background?").arg(soid),
+                    QMessageBox::Cancel, this};
+    ask.setInformativeText(tr("About %1 voxels at the scanned magnification. This is one undo step.").arg(voxels));
+    auto * erase = ask.addButton(tr("Erase"), QMessageBox::DestructiveRole);
+    ask.setDefaultButton(erase);
+    ask.setEscapeButton(QMessageBox::Cancel);
+    ask.exec();
+    if (ask.clickedButton() == erase) {
+        inv.eraseObject(soid, this);
+        refreshVisibleRows();
+    }
 }
 
 void ObjectInventoryView::jumpToNextEntry(const bool forward) {

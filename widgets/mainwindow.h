@@ -166,6 +166,7 @@ class MainWindow : public QMainWindow {
     // flood fill
     QAction *fill2dAction{};
     QAction *fill3dAction{};
+    QAction *eraseInventoryObjectAction{};
     QAction *dilateObjectAction{};
     QAction *erodeObjectAction{};
     QAction *fillMayLoadAction{};

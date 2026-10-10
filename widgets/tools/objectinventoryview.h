@@ -143,6 +143,8 @@ public:
      * table shows them — which, because sorting here is one-shot, is a fixed order that only
      * ever grows at the end. Caps at both ends rather than wrapping. */
     void jumpToNextEntry(bool forward);
+    // erase the current row's object, after asking — the Erase button and ⌘⌫ both land here
+    void eraseCurrentEntry();
     void jumpToRow(int row);
 
     void loadSettings();
