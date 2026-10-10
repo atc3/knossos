@@ -160,6 +160,11 @@ Q_OBJECT
      * mergelist for operations that only moved voxels — which is most of them, and the
      * mergelist is megabytes of text on a large annotation. */
     std::uint64_t graphRevision = 0;
+    /* Bumped only by a merge or an unmerge — narrower than graphRevision, which also moves
+     * when a click merely creates an object for a fragment it selected. Undo uses it to
+     * decide whether an operation that changed no voxels is still worth a step: a merge is,
+     * selecting something is not. */
+    std::uint64_t mergeRevision = 0;
     uint64_t hovered_subobject_id = 0;
     // Selection via subobjects touches all objects containing the subobject.
     uint64_t touched_subobject_id = 0;

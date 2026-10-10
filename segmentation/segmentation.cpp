@@ -104,8 +104,8 @@ Segmentation::Segmentation() {
         QObject::connect(this, signal, this, [this](){ ++graphRevision; });
     }
     QObject::connect(this, &Segmentation::changedRow, this, [this](int){ ++graphRevision; });
-    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; });
-    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; ++mergeRevision; });
+    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; ++mergeRevision; });
 }
 
 bool Segmentation::hasSegData() const {

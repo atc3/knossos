@@ -115,6 +115,7 @@ private:
     UndoEntry pending;
     int depth{0};
     std::uint64_t graphRevisionAtScopeStart{0};
+    std::uint64_t mergeRevisionAtScopeStart{0};
     bool droppedBecauseTooLarge{false};
 };
 

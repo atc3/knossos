@@ -180,6 +180,7 @@ void UndoStack::beginScope(const QString & description) {
     pending.objectHighestIndex = Segmentation::Object::highestIndex;
     pending.shapeInterpolation = ShapeInterpolation::singleton().saveState();
     graphRevisionAtScopeStart = seg.graphRevision;
+    mergeRevisionAtScopeStart = seg.mergeRevision;
 }
 
 /* Returns whether this call is the one that took the snapshot, so a caller that turns out
@@ -215,7 +216,15 @@ void UndoStack::accountForEntry(UndoEntry & entry) {
 }
 
 void UndoStack::endScope() {
-    if (--depth != 0 || pending.cubes.empty()) {
+    if (--depth != 0) {
+        return;
+    }
+    /* An operation that changed no voxels used to be dropped outright, which made merges
+     * impossible to undo: a merge is purely a change to the object graph, and the graph is
+     * already captured at scope start and restored by applyEntry(). So a voxel-less scope is
+     * kept when it merged or unmerged something — and only then, since a click that merely
+     * selected a fragment (creating an object for it) is not something to step back through. */
+    if (pending.cubes.empty() && Segmentation::singleton().mergeRevision == mergeRevisionAtScopeStart) {
         return;
     }
     accountForEntry(pending);
