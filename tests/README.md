@@ -203,6 +203,14 @@ coarsest level, 2272 distinct labels, 99.5% background — by decoding it indepe
 Python from the spec and requiring the two to agree byte for byte. That data is somebody
 else's and is not in the repository, so what is kept here is the synthetic round trip.
 
+The last section exercises `chunkIntoCube()`, the one function both the loader and the
+object inventory's sweep call to turn a fetched shard into a cube. It assembles a whole shard
+by hand — header, two compressed chunks, minishard index — and checks that a full chunk fills
+its cube voxel for voxel, that a chunk clipped at the far face lands in the cube's corner with
+the rest background rather than left over from before, and that a chunk the shard does not hold
+comes back *absent* while half a chunk comes back *corrupt*. The sweep counts those two
+differently, so confusing them would either hide damage or report it where there is none.
+
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/precomputed_test precomputed_test.cpp && /tmp/precomputed_test
 ```
