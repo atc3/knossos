@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <optional>
+
 /* Undo for segmentation edits, at cube granularity.
  *
  * Not a command model: nothing has to be expressed as an invertible operation, so a flood
@@ -64,6 +66,13 @@ struct UndoEntry {
     std::uint64_t subObjectHighestId{0}, objectHighestId{0}, objectHighestIndex{0};
     // key slices live in memory, not in the overlay, so they roll back with the voxels
     ShapeInterpolation::State shapeInterpolation;
+    /* A node placed in merge tracing mode, which undo removes before restoring the graph.
+     *
+     * Merge tracing merges as a side effect of placing a node: the node records which
+     * fragment it sits on, and the tree counts those. Restoring the graph alone would split
+     * the objects while the node went on claiming the fragment, so the node goes too. There
+     * is no skeleton undo to put it back, so a step like this cannot be redone. */
+    std::optional<std::uint64_t> placedNodeId;
     std::size_t bytes{0};
 };
 
@@ -93,6 +102,8 @@ public:
     void endScope();
     bool recordCube(std::size_t layerId, const CoordOfCube &, const void * rawCube);
     bool scopeOpen() const { return depth != 0; }
+    // marks the open scope as the placement of this merge tracing node; see UndoEntry
+    void notePlacedNode(const std::uint64_t nodeId) { if (depth != 0) { pending.placedNodeId = nodeId; } }
 
 signals:
     void changed();

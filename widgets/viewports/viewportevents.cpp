@@ -42,6 +42,8 @@
 #include "widgets/preferences/navigationtab.h"
 #include "widgets/mainwindow.h"
 
+#include "segmentation/undostack.h"
+
 #include <QApplication>
 #include <QMessageBox>
 #include <QStatusBar>
@@ -401,6 +403,13 @@ void ViewportOrtho::handleMouseButtonRight(const QMouseEvent *event) {
     if (Annotation::singleton().outsideMag1MovementArea(clickedCoordinate)) {
         return;
     }
+    /* In merge tracing, placing a node merges its fragment into the tree's object, so the
+     * placement is an undo step — undone by removing the node, which takes the merge with it.
+     * See UndoEntry::placedNodeId. */
+    std::optional<UndoScope> mergeTracingUndo;
+    if (annotationMode.testFlag(AnnotationMode::Mode_MergeTracing)) {
+        mergeTracingUndo.emplace(QObject::tr("Place node"));
+    }
     const quint64 subobjectId = readVoxel(clickedCoordinate);
     const bool background = subobjectId == Segmentation::singleton().getBackgroundId();
     if (annotationMode.testFlag(AnnotationMode::Mode_MergeTracing) && background && !event->modifiers().testFlag(Qt::ControlModifier)) {
@@ -473,6 +482,7 @@ void ViewportOrtho::handleMouseButtonRight(const QMouseEvent *event) {
     if (newNode) {
         if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_MergeTracing)) {
             Skeletonizer::singleton().setSubobjectSelectAndMergeWithPrevious(newNode.get(), subobjectId, oldNode);
+            UndoStack::singleton().notePlacedNode(newNode.get().nodeID);
         }
         // Move to the new node position
         if (state->viewerState->autoTracingMode != Recentering::Off) {
