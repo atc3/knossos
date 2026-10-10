@@ -341,4 +341,68 @@ inline bool decodeRaw(const std::uint8_t * data, const std::size_t bytes,
     return true;
 }
 
+
+enum class ChunkOutcome { Decoded, Absent, Corrupt };
+
+/* One KNOSSOS cube's worth of a precomputed volume, from the bytes fetched for it.
+ *
+ * Shared by the loader and the object inventory's sweep, which fetch the same thing and
+ * must agree on what it means. For a sharded volume `bytes` is the whole shard, so the
+ * chunk is found inside it first — 16 bytes per minishard at the front say where that
+ * minishard's index is, and the index gives each chunk's id, offset and size. Unsharded,
+ * `bytes` is the chunk itself.
+ *
+ * Absent means the shard's index does not mention the chunk, which for a segmentation is
+ * most of the volume: those chunks are empty and are simply not stored. `out` is filled
+ * with background either way. A chunk on the volume's far face is stored clipped rather
+ * than padded, so it lands in the cube's corner and the rest stays background. */
+inline ChunkOutcome chunkIntoCube(const Scale & scale, const int numChannels, const std::uint64_t grid[3],
+                                  const std::uint8_t * bytes, const std::size_t size,
+                                  const std::int32_t cubeShape[3], std::uint64_t * out) {
+    const auto cubeVoxels = static_cast<std::size_t>(cubeShape[0]) * cubeShape[1] * cubeShape[2];
+    std::fill(out, out + cubeVoxels, 0);
+    auto payload = bytes;
+    auto payloadSize = size;
+    if (scale.sharded) {
+        const auto target = shardFor(scale, grid);
+        const auto headerBytes = (std::uint64_t{1} << scale.minishardBits) * 16;
+        if (payloadSize < headerBytes) {
+            return ChunkOutcome::Absent;
+        }
+        const std::vector<std::uint8_t> header(bytes, bytes + headerBytes);
+        const auto indexRange = minishardIndexRange(header, target.minishard, scale.minishardBits);
+        if (indexRange.empty() || indexRange.end > payloadSize) {
+            return ChunkOutcome::Absent;
+        }
+        const std::vector<std::uint8_t> index(bytes + indexRange.begin, bytes + indexRange.end);
+        const auto at = chunkRange(index, target.chunkId, headerBytes);
+        if (at.empty() || at.end > payloadSize) {
+            return ChunkOutcome::Absent;
+        }
+        payload = bytes + at.begin;
+        payloadSize = at.size();
+    }
+    const std::int32_t extent[3]{scale.clippedExtent(0, static_cast<std::int64_t>(grid[0])),
+                                 scale.clippedExtent(1, static_cast<std::int64_t>(grid[1])),
+                                 scale.clippedExtent(2, static_cast<std::int64_t>(grid[2]))};
+    if (extent[0] > cubeShape[0] || extent[1] > cubeShape[1] || extent[2] > cubeShape[2]) {
+        return ChunkOutcome::Corrupt;// a chunk larger than the cube it is meant to fill
+    }
+    std::vector<std::uint64_t> voxels;
+    const auto decoded = scale.encoding == Encoding::CompressedSegmentation
+            ? decodeCompressedSegmentation(payload, payloadSize, extent, scale.csegBlock, 0, numChannels, voxels)
+            : scale.encoding == Encoding::Raw ? decodeRaw(payload, payloadSize, extent, voxels) : false;
+    if (!decoded) {
+        return ChunkOutcome::Corrupt;
+    }
+    for (int z = 0; z < extent[2]; ++z) {
+        for (int y = 0; y < extent[1]; ++y) {
+            const auto * src = voxels.data() + (static_cast<std::size_t>(z) * extent[1] + y) * extent[0];
+            auto * dst = out + (static_cast<std::size_t>(z) * cubeShape[1] + y) * cubeShape[0];
+            std::copy(src, src + extent[0], dst);
+        }
+    }
+    return ChunkOutcome::Decoded;
+}
+
 }

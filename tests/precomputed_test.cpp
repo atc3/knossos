@@ -257,6 +257,107 @@ int main() {
         check(precomputed::chunkRange({}, 5, 1000).empty(), "and an empty index finds nothing");
     }
 
+    section("one cube's worth, cut out of a whole shard");
+    {
+        /* chunkIntoCube() is what the loader and the object inventory's sweep both call, so
+         * this is the end-to-end path: find the chunk in the shard, decode it, place it.
+         * The shard is assembled here by hand — header, two chunks, then the minishard
+         * index — with one full chunk and one clipped at the volume's far face. */
+        precomputed::Scale scale;
+        scale.size[0] = 20; scale.size[1] = 12; scale.size[2] = 10;
+        scale.chunk[0] = 16; scale.chunk[1] = 8; scale.chunk[2] = 8;
+        scale.encoding = precomputed::Encoding::CompressedSegmentation;
+        scale.sharded = true;// one shard, one minishard: every chunk in the same index
+        const std::int32_t cubeShape[3]{16, 8, 8};
+        const std::int32_t block[3]{8, 8, 8};
+
+        const auto fill = [](const std::int32_t e[3], const std::uint64_t base){
+            std::vector<std::uint64_t> v(static_cast<std::size_t>(e[0]) * e[1] * e[2]);
+            for (std::size_t i = 0; i < v.size(); ++i) {
+                v[i] = (i % 7 == 0) ? 0 : base + i % 5;// background mixed in, a few labels
+            }
+            return v;
+        };
+        const std::uint64_t fullAt[3]{0, 0, 0};
+        const std::uint64_t edgeAt[3]{1, 1, 1};
+        const std::int32_t fullExtent[3]{16, 8, 8};
+        const std::int32_t edgeExtent[3]{scale.clippedExtent(0, 1), scale.clippedExtent(1, 1), scale.clippedExtent(2, 1)};
+        const auto fullVoxels = fill(fullExtent, 100);
+        const auto edgeVoxels = fill(edgeExtent, 900);
+        const auto fullBytes = encode(fullVoxels, fullExtent, block);
+        const auto edgeBytes = encode(edgeVoxels, edgeExtent, block);
+
+        const auto fullId = precomputed::shardFor(scale, fullAt).chunkId;
+        const auto edgeId = precomputed::shardFor(scale, edgeAt).chunkId;
+        std::vector<std::uint8_t> shard(16, 0);// the header, filled in once the index is placed
+        shard.insert(std::end(shard), std::begin(fullBytes), std::end(fullBytes));
+        shard.insert(std::end(shard), std::begin(edgeBytes), std::end(edgeBytes));
+        const auto index = le64({fullId, edgeId - fullId, 0, 0, fullBytes.size(), edgeBytes.size()});
+        const auto indexStart = shard.size() - 16;
+        shard.insert(std::end(shard), std::begin(index), std::end(index));
+        const auto header = le64({indexStart, indexStart + index.size()});
+        std::copy(std::begin(header), std::end(header), std::begin(shard));
+        check(fullId < edgeId, "the fixture lists its chunks in id order, as the format requires");
+
+        std::vector<std::uint64_t> cube(16 * 8 * 8, 77);// garbage, which must not survive
+        const auto at = [&cube](const int x, const int y, const int z){ return cube[(static_cast<std::size_t>(z) * 8 + y) * 16 + x]; };
+
+        check(precomputed::chunkIntoCube(scale, 1, fullAt, shard.data(), shard.size(), cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Decoded, "a full chunk is found and decoded");
+        bool fullMatches = true;
+        for (int z = 0; z < 8; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 16; ++x) {
+            fullMatches = fullMatches && at(x, y, z) == fullVoxels[idx(fullExtent, x, y, z)];
+        }
+        check(fullMatches, "and fills its cube voxel for voxel");
+
+        std::fill(std::begin(cube), std::end(cube), 77);
+        check(precomputed::chunkIntoCube(scale, 1, edgeAt, shard.data(), shard.size(), cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Decoded, "a chunk clipped at the far face decodes too");
+        bool cornerMatches = true, restIsBackground = true;
+        for (int z = 0; z < 8; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 16; ++x) {
+            const bool inside = x < edgeExtent[0] && y < edgeExtent[1] && z < edgeExtent[2];
+            if (inside) {
+                cornerMatches = cornerMatches && at(x, y, z) == edgeVoxels[idx(edgeExtent, x, y, z)];
+            } else {
+                restIsBackground = restIsBackground && at(x, y, z) == 0;
+            }
+        }
+        check(edgeExtent[0] == 4 && edgeExtent[1] == 4 && edgeExtent[2] == 2, "the clipped extent is what the volume leaves");
+        check(cornerMatches, "and lands in the cube's corner");
+        check(restIsBackground, "with the rest of the cube background, not left over from before");
+
+        const std::uint64_t missingAt[3]{1, 0, 0};
+        std::fill(std::begin(cube), std::end(cube), 77);
+        check(precomputed::chunkIntoCube(scale, 1, missingAt, shard.data(), shard.size(), cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Absent, "a chunk the shard does not hold is absent, not corrupt");
+        check(std::all_of(std::begin(cube), std::end(cube), [](const std::uint64_t v){ return v == 0; }),
+              "and leaves a background cube");
+
+        check(precomputed::chunkIntoCube(scale, 1, fullAt, shard.data(), 8, cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Absent, "a shard cut off inside its header holds nothing");
+        auto damaged = shard;
+        damaged.resize(16 + fullBytes.size() / 2);// the chunk itself cut in half, index gone
+        check(precomputed::chunkIntoCube(scale, 1, fullAt, damaged.data(), damaged.size(), cubeShape, cube.data())
+                  != precomputed::ChunkOutcome::Decoded, "a shard cut off before its index does not decode");
+        auto truncatedChunk = shard;
+        // keep the index intact but claim more bytes for the first chunk than were stored
+        const auto badIndex = le64({fullId, edgeId - fullId, 0, 0, fullBytes.size() / 2, edgeBytes.size()});
+        std::copy(std::begin(badIndex), std::end(badIndex), std::begin(truncatedChunk) + 16 + static_cast<std::ptrdiff_t>(indexStart));
+        check(precomputed::chunkIntoCube(scale, 1, fullAt, truncatedChunk.data(), truncatedChunk.size(), cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Corrupt, "half a chunk is corrupt, not absent");
+
+        precomputed::Scale unsharded = scale;
+        unsharded.sharded = false;
+        unsharded.encoding = precomputed::Encoding::Raw;
+        const auto raw = le64(fullVoxels);
+        check(precomputed::chunkIntoCube(unsharded, 1, fullAt, raw.data(), raw.size(), cubeShape, cube.data())
+                  == precomputed::ChunkOutcome::Decoded && cube[5] == fullVoxels[5],
+              "an unsharded chunk is the reply itself");
+        const std::int32_t smallCube[3]{8, 8, 8};
+        check(precomputed::chunkIntoCube(unsharded, 1, fullAt, raw.data(), raw.size(), smallCube, cube.data())
+                  == precomputed::ChunkOutcome::Corrupt, "a chunk larger than its cube is refused rather than overrun");
+    }
+
     std::printf("\n%s\n", failures == 0 ? "all ok" : (std::to_string(failures) + " failed").c_str());
     return failures == 0 ? 0 : 1;
 }
