@@ -62,9 +62,12 @@ inline bool parseInfo(const QByteArray & json, Dataset::Precomputed & out, QStri
         why = QObject::tr("not a neuroglancer_multiscale_volume");
         return false;
     }
+    /* uint64 only. The decoders read 64-bit labels — compressed_segmentation's label table
+     * two words per entry, raw eight bytes per voxel — so accepting uint32 here, as this used
+     * to, decoded every uint32 volume as wrong ids or as nothing at all, without a word. */
     const auto dataType = root["data_type"].toString();
-    if (dataType != "uint64" && dataType != "uint32" && dataType != "uint16" && dataType != "uint8") {
-        why = QObject::tr("a segmentation of type %1 is not supported").arg(dataType);
+    if (dataType != "uint64") {
+        why = QObject::tr("segmentations of type %1 cannot be read yet, only uint64").arg(dataType);
         return false;
     }
     out.numChannels = std::max(1, root["num_channels"].toInt(1));
@@ -82,6 +85,13 @@ inline bool parseInfo(const QByteArray & json, Dataset::Precomputed & out, QStri
         }
         const auto chunk = chunks.first().toArray();
         for (int a = 0; a < 3; ++a) {
+            /* A volume that does not start at the origin would be drawn shifted by its offset:
+             * KNOSSOS cube 0 maps to chunk 0, which sits at voxel_offset, not at 0. Refused
+             * until the offset is honoured, rather than shown misaligned with the EM. */
+            if (offset.size() == 3 && static_cast<std::int64_t>(offset.at(a).toDouble()) != 0) {
+                why = QObject::tr("volumes with a non-zero voxel_offset cannot be read yet");
+                return false;
+            }
             scale.size[a] = static_cast<std::int64_t>(size.at(a).toDouble());
             scale.chunk[a] = static_cast<std::int32_t>(chunk.at(a).toDouble());
             scale.voxelOffset[a] = offset.size() == 3 ? static_cast<std::int64_t>(offset.at(a).toDouble()) : 0;
@@ -110,6 +120,14 @@ inline bool parseInfo(const QByteArray & json, Dataset::Precomputed & out, QStri
             scale.shardBits = sharding["shard_bits"].toInt();
             scale.shardedIndexGzip = sharding["minishard_index_encoding"].toString() == "gzip";
             scale.shardedDataGzip = sharding["data_encoding"].toString() == "gzip";
+            /* Nothing inflates these yet, so a gzip index would be walked as if it were the raw
+             * delta table — every chunk "absent", the layer silently empty — and gzip data fed
+             * straight to the decoder. gzip is the default index encoding in the common export
+             * tools, so this is refused loudly rather than met quietly. */
+            if (scale.shardedIndexGzip || scale.shardedDataGzip) {
+                why = QObject::tr("gzip-compressed shards cannot be read yet");
+                return false;
+            }
         }
         out.scales.push_back(scale);
     }
