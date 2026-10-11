@@ -32,6 +32,7 @@
 #include <QBrush>
 #include <QHeaderView>
 #include <QKeySequence>
+#include <QShortcut>
 #include <QMessageBox>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -320,8 +321,8 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     rescanButton.setToolTip(tr("Throw the list away and read the layer again."));
     deleteButton.setToolTip(tr("Set every voxel of the selected object to background, for removing a\n"
                                "false positive outright. Walks the object's own bounding box and is\n"
-                               "one undo step. %1 does the same from anywhere, on the object . and ,\n"
-                               "last moved to.").arg(QKeySequence(Qt::CTRL + Qt::Key_Backspace).toString(QKeySequence::NativeText)));
+                               "one undo step. Delete or Backspace does it while this list has focus, and\n"
+                               "%1 from anywhere, on the object . and , last moved to.").arg(QKeySequence(Qt::CTRL + Qt::Key_Backspace).toString(QKeySequence::NativeText)));
     annotationButton.setToolTip(tr("List what this annotation has painted, rather than what the dataset stores.\n"
                                    "Reads the blocks you have edited — no network, and it sees unsaved work,\n"
                                    "but nothing that was already baked into the volume."));
@@ -427,6 +428,17 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     QObject::connect(&rescanButton, &QPushButton::clicked, this, [&inv]() { inv.rescan(); });
     QObject::connect(&annotationButton, &QPushButton::clicked, this, [this, &inv]() { inv.scanAnnotation(this); });
     QObject::connect(&deleteButton, &QPushButton::clicked, this, &ObjectInventoryView::eraseCurrentEntry);
+    /* Delete and Backspace erase the highlighted object while the list has focus.
+     *
+     * Scoped to the list rather than the whole pane or the application: in the pane they
+     * would take Backspace away from the minimum-size box, and in the viewports Delete
+     * already deletes the active node and Backspace a key slice. Cmd+Backspace is the
+     * application-wide form, for when focus is in a viewport after pressing . and ,. */
+    for (const auto key : {Qt::Key_Delete, Qt::Key_Backspace}) {
+        auto * shortcut = new QShortcut(QKeySequence(key), &table, nullptr, nullptr, Qt::WidgetWithChildrenShortcut);
+        shortcut->setAutoRepeat(false);
+        QObject::connect(shortcut, &QShortcut::activated, this, &ObjectInventoryView::eraseCurrentEntry);
+    }
     QObject::connect(&magCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshStatus(); });
 
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
