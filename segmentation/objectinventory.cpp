@@ -83,7 +83,10 @@ QString stateName(const State s) {
 namespace {
 
 constexpr auto CACHE_MAGIC = "KNOSINV";
-constexpr quint32 CACHE_VERSION = 1;
+/* 2 adds the blocks completed ahead of the cursor, after the records; see SweepCursor::
+ * completedAhead(). Version 1 files are still read — they simply have none, which is what
+ * they were written assuming — so existing scans survive the change. */
+constexpr quint32 CACHE_VERSION = 2;
 constexpr int CACHE_HEADER_BYTES = 128;
 constexpr quint64 BYTES_PER_CUBE_GUESS = 150 * 1024;// what a compressed overlay block runs to
 constexpr int GIVE_UP_AFTER = 3;                    // retries per block
@@ -183,6 +186,7 @@ QString cacheDir() {
 
 struct CacheContents {
     std::vector<Record> records;
+    std::vector<std::uint64_t> completedAhead;
     quint64 cursor{0};
     quint64 cubesDone{0}, cubesAbsent{0}, cubesEmpty{0}, cubesCorrupt{0};
     qint64 scannedAt{0};
@@ -206,7 +210,7 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
     }
     quint32 version{0}, recordSize{0};
     in >> version >> recordSize;
-    if (version != CACHE_VERSION || recordSize != sizeof(Record)) {
+    if ((version != CACHE_VERSION && version != 1) || recordSize != sizeof(Record)) {
         return out;// a newer or older layout; rescanning is cheaper than translating
     }
     char keyHash[20]{};
@@ -231,18 +235,37 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
        >> recordCount >> out.scannedAt >> complete >> truncated;
 
     const auto expected = static_cast<qint64>(recordCount) * static_cast<qint64>(sizeof(Record));
-    if (file.size() != CACHE_HEADER_BYTES + expected + static_cast<qint64>(sizeof(quint32))) {
-        return out;
-    }
     const auto blob = file.read(expected);
     if (blob.size() != expected) {
+        return out;
+    }
+    QByteArray aheadBlob;
+    if (version >= 2) {
+        quint64 aheadCount{0};
+        QDataStream countIn(file.read(sizeof(quint64)));
+        countIn.setByteOrder(QDataStream::LittleEndian);
+        countIn >> aheadCount;
+        if (aheadCount > 1u << 20) {
+            return out;// far more than could ever be in flight; the file is damaged
+        }
+        aheadBlob = file.read(static_cast<qint64>(aheadCount * sizeof(quint64)));
+        if (aheadBlob.size() != static_cast<int>(aheadCount * sizeof(quint64))) {
+            return out;
+        }
+        out.completedAhead.resize(aheadCount);
+        if (aheadCount != 0) {
+            std::memcpy(out.completedAhead.data(), aheadBlob.constData(), static_cast<std::size_t>(aheadBlob.size()));
+        }
+    }
+    if (file.size() != file.pos() + static_cast<qint64>(sizeof(quint32))) {
         return out;
     }
     quint32 storedCrc{0};
     QDataStream crcIn(file.read(sizeof(quint32)));
     crcIn.setByteOrder(QDataStream::LittleEndian);
     crcIn >> storedCrc;
-    if (storedCrc != qChecksum(blob.constData(), static_cast<uint>(blob.size()))) {
+    const auto checked = blob + aheadBlob;// version 1 has no ahead blob, so this is unchanged for it
+    if (storedCrc != qChecksum(checked.constData(), static_cast<uint>(checked.size()))) {
         return out;
     }
     out.records.resize(recordCount);
@@ -278,15 +301,24 @@ bool writeCacheFile(const QString & path, const Dataset & layer, const int mag, 
     }
     file.write(header);
     const auto bytes = static_cast<qint64>(c.records.size() * sizeof(Record));
-    if (bytes != 0) {
-        file.write(reinterpret_cast<const char *>(c.records.data()), bytes);
+    QByteArray checked(reinterpret_cast<const char *>(c.records.data()), static_cast<int>(bytes));
+    QByteArray count;
+    {
+        QDataStream out(&count, QIODevice::WriteOnly);
+        out.setByteOrder(QDataStream::LittleEndian);
+        out << static_cast<quint64>(c.completedAhead.size());
     }
+    const QByteArray ahead(reinterpret_cast<const char *>(c.completedAhead.data()),
+                           static_cast<int>(c.completedAhead.size() * sizeof(std::uint64_t)));
+    file.write(checked);
+    file.write(count);
+    file.write(ahead);
+    checked += ahead;
     QByteArray crc;
     {
         QDataStream out(&crc, QIODevice::WriteOnly);
         out.setByteOrder(QDataStream::LittleEndian);
-        out << static_cast<quint32>(qChecksum(reinterpret_cast<const char *>(c.records.data()),
-                                              static_cast<uint>(bytes)));
+        out << static_cast<quint32>(qChecksum(checked.constData(), static_cast<uint>(checked.size())));
     }
     file.write(crc);
     return file.commit();
@@ -477,6 +509,7 @@ void Scanner::startScan(ScanSpec s) {
     attempts.clear();
     consecutiveGiveUps = 0;
     scheduledRetries = 0;
+    ++scanGeneration;// retries scheduled by an earlier scan must not count against this one
     warnedAllAbsent = false;
 
     // pick up where a previous run left off, if the cache is still valid
@@ -489,6 +522,8 @@ void Scanner::startScan(ScanSpec s) {
         cubesCorrupt = cached.cubesCorrupt;
         acc.adopt(std::move(records));
         sweep.init(cached.cursor, span, covers());
+        // the records already hold these blocks; walking them again would count them twice
+        sweep.restoreCompleted(cached.completedAhead, covers());
     } else {
         sweep.init(spec.startCursor, span, covers());
     }
@@ -702,7 +737,14 @@ void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) 
             if (tries <= GIVE_UP_AFTER) {
                 const int delay = 1000 * (1 << (2 * (tries - 1)));// 1s, 4s, 16s
                 ++scheduledRetries;
-                QTimer::singleShot(delay, this, [this, cube, code]() {
+                /* Tagged with the scan that scheduled it. A timer outlives cancel() and stop(),
+                 * and startScan() zeroes the counter, so without the tag an old retry would
+                 * drive it to -1 — the completion test wants exactly 0, so the sweep would sit
+                 * at 100% for good — and fetch a block from the previous scan into this one. */
+                QTimer::singleShot(delay, this, [this, cube, code, generation = scanGeneration]() {
+                    if (generation != scanGeneration) {
+                        return;
+                    }
                     --scheduledRetries;
                     if (running && inFlight.count(code) == 0) {
                         requestRemote(cube, code);
@@ -880,6 +922,7 @@ void Scanner::writeCache(const bool complete) {
     CacheContents c;
     c.records = acc.records();
     c.cursor = sweep.position();
+    c.completedAhead = sweep.completedAhead();
     c.cubesDone = cubesDone;
     c.cubesAbsent = cubesAbsent;
     c.cubesEmpty = cubesEmpty;
@@ -1353,8 +1396,18 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
         return false;
     }
     const auto record = recs[*at];// by value: the walk below moves the crosshair and loads blocks
-    const Coordinate first{record.bboxMin[0], record.bboxMin[1], record.bboxMin[2]};
-    const Coordinate last{record.bboxMax[0], record.bboxMax[1], record.bboxMax[2]};
+    /* The stored box is in coarse voxels at the scan magnification: bboxMax is the *origin*
+     * of the last one, so the object runs up to step - 1 voxels past it on each high face.
+     * And downsampling can drop a thin rim entirely, so one more coarse voxel on every side.
+     * Only voxels carrying this id are touched, so a box a little too big costs a few reads
+     * and nothing else, where one too small leaves a slab of the object behind. */
+    const auto step = std::max(1, mag);
+    const auto & bound = layer.boundary;
+    const Coordinate first{std::max(0, record.bboxMin[0] - step), std::max(0, record.bboxMin[1] - step),
+                           std::max(0, record.bboxMin[2] - step)};
+    const Coordinate last{std::min(bound.x - 1, record.bboxMax[0] + 2 * step - 1),
+                          std::min(bound.y - 1, record.bboxMax[1] + 2 * step - 1),
+                          std::min(bound.z - 1, record.bboxMax[2] + 2 * step - 1)};
 
     const auto cubeExtent = layer.scaleFactor.componentMul(layer.cubeShape);
     const auto cubeBegin = layer.global2cube(first);

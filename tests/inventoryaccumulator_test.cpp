@@ -259,6 +259,55 @@ int main() {
         const auto settled = cursor.position();
         cursor.complete(code, covers);
         check(cursor.position() == settled, "completing the same block twice moves nothing");
+
+        /* The checkpoint double count. Records include every block that has completed, but
+         * the cursor stops at the lowest one still in flight — so a resume from the position
+         * alone ingests the blocks that finished ahead of it a second time. With four in
+         * flight and completions in random order, then a stop at a random moment that drops
+         * whatever is still in flight, the blocks ingested across both runs must be exactly
+         * the real ones, each once — and resuming from the position alone must not manage it,
+         * or this test would not be telling the two apart. */
+        std::mt19937 rng(424242);
+        bool exactlyOnce = true, oldWayDoubles = false;
+        for (int trial = 0; trial < 300; ++trial) {
+            std::map<std::uint64_t, int> ingested;
+            objinv::SweepCursor live;
+            live.init(0, span, covers);
+            std::vector<std::uint64_t> flight;
+            const auto stopAfter = static_cast<int>(rng() % 9);
+            int completions = 0;
+            while (completions < stopAfter) {
+                while (flight.size() < 4 && live.next(code, covers)) { flight.push_back(code); }
+                if (flight.empty()) { break; }
+                const auto pick = rng() % flight.size();
+                const auto done = flight[pick];
+                flight.erase(flight.begin() + static_cast<long>(pick));
+                live.complete(done, covers);
+                ++ingested[done];
+                ++completions;
+            }
+            const auto savedAt = live.position();
+            const auto savedAhead = live.completedAhead();
+            // the in-flight blocks are dropped, as abortInFlight() does
+
+            auto resumeFrom = [&](const bool withAhead) {
+                auto counts = ingested;
+                objinv::SweepCursor resumed;
+                resumed.init(savedAt, span, covers);
+                if (withAhead) { resumed.restoreCompleted(savedAhead, covers); }
+                while (resumed.next(code, covers)) {
+                    resumed.complete(code, covers);
+                    ++counts[code];
+                }
+                bool ok = resumed.finished() && counts.size() == 9;
+                for (const auto & entry : counts) { ok = ok && covers(entry.first) && entry.second == 1; }
+                return ok;
+            };
+            exactlyOnce = exactlyOnce && resumeFrom(true);
+            oldWayDoubles = oldWayDoubles || !resumeFrom(false);
+        }
+        check(exactlyOnce, "a resume with the completed-ahead set ingests every block exactly once");
+        check(oldWayDoubles, "and resuming from the position alone does not, which is the bug this guards");
     }
 
     section("the tally matches a per-voxel reference");

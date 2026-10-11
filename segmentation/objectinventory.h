@@ -206,6 +206,7 @@ private:
     int consecutiveGiveUps{0};
     bool warnedAllAbsent{false};
     int scheduledRetries{0};      // blocks waiting out a backoff, so the walk is not yet done
+    std::uint64_t scanGeneration{0};// tags retry timers with their scan; see requestRemote()
     bool running{false}, paused{false}, loaderBusy{false}, stepQueued{false};
 
     std::size_t emitted{0};

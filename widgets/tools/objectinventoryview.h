@@ -128,6 +128,7 @@ class ObjectInventoryView : public QWidget {
     QPushButton reorderButton{tr("↻")};
 
     QTreeView table;
+    bool sawScanning{false};// was the inventory scanning at the last state change
     ObjectInventoryModel model;
     QLabel statusLabel;
     QMenu contextMenu;

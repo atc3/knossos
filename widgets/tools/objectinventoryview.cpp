@@ -460,7 +460,18 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     QObject::connect(&inv, &objinv::Inventory::recordsRevised, this, [this](const quint64 first, const quint64 last) {
         model.onRevised(first, last);
     });
-    QObject::connect(&inv, &objinv::Inventory::stateChanged, this, [this]() {
+    QObject::connect(&inv, &objinv::Inventory::stateChanged, this, [this, &inv]() {
+        /* Rows are filtered as records arrive, and a record's voxel count keeps growing as
+         * later blocks find more of it — so an object first met as a 20-voxel sliver stays
+         * filtered out by a 500-voxel minimum even once it has grown to 50 000. Re-filtering
+         * on every revision would reshuffle the list under the walk; doing it when a scan
+         * stops (finished, paused, stalled) catches every such object, and the rebuild keeps
+         * the current row, so . and , carry on from where they were. */
+        const auto scanningNow = inv.state() == objinv::State::Scanning;
+        if (sawScanning && !scanningNow && minVoxelsSpin.value() > 0) {
+            applyFilterFromControls();
+        }
+        sawScanning = scanningNow;
         refreshControls();
         refreshStatus();
     });

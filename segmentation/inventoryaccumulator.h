@@ -396,6 +396,23 @@ public:
     }
 
     std::uint64_t position() const { return at; }
+    /* The indices completed out of order, ahead of position(). A checkpoint has to keep these
+     * alongside the position: the records already include their contributions, so a resume
+     * that walked from position() without knowing them would ingest those blocks twice. */
+    std::vector<std::uint64_t> completedAhead() const {
+        std::vector<std::uint64_t> codes(std::begin(done), std::end(done));
+        std::sort(std::begin(codes), std::end(codes));
+        return codes;
+    }
+    // Restores completedAhead() from a checkpoint, after init() at the checkpoint's position.
+    template<typename Covers>
+    void restoreCompleted(const std::vector<std::uint64_t> & codes, Covers covers) {
+        for (const auto code : codes) {
+            if (code < end) {
+                complete(code, covers);
+            }
+        }
+    }
     bool finished() const { return at >= end; }
     // Everything has been handed out; whatever is left is outstanding, not unstarted.
     bool exhausted() const { return issued >= end; }
@@ -405,7 +422,9 @@ public:
     template<typename Covers>
     bool next(std::uint64_t & code, Covers covers) {
         if (issued < at) { issued = at; }
-        while (issued < end && !covers(issued)) { ++issued; }
+        // skip padding, and anything already completed — after a restore, blocks ahead of the
+        // position can be done before they were ever issued in this run
+        while (issued < end && (!covers(issued) || done.count(issued) != 0)) { ++issued; }
         if (issued >= end) {
             return false;
         }
