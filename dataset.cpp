@@ -35,6 +35,7 @@
 #include <QRegularExpression>
 #include <QStringList>
 #include <QTextStream>
+#include <QDateTime>
 #include <QUrlQuery>
 
 #include <boost/assign.hpp>
@@ -660,7 +661,11 @@ QNetworkRequest freshened(QNetworkRequest request) {
      * parameter with the same object — and the one whose caching prompted it. Other servers
      * carry their own auth tokens in the query and are left exactly as they were. */
     const bool gcs = host == "storage.googleapis.com" || host.endsWith(".storage.googleapis.com");
-    if (generation == 0 || url.isEmpty() || !gcs) {
+    /* `generation` is the millisecond time of the reload, so it also says when to stop: the
+     * edge can only be stale for its max-age, an hour, after which plain requests are safe
+     * again and should get its speed back — in this session too, not only after a restart. */
+    const auto age = QDateTime::currentMSecsSinceEpoch() - static_cast<qint64>(generation);
+    if (generation == 0 || age > 3600 * 1000 || url.isEmpty() || !gcs) {
         return request;
     }
     QUrlQuery query{url};
