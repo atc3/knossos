@@ -106,8 +106,14 @@ void ViewportOrtho::mousePressEvent(QMouseEvent *event) {
     strokeSoid = 0;
     strokeThreeDim = false;
     if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Brush)) {
+        /* Merge mode clicks, and Alt + click in paint mode, merge rather than paint — see
+         * merging() — with Shift meaning unmerge. They share this scope, so the History
+         * window names the step for what it does. */
+        const auto mode = Annotation::singleton().annotationMode;
+        const bool merges = mode.testFlag(AnnotationMode::ObjectMerge) || event->modifiers().testFlag(Qt::AltModifier);
         paintUndoScope = std::make_unique<UndoScope>(
-                    Segmentation::singleton().brush.isInverse() || Segmentation::singleton().paintingBackground() ? tr("Erase") : tr("Brush stroke"));
+                    merges ? (event->modifiers().testFlag(Qt::ShiftModifier) ? tr("Unmerge") : tr("Merge"))
+                    : Segmentation::singleton().brush.isInverse() || Segmentation::singleton().paintingBackground() ? tr("Erase") : tr("Brush stroke"));
     }
     ViewportBase::mousePressEvent(event);
 }

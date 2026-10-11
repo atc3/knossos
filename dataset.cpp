@@ -35,6 +35,7 @@
 #include <QRegularExpression>
 #include <QStringList>
 #include <QTextStream>
+#include <QDateTime>
 #include <QUrlQuery>
 
 #include <boost/assign.hpp>
@@ -64,6 +65,7 @@ QString Dataset::compressionString() const {
     case Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_64: return "64 bit id";
     case Dataset::CubeType::SEGMENTATION_SZ_ZIP: return "seg.sz.zip";
     case Dataset::CubeType::SNAPPY: return "snappy";
+    case Dataset::CubeType::SEGMENTATION_PRECOMPUTED: return "precomputed";
     }
     throw std::runtime_error(QObject::tr("no compressions string for %1").arg(static_cast<int>(type)).toUtf8()); ;
 }
@@ -80,6 +82,8 @@ QString Dataset::apiString() const {
         return "PyKnossos";
     case Dataset::API::WebKnossos:
         return "WebKnossos";
+    case Dataset::API::NeuroglancerPrecomputed:
+        return "Neuroglancer precomputed";
     }
     throw std::runtime_error(QObject::tr("no api string for %1").arg(static_cast<int>(type)).toUtf8()); ;
 }
@@ -127,7 +131,7 @@ bool Dataset::mayUseCdnAuth(const QUrl & url) {
     return !google;
 }
 
-Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_snappy) {
+Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_snappy, const bool fetchAuth) {
     Dataset::list_t infos;
     if (Dataset::isWebKnossos(url)) {
         infos = Dataset::parseWebKnossosJson(url, data);
@@ -138,7 +142,7 @@ Dataset::list_t Dataset::parse(const QUrl & url, const QString & data, bool add_
     } else if (Dataset::isPyKnossos(url)) {
         infos = Dataset::parsePyKnossosConf(url, data);
     } else if (Dataset::isToml(url)) {
-        infos = Dataset::parseToml(url, data);
+        infos = Dataset::parseToml(url, data, fetchAuth);
     } else {
         infos = Dataset::fromLegacyConf(url, data);
     }
@@ -314,7 +318,7 @@ Dataset::list_t Dataset::parsePyKnossosConf(const QUrl & configUrl, QString conf
 
 extern toml::value toml_parse(const std::vector<unsigned char> & blob, const std::string & filename);
 
-Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
+Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData, const bool fetchAuth) {
     const auto data = configData.toStdString();
     auto config = toml_parse({std::cbegin(data), std::cend(data)}, configUrl.toString().toStdString());
     Dataset::list_t infos;
@@ -362,7 +366,7 @@ Dataset::list_t Dataset::parseToml(const QUrl & configUrl, QString configData) {
         // annotation on a pre-segmented volume doesn't hand out ids that are already taken
         info.maxId = static_cast<std::uint64_t>(toml::find_or<std::int64_t>(vit, "MaxId", 0));
 
-        if (info.url.scheme() == "https" && mayUseCdnAuth(info.url) && !failfast) {
+        if (fetchAuth && info.url.scheme() == "https" && mayUseCdnAuth(info.url) && !failfast) {
             QUrl authurl;
             authurl.setScheme(info.url.scheme());
             authurl.setHost(info.url.host());
@@ -645,6 +649,34 @@ QNetworkRequest Dataset::precomputedRequest(const CoordOfCube cubeCoord, bool & 
     return QNetworkRequest{base};
 }
 
+std::atomic<std::uint64_t> Dataset::freshness{0};
+
+namespace {
+// adds the edge-cache buster to a request for a file in a Google Cloud Storage bucket
+QNetworkRequest freshened(QNetworkRequest request) {
+    const auto generation = Dataset::freshness.load();
+    auto url = request.url();
+    const auto host = url.host();
+    /* Only GCS: it is the server this was confirmed against — it answers an unknown query
+     * parameter with the same object — and the one whose caching prompted it. Other servers
+     * carry their own auth tokens in the query and are left exactly as they were. */
+    const bool gcs = host == "storage.googleapis.com" || host.endsWith(".storage.googleapis.com");
+    /* `generation` is the millisecond time of the reload, so it also says when to stop: the
+     * edge can only be stale for its max-age, an hour, after which plain requests are safe
+     * again and should get its speed back — in this session too, not only after a restart. */
+    const auto age = QDateTime::currentMSecsSinceEpoch() - static_cast<qint64>(generation);
+    if (generation == 0 || age > 3600 * 1000 || url.isEmpty() || !gcs) {
+        return request;
+    }
+    QUrlQuery query{url};
+    query.removeAllQueryItems("knossos_fresh");
+    query.addQueryItem("knossos_fresh", QString::number(generation));
+    url.setQuery(query);
+    request.setUrl(url);
+    return request;
+}
+}
+
 QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     switch (api) {
     case API::GoogleBrainmaps: {
@@ -654,11 +686,11 @@ QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     }
     case API::Heidelbrain:
     case API::PyKnossos: {
-        return QNetworkRequest{knossosCubeUrl(cubeCoord)};
+        return freshened(QNetworkRequest{knossosCubeUrl(cubeCoord)});
     }
     case API::NeuroglancerPrecomputed: {
         bool inVolume = false;
-        return precomputedRequest(cubeCoord, inVolume);
+        return freshened(precomputedRequest(cubeCoord, inVolume));
     }
     case API::OpenConnectome:
         return QNetworkRequest{openConnectomeCubeUrl(cubeCoord)};

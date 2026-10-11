@@ -28,6 +28,15 @@ downward shifts the origin so painted voxels keep reading back at the same globa
 coordinate, that the origin stays on the magnification lattice, erase accounting, and
 `shrinkToFit`.
 
+It also covers `siReachedBlocks`, which decides which blocks of the volume a mask actually
+reaches into so the write walk can skip the rest. That matters for speed — a block nothing
+is written to never enters the loader's cache, so every subsequent slice fetched it again,
+which for a wide object was gigabytes of downloads to write nothing — but a block wrongly
+cleared means part of the object is silently never written. So it is checked against a
+brute-force reference that maps every set voxel to its block, over 400 randomised masks
+with magnifications and grid origins that deliberately do not line up, plus an assertion
+that it never clears a block holding part of the mask.
+
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/sislice_test sislice_test.cpp && /tmp/sislice_test
 ```
@@ -90,6 +99,82 @@ ring as open.
 c++ -std=c++17 -O2 -I .. -o /tmp/holefill_test holefill_test.cpp && /tmp/holefill_test
 ```
 
+## inventoryaccumulator_test
+
+Exercises `segmentation/inventoryaccumulator.h`, the tally behind the object inventory: the
+Z-order sweep, the block-to-magnification-1 coordinate arithmetic, and the choice of which
+voxel to remember per object.
+
+Two properties are worth having pinned. The first is that the stored position is a real
+voxel of its object: the mean of a bent shape sits outside it, so a centroid would send
+"next object" to empty neuropil beside a vessel rather than into it — there is a test with
+an L-shaped object asserting that its mean is *not* on it while the stored position is. The
+second is that the answer does not depend on the order blocks arrive in, since they arrive
+over minutes, out of order, and across restarts; the test shuffles them and requires every
+object to come out identical, and separately checks that a scan resumed halfway from the
+cache matches one that never stopped.
+
+The block-count checks also pin the real dataset sizes the feature was designed around
+(1344 blocks at 8× for the largest volume, 880 at magnification 1 for a crop), because
+those numbers are what the scan budget is set against.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/invacc_test inventoryaccumulator_test.cpp && /tmp/invacc_test
+```
+
+## inventoryfilter_test
+
+Exercises `widgets/tools/inventoryfilter.h`, which decides what the Inventory tab shows and
+where the next/previous keys go.
+
+The guarantee the feature rests on is that pressing "next" twenty times shows twenty
+different objects, once each, while a sweep is still appending to the list underneath. So
+the central test is a randomised one: 200 scans built batch by batch must produce exactly
+what rebuilding the row list from scratch would, since any divergence means the key silently
+skips objects. It also pins that the row list stays strictly increasing, that a batch
+contributing nothing reports nothing (so no row-insertion signal is emitted), that raising
+the minimum size mid-walk resumes at the next surviving object instead of jumping back to
+the top, and that the walk caps at both ends rather than wrapping — at this list length a
+silent wrap is indistinguishable from the key having done nothing.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/invfilter_test inventoryfilter_test.cpp && /tmp/invfilter_test
+```
+
+## planarwrite_test
+
+Exercises `segmentation/planarwrite.h`, which works out the blocks one slice of an
+interpolation has to be written into and where in each. It is integer arithmetic over three
+axes in an order that changes with the viewing plane, a magnification lattice the block grid
+need not line up with, and a movement area whose upper bound is exclusive — and a mistake
+in it does not crash or warn, it quietly leaves part of the object unwritten.
+
+The central check is an equivalence one. Leaving out blocks the mask does not reach is a
+large speed-up, because a block nothing is written to never enters the loader's cache and
+so gets fetched again for every later slice. To show that the fast plan writes the same
+result as the exhaustive one, the test runs both through a simulated volume — stepping the
+lattice the way `processRegion` does, from the block's origin and capped to the region — and
+requires the two to come out identical, over 300 randomised cases covering magnifications
+1/2/4, block shapes that are not powers of two, mask origins off the block grid, and all
+three slice orientations.
+
+Density is what decides whether a mistake here is visible, so the randomised shapes include
+blobs (whole blocks fall empty, which is what the skip is for), salt and pepper (a *single*
+isolated voxel in a block, which catches any test for "reached" stricter than "at least
+one"), and a solid fill as the control where nothing may be skipped. There is also an
+explicit lone-voxel case at each magnification.
+
+Worth knowing if you change this: the test was checked by mutation, and the first two
+mutations tried — shortening the scan run by one, and requiring two set voxels — were *not*
+caught, because the shapes in the original version were too dense to expose them. The sparse
+shapes above were added for that reason. Mutations now caught include an off-by-one in the
+block index, not examining the last mask row, requiring a run longer than one voxel, and
+treating the movement area's maximum as inclusive.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/planarwrite_test planarwrite_test.cpp && /tmp/planarwrite_test
+```
+
 ## precomputed_test
 
 Exercises `segmentation/precomputed.h`, which reads a Neuroglancer precomputed
@@ -118,6 +203,88 @@ coarsest level, 2272 distinct labels, 99.5% background — by decoding it indepe
 Python from the spec and requiring the two to agree byte for byte. That data is somebody
 else's and is not in the repository, so what is kept here is the synthetic round trip.
 
+The last section exercises `chunkIntoCube()`, the one function both the loader and the
+object inventory's sweep call to turn a fetched shard into a cube. It assembles a whole shard
+by hand — header, two compressed chunks, minishard index — and checks that a full chunk fills
+its cube voxel for voxel, that a chunk clipped at the far face lands in the cube's corner with
+the rest background rather than left over from before, and that a chunk the shard does not hold
+comes back *absent* while half a chunk comes back *corrupt*. The sweep counts those two
+differently, so confusing them would either hide damage or report it where there is none.
+
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/precomputed_test precomputed_test.cpp && /tmp/precomputed_test
+```
+
+## morphology_test
+
+Exercises `segmentation/morphology.h`, which dilates, erodes and smooths one object in 3D.
+It is a port of Paintera's morph package, so the test's job is partly to pin the decisions
+that were carried over and would otherwise be invisible choices.
+
+The separable Voronoi distance transform is the part worth testing hardest: three axis
+passes that have to compose into a real 3-D answer, with an argmin threaded through each of
+them, and when it is wrong it is wrong by a voxel or two in a way that looks entirely
+plausible on screen. So it is checked against brute force — every voxel against every seed —
+over randomised blocks with anisotropic spacing, and the reported nearest voxel has to
+*achieve* the minimum rather than be the particular one brute force found first, because
+ties are legitimate and common. Dilate and erode are then checked the same way, including
+that a voxel survives erosion exactly when nothing outside the object is within the radius.
+
+Two properties are worth having pinned for their own sake. The radius is a *length*: there
+is a case with one voxel on 10×10×40 nm sampling where a 20 nm radius reaches two voxels
+sideways, none at all through the section, and the 14.1 nm diagonal but not the 22.4 nm one.
+And a merged object grows as its own fragments — two fragments of one selection must each
+claim the voxels nearer to them, rather than the whole group collapsing onto one id, which
+is what the argmin is carried through the transform for.
+
+The smoothing tests use a slab with a one-voxel spur on one face and a one-voxel dent bitten
+out of the other, and require Both to take the spur *and* fill the dent while leaving the
+flat faces and the interior alone — that is the whole difference between a smooth and a
+dilate followed by an erode. In/Out are checked to move the boundary one way only.
+
+Worth knowing if you change this: the suite was checked by mutation, and eight of eight
+mutations are now caught — a mis-weighted axis pass, a dropped argmin, either radius bound
+made exclusive, a skipped axis pass, a Gaussian tap lost off the end, and a shrink pass
+reading the wrong mask. The eighth, flipping the smoothing threshold from `>=` to `>`,
+survived the first version of the suite: no case put a voxel exactly on the threshold, which
+is Paintera's documented boundary. The test that catches it now reads the threshold back off
+the very blur the operation will compute, so one chosen voxel lands on it exactly without
+depending on float luck.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/morphology_test morphology_test.cpp && /tmp/morphology_test
+```
+
+## morphregion_test
+
+Exercises `segmentation/morphregion.h`, which decides which box a morphology run reads,
+which box it writes, and how both sit on the magnification lattice. Split out of
+objectmorphology.cpp for the same reason `planarwrite.h` was split out of shape
+interpolation: it is integer arithmetic over three axes where a mistake neither crashes nor
+warns, it quietly puts voxels one place over.
+
+The central check simulates `processRegion()`'s own traversal — stepping the lattice from
+each *block's* origin rather than the region's, capping the reported coordinate to the
+region, exactly as segmentation/cubeloader.cpp does — and requires every coordinate it hands
+back to land on a distinct, in-range index of the read grid. That is a property, not an
+example: it is checked over ~400 randomised plans at magnifications 1, 2, 4 and 8, with
+anisotropic steps, small blocks so several are crossed, and region bounds that do not line
+up with anything.
+
+It earns its keep. The first version of the driver took the write box straight from the
+requested bounds instead of pinning it to the read origin, so at magnification 2 and above
+`processRegion` reported the region's first plane at a capped, off-lattice position, the
+index truncated onto the neighbouring cell, and that plane was written with the wrong
+voxel's answer. At magnification 1 the step is 1, nothing can be off the lattice, and the
+entire class of mistake is unreachable — which is why it was found by reading the traversal
+rather than by using the feature, and why the test reinstates that exact mutation to confirm
+it is caught.
+
+The rest pins the apron: with room on every side it is exactly the requested depth and
+reported complete, and against a limit it is reported incomplete rather than silently
+truncated, because a zero-extended Gaussian falls to about 0.63 at a face and that is enough
+to move a voxel across a 0.5 threshold.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/morphregion_test morphregion_test.cpp && /tmp/morphregion_test
 ```

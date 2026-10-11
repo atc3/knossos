@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "coordinate.h"
 
 #include <QOpenGLTexture>
@@ -89,11 +91,24 @@ struct Dataset {
      * public object stores belong here too if datasets are ever served from them. */
     static bool mayUseCdnAuth(const QUrl & url);
 
-    static list_t parse(const QUrl & url, const QString &data, bool add_snappy);
+    /* `fetchAuth` false parses for a preview only: it skips the per-layer CDN token request,
+     * which is a blocking round trip of up to a second each on data.ariadne.ai. The dataset
+     * dialog parses on every click just to fill in its info panel, and the token from that
+     * parse was thrown away — loading parses again and fetches its own. */
+    /* Non-zero while cube requests to Google Cloud Storage should bypass its edge cache.
+     *
+     * GCS serves public objects with Cache-Control: public, max-age=3600, so for up to an
+     * hour after a file is overwritten Google's edge may keep handing out the old one — no
+     * local cache involved, so nothing local to clear. A query string the edge has not seen
+     * is fetched from the bucket itself, so while this is set every such request carries
+     * knossos_fresh=<this value>. Atomic because the loader thread builds requests while
+     * the GUI thread sets it. See MainWindow's "Reload Dataset From Server". */
+    static std::atomic<std::uint64_t> freshness;
+    static list_t parse(const QUrl & url, const QString &data, bool add_snappy, bool fetchAuth = true);
     static list_t parseGoogleJson(const QUrl & infoUrl, const QString & json_raw);
     static list_t parseNeuroDataStoreJson(const QUrl & infoUrl, const QString & json_raw);
     static list_t parsePyKnossosConf(const QUrl & configUrl, QString config);
-    static list_t parseToml(const QUrl & configUrl, QString config);
+    static list_t parseToml(const QUrl & configUrl, QString config, bool fetchAuth = true);
     static list_t parseWebKnossosJson(const QUrl &infoUrl, const QString & json_raw);
     static list_t fromLegacyConf(const QUrl & url, QString config);
     void checkMagnifications();

@@ -40,6 +40,7 @@
 #include <random>
 #include <tuple>
 #include <optional>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -159,6 +160,11 @@ Q_OBJECT
      * mergelist for operations that only moved voxels — which is most of them, and the
      * mergelist is megabytes of text on a large annotation. */
     std::uint64_t graphRevision = 0;
+    /* Bumped only by a merge or an unmerge — narrower than graphRevision, which also moves
+     * when a click merely creates an object for a fragment it selected. Undo uses it to
+     * decide whether an operation that changed no voxels is still worth a step: a merge is,
+     * selecting something is not. */
+    std::uint64_t mergeRevision = 0;
     uint64_t hovered_subobject_id = 0;
     // Selection via subobjects touches all objects containing the subobject.
     uint64_t touched_subobject_id = 0;
@@ -256,6 +262,7 @@ public:
     bool paintingBackground() const { return paintsBackground; }
     void setPaintingBackground(const bool paint);
     void setFillEnclosedHoles(const bool fill);
+    void notePainted(std::uint64_t written, const std::unordered_set<std::uint64_t> & replaced);
     decltype(lockNewObjects) getLockNewObjects() const;
     void setLockNewObjects(const decltype(lockNewObjects));
     using color_t = std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>;
@@ -317,6 +324,29 @@ public:
     uint64_t largestObjectContainingSubobjectId(const uint64_t subObjectId, const Coordinate & location);
     uint64_t largestObjectContainingSubobject(const SubObject & subobject) const;
     uint64_t tryLargestObjectContainingSubobject(const uint64_t subObjectId) const;
+    /* The index of the object a known subobject belongs to, or nothing if the id is new.
+     *
+     * tryLargestObjectContainingSubobject() cannot answer this: it returns 0 for an unknown
+     * id, but Object::index counts up from ++highestIndex with highestIndex starting at
+     * UINT64_MAX, so the first object's index is 0 too — "unknown" and "the first object"
+     * are the same answer. And unlike selectMergedObjectFromSubObject() this creates
+     * nothing and moves nothing, which is what a caller holding a long list of ids needs:
+     * that one sets the object's location as a side effect, so using it merely to look
+     * something up would overwrite wherever the user last painted. */
+    std::optional<uint64_t> objectIndexOfSubobject(const uint64_t subObjectId) const;
+    /* Every subobject id the selection covers, in a stable order.
+     *
+     * Paintera's distinction between "active fragments" and "active segments", which is a
+     * real one for any operation that reads a mask rather than painting a single id: a
+     * merged object is several ids that render alike, so morphology over the fragment alone
+     * would treat its own merge partners as foreign tissue and erode the seam between them.
+     * The default is therefore every id of every selected object; `fragmentsOnly` narrows it
+     * to the one id a brush stroke would write, which is what you want when the merge was a
+     * mistake you are about to undo by hand.
+     *
+     * Creates nothing and moves nothing — unlike subobjectIdOfFirstSelectedObject(), which
+     * sets the object's location as a side effect. */
+    std::vector<std::uint64_t> selectedSubobjectIds(bool fragmentsOnly = false) const;
     uint64_t smallestImmutableObjectContainingSubobject(const SubObject & subobject) const;
     decltype(defaultMergeClass) getDefaultMergeClass() const;
     void setDefaultMergeClass(const QString & mergeClass);
@@ -379,6 +409,12 @@ signals:
     void backgroundIdChanged(uint64_t backgroundId);
     void paintingBackgroundChanged(bool paintsBackground);
     void fillEnclosedHolesChanged(bool fill);
+    /* Which subobject ids a write touched: one painted with, and one for each distinct id
+     * it overwrote. Scalars, emitted once per id per operation, so a listener can record
+     * that an object has been worked on without anything having to be selected first —
+     * removing a false positive with the bucket on background never selects anything. */
+    void subobjectPainted(quint64 soid);
+    void subobjectOverwritten(quint64 soid);
     void lockNewObjectsChanged(const bool lockNewObjects);
     void categoriesChanged();
     void todosLeftChanged();

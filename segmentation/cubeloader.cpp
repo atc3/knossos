@@ -465,13 +465,68 @@ CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate &
     const std::unique_ptr<const ForeignProximity> gap = guard.needsGap(value)
             ? std::make_unique<const ForeignProximity>(globalFirst, globalLast, value, Segmentation::singleton().getBackgroundId())
             : nullptr;
-    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){
+    /* The distinct ids this write replaced, so an object can be recorded as worked on
+     * without ever having been selected — which is what happens when a false positive is
+     * removed with the bucket set to background. Only distinct ids, so the set stays tiny
+     * however many voxels are written. */
+    std::unordered_set<std::uint64_t> replaced;
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&inside, &replaced, value, guard, gapPtr = gap.get()](uint64_t & voxel, Coordinate globalPos){
         if (guard.allows(voxel, value) && (gapPtr == nullptr || !gapPtr->blocked(globalPos)) && inside(globalPos)) {
+            if (voxel != value) {
+                replaced.insert(voxel);
+            }
             voxel = value;
         }
     });
     if (markChanged) {
         coordCubesMarkChanged(cubeChangeSet);
+    }
+    if (!cubeChangeSet.empty()) {
+        Segmentation::singleton().notePainted(value, replaced);
+    }
+    return cubeChangeSet;
+}
+
+CubeCoordSet writeVoxelsFrom(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelValuer & value, const bool markChanged, const bool respectPaintTarget) {
+    const auto guard = respectPaintTarget ? currentPaintGuard() : PaintGuard{Segmentation::PaintTarget::Anything, Segmentation::singleton().getBackgroundId()};
+    const auto background = Segmentation::singleton().getBackgroundId();
+    /* One gap map per id actually written, built the first time that id comes up. The map
+     * costs a region scan, so the laziness matters: a dilate that turns out to write a
+     * single fragment pays for one, and an erase — which never needs a gap — pays for none. */
+    std::unordered_map<std::uint64_t, std::unique_ptr<const ForeignProximity>> gaps;
+    std::unordered_set<std::uint64_t> replaced;
+    std::unordered_set<std::uint64_t> written;
+    const auto cubeChangeSet = processRegion(globalFirst, globalLast, [&](uint64_t & voxel, Coordinate globalPos){
+        const auto wanted = value(globalPos);
+        if (!wanted || *wanted == voxel) {
+            return;
+        }
+        if (!guard.allows(voxel, *wanted)) {
+            return;
+        }
+        if (guard.needsGap(*wanted)) {
+            auto it = gaps.find(*wanted);
+            if (it == std::end(gaps)) {
+                it = gaps.emplace(*wanted, std::make_unique<const ForeignProximity>(globalFirst, globalLast, *wanted, background)).first;
+            }
+            if (it->second->blocked(globalPos)) {
+                return;
+            }
+        }
+        replaced.insert(voxel);
+        written.insert(*wanted);
+        voxel = *wanted;
+    });
+    if (markChanged) {
+        coordCubesMarkChanged(cubeChangeSet);
+    }
+    /* notePainted() takes one written id at a time, so a multi-fragment write reports each.
+     * The replaced set goes with the first: it is only used to mark the objects that lost
+     * voxels as worked on, and which of the written ids took them is not part of that. */
+    bool first = true;
+    for (const auto id : written) {
+        Segmentation::singleton().notePainted(id, first ? replaced : std::unordered_set<std::uint64_t>{});
+        first = false;
     }
     return cubeChangeSet;
 }
@@ -486,6 +541,9 @@ std::size_t processRegionReplacing(const Coordinate & globalFirst, const Coordin
     });
     if (markChanged && changed != 0) {
         coordCubesMarkChanged(cubeChangeSet);
+    }
+    if (changed != 0) {
+        Segmentation::singleton().notePainted(to, {from});
     }
     return changed;
 }
@@ -508,7 +566,7 @@ std::pair<Coordinate, Coordinate> residentBoxAround(const Coordinate & pos) {
     const auto last = dataset.cube2global({centre.x + half, centre.y + half, centre.z + half}) + cubeExtent - 1;
     const auto & areaMin = Annotation::singleton().movementAreaMin;
     const auto & areaMax = Annotation::singleton().movementAreaMax;
-    return {first.capped(areaMin, areaMax + 1), last.capped(areaMin, areaMax + 1)};
+    return {first.capped(areaMin, areaMax), last.capped(areaMin, areaMax)};
 }
 
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast) {
@@ -632,6 +690,11 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
     }
 
     coordCubesMarkChanged(result.cubes);
+    if (!result.cubes.empty()) {
+        // the fill knows both ids outright, which is how erasing a false positive with the
+        // bucket on background gets recorded against the object it removed
+        Segmentation::singleton().notePainted(fillsoid, {targetSoid});
+    }
     return result;
 }
 

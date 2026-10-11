@@ -180,4 +180,53 @@ inline void SISlice::shrinkToFit() {
     vMin += minV * vStep;
 }
 
-
+/* Which blocks of a block grid a mask actually reaches into.
+ *
+ * A mask lives on a grid big enough for both key slices plus a margin, so for anything
+ * other than a filled rectangle most of its own bounding box is empty — a vessel crossing
+ * the field diagonally touches under a fifth of the blocks. Writing a block the mask never
+ * reaches changes nothing, but getting it there costs a load, and a block nothing was
+ * written to never enters the loader's cache, so every subsequent slice fetches it again.
+ * Knowing which blocks to skip is therefore worth a linear pass over the mask.
+ *
+ * `out` is sized uCubes*vCubes, row major, non-zero where the mask has at least one set
+ * voxel inside that block. Conservative by construction: a block is only cleared when no
+ * set voxel maps into it, so nothing that holds part of the shape can be skipped.
+ *
+ * Block indices are absolute, with (uCubeLo, vCubeLo) as the origin of `out`. The mask's
+ * own origin need not line up with a block boundary, which is why the run length to the
+ * next boundary is computed rather than assumed to be the block width. */
+inline void siReachedBlocks(const SISlice & mask, const int uCubeLo, const int vCubeLo,
+                            const int uCubes, const int vCubes,
+                            const int cubeExtentU, const int cubeExtentV,
+                            std::vector<std::uint8_t> & out) {
+    out.assign(static_cast<std::size_t>(std::max(0, uCubes)) * std::max(0, vCubes), 0);
+    if (uCubes <= 0 || vCubes <= 0 || cubeExtentU <= 0 || cubeExtentV <= 0
+            || mask.uSize <= 0 || mask.vSize <= 0 || mask.uStep <= 0 || mask.vStep <= 0
+            || mask.mask.size() < static_cast<std::size_t>(mask.uSize) * mask.vSize) {
+        return;
+    }
+    for (int mv = 0; mv < mask.vSize; ++mv) {
+        const auto vIdx = siFloorDiv(mask.vCoordOf(mv), cubeExtentV) - vCubeLo;
+        if (vIdx < 0 || vIdx >= vCubes) {
+            continue;
+        }
+        const auto * row = mask.mask.data() + static_cast<std::size_t>(mv) * mask.uSize;
+        for (int mu = 0; mu < mask.uSize; ) {
+            const auto gu = mask.uCoordOf(mu);
+            const auto block = siFloorDiv(gu, cubeExtentU);
+            // mask indices from here to this block's far edge; at least one, so this ends
+            const auto toBoundary = static_cast<int>((static_cast<long long>(block) + 1) * cubeExtentU - gu);
+            const auto runEnd = std::min(mask.uSize, mu + std::max(1, (toBoundary + mask.uStep - 1) / mask.uStep));
+            const auto uIdx = block - uCubeLo;
+            if (uIdx >= 0 && uIdx < uCubes) {
+                auto & cell = out[static_cast<std::size_t>(vIdx) * uCubes + uIdx];
+                if (cell == 0 && std::find_if(row + mu, row + runEnd,
+                                              [](const std::uint8_t b){ return b != 0; }) != row + runEnd) {
+                    cell = 1;
+                }
+            }
+            mu = runEnd;
+        }
+    }
+}

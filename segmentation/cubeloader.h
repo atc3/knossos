@@ -67,6 +67,21 @@ CubeCoordSet readBrushRegion(const Coordinate & centerPos, const brush_t &, cons
  * as it moves through the plane, and a voxel that is walled in by the object on every side
  * is not something the brush is moving over — it is already inside. */
 CubeCoordSet writeVoxelsWhere(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelPredicate & inside, const std::uint64_t value, bool markChanged = true, bool respectPaintTarget = true);
+/* writeVoxelsWhere() where every voxel gets its own value.
+ *
+ * Morphology needs it: dilating a merged object has each new voxel take the id of the
+ * *nearest* fragment, so one call writes several different ids, and a pass per id would
+ * read the region once per fragment and still have to keep the passes from treading on
+ * each other. The callback returns nothing to leave a voxel alone, which is the common
+ * answer — only the shell of the object changes.
+ *
+ * Same semantics as writeVoxelsWhere() otherwise, including that non-resident cubes are
+ * skipped and the returned set lists only the cubes actually visited. The one difference is
+ * the BackgroundWithGap paint target, whose gap has to be computed per written id rather
+ * than once; they are built on first use and cached, so the usual one- or two-fragment case
+ * costs what writeVoxelsWhere() costs. */
+using VoxelValuer = std::function<std::optional<std::uint64_t>(const Coordinate &)>;
+CubeCoordSet writeVoxelsFrom(const Coordinate & globalFirst, const Coordinate & globalLast, const VoxelValuer & value, bool markChanged = true, bool respectPaintTarget = true);
 // Splits the cubes covering a region into (resident, missing).
 std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & globalFirst, const Coordinate & globalLast);
 

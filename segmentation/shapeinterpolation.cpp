@@ -26,6 +26,7 @@
 #include "segmentation/distancetransform.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
+#include "segmentation/planarwrite.h"
 #include "segmentation/segmentation.h"
 #include "segmentation/undostack.h"
 #include "annotation/annotation.h"
@@ -59,14 +60,43 @@ constexpr int PAD = 16;
  * alternative is silently declining to interpolate. Beyond this the honest answer is still
  * no, and the message says what to do about it. */
 constexpr std::size_t MAX_PIXELS = 4096 * 4096;
-/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes).
+/* Ceiling on the cached distance transforms across all slice pairs (floats, ×4 bytes, so
+ * 256 MiB).
  *
- * The cache is cleared *before* the new pair is inserted, so a pair larger than this on its
- * own is still cached — deliberately, since otherwise a wide object would recompute two
- * distance transforms per depth. The practical effect is that retention is one pair, which
- * at the MAX_PIXELS limit is ~134 MiB held for as long as the chain is live. Walking depths
- * in order, as both the preview and the commit do, hits that one pair repeatedly. */
-constexpr std::size_t MAX_CACHED_FLOATS = 16 * 1024 * 1024;
+ * Over budget, the entries furthest from the pair being added are evicted until it fits,
+ * and the new pair is always kept — a pair larger than this on its own is still cached,
+ * since otherwise a wide object would recompute two distance transforms per depth.
+ * Evicting by distance rather than clearing everything is what a walk in depth order
+ * wants: the pairs behind it go, the ones it is about to reach stay.
+ *
+ * It is also the line the cross-section preview will not cross. A cross-section needs
+ * every pair at once, so a chain whose pairs total more than this can never be held, and
+ * would recompute the whole chain on every pan; buildCrossSection() declines it instead.
+ * Raised from 16 Mi floats, below which a single wide pair was enough to trigger that. */
+constexpr std::size_t MAX_CACHED_FLOATS = 64 * 1024 * 1024;
+
+/* The common grid two slices are interpolated on: the union of their bounding boxes plus
+ * a margin. Shared by interpolantFor(), which builds the distance transforms on it, and
+ * buildCrossSection(), which only needs its extent — so the extent can be had without
+ * computing a single transform, and the two cannot drift apart. */
+struct PairGrid {
+    int uMin{0}, vMin{0}, uSize{0}, vSize{0};
+    std::size_t pixels() const {
+        return (uSize > 0 && vSize > 0) ? static_cast<std::size_t>(uSize) * vSize : 0;
+    }
+};
+PairGrid pairGrid(const SISlice & s1, const SISlice & s2) {
+    const auto uStep = s1.uStep;
+    const auto vStep = s1.vStep;
+    PairGrid g;
+    g.uMin = std::min(s1.uMin, s2.uMin) - PAD * uStep;
+    g.vMin = std::min(s1.vMin, s2.vMin) - PAD * vStep;
+    const auto uMax = std::max(s1.uCoordOf(s1.uSize), s2.uCoordOf(s2.uSize)) + PAD * uStep;
+    const auto vMax = std::max(s1.vCoordOf(s1.vSize), s2.vCoordOf(s2.vSize)) + PAD * vStep;
+    g.uSize = (uMax - g.uMin) / uStep;
+    g.vSize = (vMax - g.vMin) / vStep;
+    return g;
+}
 
 // How long to wait for the loader to make a cube resident before giving up on it. A miss
 // is reported as a shortfall rather than silently dropping voxels, which is what
@@ -171,8 +201,13 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
         auto last = first + cubeExtent - 1;
         axisSet(first, axis, depth);
         axisSet(last, axis, depth);
-        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
-        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+        /* capped() clamps to [min, max - 1] and movementAreaMax is exclusive — it equals
+         * the dataset boundary when the whole volume is in play — so the bound is areaMax
+         * itself. Passing areaMax + 1 reached one voxel past the last valid one, which put
+         * a whole block plane that cannot exist into the walk: it never loads, and gets
+         * reported as a block that could not be made resident. */
+        first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
+        last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
 
         if (!regionCubeResidency(first, last).second.empty()) {
             if (!mayLoad) {
@@ -189,21 +224,34 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
         }
 
         bool touchesU0{false}, touchesU1{false}, touchesV0{false}, touchesV1{false};
+        const auto uStep = slice.uStep;
+        const auto vStep = slice.vStep;
         readRegion(first, last, [&](const std::uint64_t voxel, const Coordinate & pos){
             if (voxel != soid) {
                 return;
             }
             slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), 1);
-            // a set voxel on a block edge means the object probably continues next door
-            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) <= axisGet(first, uAxisIdx);
-            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) >= axisGet(last, uAxisIdx);
-            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) <= axisGet(first, vAxisIdx);
-            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) >= axisGet(last, vAxisIdx);
+            /* A set voxel with no further sample beyond it inside this block means the
+             * object probably continues next door.
+             *
+             * "No further sample", not "on the block's last coordinate". The region ends at
+             * the block's last *voxel*, but a read steps by one voxel of the current
+             * magnification, so above magnification 1 the last sample falls short of it —
+             * at magnification 2 a 256-wide block ends at 255 and the last sample is 254.
+             * Testing against the coordinate therefore never fired, the walk never spread
+             * in +u or +v, and a plane wider than one block was silently adopted truncated
+             * on those two sides while spreading correctly on the other two. It reported
+             * success, because as far as it knew the object stopped there. */
+            touchesU0 = touchesU0 || axisGet(pos, uAxisIdx) - uStep < axisGet(first, uAxisIdx);
+            touchesU1 = touchesU1 || axisGet(pos, uAxisIdx) + uStep > axisGet(last, uAxisIdx);
+            touchesV0 = touchesV0 || axisGet(pos, vAxisIdx) - vStep < axisGet(first, vAxisIdx);
+            touchesV1 = touchesV1 || axisGet(pos, vAxisIdx) + vStep > axisGet(last, vAxisIdx);
         });
 
-        const auto enqueue = [&](const int axisIdx, const int delta){
+        const auto enqueue = [&](const int du, const int dv){
             auto neighbour = block;
-            axisSet(neighbour, axisIdx, axisGet(neighbour, axisIdx) + delta);
+            axisSet(neighbour, uAxisIdx, axisGet(neighbour, uAxisIdx) + du);
+            axisSet(neighbour, vAxisIdx, axisGet(neighbour, vAxisIdx) + dv);
             const auto corner = dataset.cube2global(neighbour);
             // a block off the edge of the dataset will never load; not finding it there is
             // not a shortfall, so don't queue it and don't report one
@@ -215,10 +263,21 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
                 queue.push_back(neighbour);
             }
         };
-        if (touchesU0) { enqueue(uAxisIdx, -1); }
-        if (touchesU1) { enqueue(uAxisIdx, +1); }
-        if (touchesV0) { enqueue(vAxisIdx, -1); }
-        if (touchesV1) { enqueue(vAxisIdx, +1); }
+        if (touchesU0) { enqueue(-1, 0); }
+        if (touchesU1) { enqueue(+1, 0); }
+        if (touchesV0) { enqueue(0, -1); }
+        if (touchesV1) { enqueue(0, +1); }
+        /* And the diagonals, when the object reaches both edges.
+         *
+         * A shape can pass through a block corner while missing both of the blocks that
+         * share an edge with this one — they get read, find nothing, and spread no further,
+         * so the far side was unreachable even though the object is continuous. Four extra
+         * block reads in the worst case, against a cutoff that looks like the object simply
+         * ending mid-air. */
+        if (touchesU0 && touchesV0) { enqueue(-1, -1); }
+        if (touchesU0 && touchesV1) { enqueue(-1, +1); }
+        if (touchesU1 && touchesV0) { enqueue(+1, -1); }
+        if (touchesU1 && touchesV1) { enqueue(+1, +1); }
     }
     progress.setValue(static_cast<int>(MAX_BLOCKS));
 
@@ -417,8 +476,8 @@ bool ShapeInterpolation::materializeAt(const int depth, QString & note) {
     axisSet(last, uAxisIdx, baked.uCoordOf(baked.uSize) - baked.uStep);
     axisSet(first, vAxisIdx, baked.vMin);
     axisSet(last, vAxisIdx, baked.vCoordOf(baked.vSize) - baked.vStep);
-    first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
-    last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax + 1);
+    first = first.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
+    last = last.capped(Annotation::singleton().movementAreaMin, Annotation::singleton().movementAreaMax);
 
     const auto intended = regionCubeResidency(first, last);
     writeVoxelsWhere(first, last, [this, &baked](const Coordinate & pos){
@@ -494,7 +553,7 @@ void ShapeInterpolation::restoreState(const State & state) {
     slices = state.slices;
     interpolants.clear();
     previewValid = false;
-    crossSectionValid = false;
+    invalidateCrossSections();
     ++gen;
     emit changed();
 }
@@ -508,7 +567,7 @@ void ShapeInterpolation::reset() {
     wasEdited = false;
     soid = 0;
     interpolants.clear();
-    crossSectionValid = false;
+    invalidateCrossSections();
     previewValid = false;
     error.clear();
     ++gen;
@@ -539,12 +598,11 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     // to the same lattice (see absorbStamp), so index arithmetic is exact.
     const auto uStep = s1.uStep;
     const auto vStep = s1.vStep;
-    const auto uMin = std::min(s1.uMin, s2.uMin) - PAD * uStep;
-    const auto vMin = std::min(s1.vMin, s2.vMin) - PAD * vStep;
-    const auto uMax = std::max(s1.uCoordOf(s1.uSize), s2.uCoordOf(s2.uSize)) + PAD * uStep;
-    const auto vMax = std::max(s1.vCoordOf(s1.vSize), s2.vCoordOf(s2.vSize)) + PAD * vStep;
-    const auto uSize = (uMax - uMin) / uStep;
-    const auto vSize = (vMax - vMin) / vStep;
+    const auto grid = pairGrid(s1, s2);
+    const auto uMin = grid.uMin;
+    const auto vMin = grid.vMin;
+    const auto uSize = grid.uSize;
+    const auto vSize = grid.vSize;
     if (uSize <= 0 || vSize <= 0) {
         error = QObject::tr("Shape interpolation: empty region.");
         return nullptr;
@@ -593,14 +651,22 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     in.vSize = vSize;
     error.clear();
 
-    // keep the cache from growing without bound on a long chain
+    // keep the cache from growing without bound on a long chain: evict whatever is furthest
+    // from this pair until it fits, and keep this pair regardless — see MAX_CACHED_FLOATS
     std::size_t cachedFloats = 2 * pixels;
     for (const auto & [key, entry] : interpolants) {
         (void)key;
         cachedFloats += entry.d1.size() + entry.d2.size();
     }
-    if (cachedFloats > MAX_CACHED_FLOATS) {
-        interpolants.clear();
+    while (cachedFloats > MAX_CACHED_FLOATS && !interpolants.empty()) {
+        auto furthest = std::begin(interpolants);
+        for (auto it = std::begin(interpolants); it != std::end(interpolants); ++it) {
+            if (std::abs(it->first - z1) > std::abs(furthest->first - z1)) {
+                furthest = it;
+            }
+        }
+        cachedFloats -= furthest->second.d1.size() + furthest->second.d2.size();
+        interpolants.erase(furthest);
     }
     return &(interpolants[z1] = std::move(in));
 }
@@ -667,16 +733,6 @@ void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std:
     distance_transform::blendSigned(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, out);
 }
 
-namespace {
-
-Coordinate componentMax(const Coordinate & a, const Coordinate & b) {
-    return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
-}
-Coordinate componentMin(const Coordinate & a, const Coordinate & b) {
-    return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
-}
-}
-
 ShapeInterpolation::WriteResult ShapeInterpolation::commit(QWidget * const parent) {
     if (slices.size() < 2) {
         WriteResult r;
@@ -722,35 +778,32 @@ void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
  * and still resident — costs no movement at all. */
 void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
                                      QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & dataset = Dataset::current();
     const auto & areaMin = Annotation::singleton().movementAreaMin;
     const auto & areaMax = Annotation::singleton().movementAreaMax;
-    // an interpolated grid is padded well beyond the shape; clip to the mask's own extent
-    Coordinate first, last;
-    axisSet(first, axis, depth);
-    axisSet(last, axis, depth);
-    axisSet(first, uAxisIdx, mask.uMin);
-    axisSet(last, uAxisIdx, mask.uCoordOf(mask.uSize) - mask.uStep);
-    axisSet(first, vAxisIdx, mask.vMin);
-    axisSet(last, vAxisIdx, mask.vCoordOf(mask.vSize) - mask.vStep);
-    first = first.capped(areaMin, areaMax + 1);
-    last = last.capped(areaMin, areaMax + 1);
+    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
+    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
+    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
+    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
+    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
+    /* Blocks the mask does not reach are left out.
+     *
+     * Not an accuracy trade: the plan without them covers exactly the same mask voxels,
+     * which tests/planarwrite_test.cpp asserts directly. It is a speed one, and a large
+     * one — a block nothing is written to never enters the loader's cache, so every later
+     * slice fetched it from the server again. */
+    const auto plan = planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
 
     const auto inside = [this, &mask](const Coordinate & pos){
         return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
     };
 
-    const auto & dataset = Dataset::current();
-    const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
-    const auto cubeBegin = dataset.global2cube(first);
-    const auto cubeEnd = dataset.global2cube(last) + 1;
-    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
-    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
-    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
-        const CoordOfCube cube{cx, cy, cz};
+    for (const auto & block : plan.blocks) {
+        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
+        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
+        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
         const auto cubeFirst = dataset.cube2global(cube);
-        const auto cubeLast = cubeFirst + cubeExtent - 1;
-        const auto regionFirst = componentMax(first, cubeFirst);
-        const auto regionLast = componentMin(last, cubeLast);
+        const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
 
         bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
         if (!resident) {
@@ -844,7 +897,7 @@ ShapeInterpolation::WriteResult ShapeInterpolation::pasteSliceAt(const int depth
     slices[depth] = std::move(pasted);
     wasEdited = true;
     previewValid = false;
-    crossSectionValid = false;
+    invalidateCrossSections();
     ++gen;
     emit changed();
 
@@ -990,14 +1043,15 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
     if (previewDeferred) {
         return false;// mid-stroke; a cross-section walks every pair and is the worst offender
     }
-    if (crossSectionValid && crossSectionAxis == fixedAxis && crossSectionCoord == fixedCoord && crossSectionGen == gen) {
+    auto & slot = crossSections[fixedAxis];
+    auto & crossSection = slot.slice;
+    if (slot.valid && slot.coord == fixedCoord && slot.gen == gen) {
         return crossSection.count() != 0;
     }
     crossSection = SISlice{};
-    crossSectionValid = true;
-    crossSectionAxis = fixedAxis;
-    crossSectionCoord = fixedCoord;
-    crossSectionGen = gen;
+    slot.valid = true;// a declined build is cached too, so it is not re-declined every frame
+    slot.coord = fixedCoord;
+    slot.gen = gen;
     if (slices.size() < 2) {
         return false;
     }
@@ -1017,10 +1071,29 @@ bool ShapeInterpolation::buildCrossSection(const int fixedAxis, const int fixedC
      * transforms exceed their byte budget, so from the first pair past that budget onwards
      * every pointer already collected was dangling and the extents came out of freed
      * memory. Long chains are precisely the ones that exceed it. */
+    /* Extents come from the pair grids alone, not from the distance transforms. This pass
+     * used to call interpolantFor() for every pair just to read its extent, which computed
+     * the whole chain once here and then — the cache having overflowed on the way — again in
+     * the drawing loop below. The grid is pure arithmetic on the two slices' bounds. */
+    std::size_t chainFloats = 0;
     for (auto it = std::begin(slices); std::next(it) != std::end(slices); ++it) {
-        if (const auto * in = interpolantFor(it->first, std::next(it)->first); in != nullptr) {
-            extend(fixedIsU ? in->vMin : in->uMin, fixedIsU ? in->vSize : in->uSize, fixedIsU ? in->vStep : in->uStep);
+        const auto & s1 = it->second;
+        const auto grid = pairGrid(s1, std::next(it)->second);
+        if (grid.pixels() == 0) {
+            continue;
         }
+        chainFloats += 2 * grid.pixels();
+        extend(fixedIsU ? grid.vMin : grid.uMin, fixedIsU ? grid.vSize : grid.uSize, fixedIsU ? s1.vStep : s1.uStep);
+    }
+    if (chainFloats > MAX_CACHED_FLOATS) {
+        /* Every pair is needed at once, so this chain's distance transforms cannot all be
+         * held, and building it would recompute the whole chain on every pan of either
+         * perpendicular view — the freeze this guard exists to prevent. The preview in the
+         * plane being painted is per depth and unaffected, and so is the commit. */
+        error = QObject::tr("Shape interpolation: this chain is too large to preview across slices "
+                            "(about %1 MiB of distance transforms). The preview in the painting plane, "
+                            "and accepting, still work.").arg((chainFloats * sizeof(float)) >> 20);
+        return false;
     }
     for (const auto & [depth, slice] : slices) {
         (void)depth;
@@ -1115,6 +1188,7 @@ bool ShapeInterpolation::planarMaskFor(const int viewportType, const Coordinate 
     if (!buildCrossSection(planeNormal, fixedCoord)) {
         return false;
     }
+    const auto & crossSection = crossSections[planeNormal].slice;
     const auto wAxis = (planeNormal == uAxisIdx) ? vAxisIdx : uAxisIdx;
     out = {planeNormal, fixedCoord, std::min(axis, wAxis), std::max(axis, wAxis),
            crossSection.uMin, crossSection.vMin, crossSection.uStep, crossSection.vStep,

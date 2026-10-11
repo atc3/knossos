@@ -278,11 +278,26 @@ private:
     // fills `out` (uSize*vSize) with the interpolated mask at `depth`
     void blendInto(const Interpolant &, int depth, std::vector<std::uint8_t> & out) const;
 
-    // cross-section through the whole chain, cached per (plane, position, generation)
-    SISlice crossSection;
-    int crossSectionAxis{-1}, crossSectionCoord{0};
-    std::uint64_t crossSectionGen{0};
-    bool crossSectionValid{false};
+    /* Cross-sections through the whole chain, cached per (plane, position, generation) —
+     * one slot per fixed axis.
+     *
+     * This was a single slot, and the two viewports perpendicular to the chain fix different
+     * axes (xz fixes y, zy fixes x), so painting either one evicted the other's. Every
+     * repaint therefore rebuilt a cross-section, which walks every slice pair in the chain;
+     * on a large interpolation that is seconds per frame, the repaints queue faster than
+     * they finish, and the application stops responding. */
+    struct CrossSectionSlot {
+        SISlice slice;
+        int coord{0};
+        std::uint64_t gen{0};
+        bool valid{false};
+    };
+    CrossSectionSlot crossSections[3];
+    void invalidateCrossSections() {
+        for (auto & slot : crossSections) {
+            slot.valid = false;
+        }
+    }
     bool buildCrossSection(int fixedAxis, int fixedCoord);
     // mask at `depth`, painted or interpolated, ignoring the preview toggle
     const SISlice * maskAtDepth(int depth);

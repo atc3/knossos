@@ -51,9 +51,22 @@
 
 #include <ctime>
 
-QString annotationFileDefaultName() {// Generate a default file name based on date and time.
-    // ISO 8601 combined date and time in basic format (extended format cannot be used because Windows doesn’t allow ›:‹)
-    return QDateTime::currentDateTime().toString("'annotation-'yyyyMMddTHHmm'.000.k.zip'");
+/* The default file name: the dataset's name, then "annotation-" and the date and time.
+ *
+ * Prefixed with the dataset so a folder of annotations says what each one is of without
+ * opening it — every Save, Save As, autosave and skeleton export starts from this. Falls back
+ * to the plain name with no dataset loaded.
+ *
+ * The name is made filename-safe, and dots go too: several callers recover a stem with
+ * QFileInfo::baseName(), which stops at the *first* dot, so "heart_6.5" would export its
+ * skeleton as "heart_6.nml". The date is ISO 8601 basic format, since Windows does not allow
+ * the colons of the extended one. */
+QString annotationFileDefaultName() {
+    auto prefix = Dataset::current().experimentname.trimmed();
+    prefix.replace(QRegularExpression(R"([\\/:*?"<>|.\s]+)"), "_");
+    prefix.remove(QRegularExpression("^_+|_+$"));
+    const auto stamp = QDateTime::currentDateTime().toString("'annotation-'yyyyMMddTHHmm'.000.k.zip'");
+    return prefix.isEmpty() ? stamp : prefix + '_' + stamp;
 }
 
 QString annotationFileDefaultPath() {

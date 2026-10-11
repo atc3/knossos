@@ -27,6 +27,7 @@
 #include "mesh/mesh_generation.h"
 #include "model_helper.h"
 #include "segmentation/cubeloader.h"
+#include "segmentation/undostack.h"
 #include "stateInfo.h"
 #include "viewer.h"
 
@@ -463,7 +464,15 @@ SegmentationView::SegmentationView(QWidget * const parent) : QWidget(parent), ca
         addDisabledSeparator(contextMenu);
         QObject::connect(contextMenu.addAction("Collect cubes and IDs"), &QAction::triggered, &collectFromMovementArea);
         addDisabledSeparator(contextMenu);
-        QObject::connect(contextMenu.addAction("Merge"), &QAction::triggered, &Segmentation::singleton(), &Segmentation::mergeSelectedObjects);
+        QObject::connect(contextMenu.addAction("Merge"), &QAction::triggered, [](){
+            /* An undo step of its own, as a merge made with the mouse in merge mode has.
+             * Scoped here rather than inside mergeSelectedObjects(), because merge tracing
+             * merges through that same function as a side effect of placing a node — and
+             * undoing only the segmentation half of that would leave the skeleton claiming a
+             * merge the objects no longer have. */
+            const UndoScope undoScope(QObject::tr("Merge"));
+            Segmentation::singleton().mergeSelectedObjects();
+        });
         QObject::connect(contextMenu.addAction("Generate mesh"), &QAction::triggered, [](){
             state->viewer->suspend([](){
                 QElapsedTimer time;

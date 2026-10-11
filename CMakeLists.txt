@@ -180,6 +180,15 @@ set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY AUTOGEN_TARGET_DEPENDS ${che
 
 set_target_properties(${PROJECT_NAME}
     PROPERTIES MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist)
+if(APPLE)
+    # Sign each build with a fixed local certificate so macOS keeps folder permissions across
+    # rebuilds; a no-op until ci/macos_make_signing_cert.sh has created one. See that script.
+    set(KNOSSOS_CODESIGN_IDENTITY "KNOSSOS Local Signing" CACHE STRING
+        "Code-signing identity for local builds; empty to leave the app signed ad hoc")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/CMake/macos_codesign.sh "${KNOSSOS_CODESIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>"
+        VERBATIM)
+endif()
 add_dependencies(${PROJECT_NAME} buildinfo)#main target needs buildinfo
 
 option(PythonQt_QtAll "Include the PythonQt QtAll extension which wraps all Qt libraries" ON)

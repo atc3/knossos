@@ -2,6 +2,7 @@
 
 #define ANNOTATION_SEG "#annotation_seg"
 #define ANNOTATION_SKEL "#annotation_skel"
+#define ANNOTATION_INVENTORY "#annotation_inventory"
 #define NAVIGATION "#navi"
 #define PREF_NODE "#pref_node"
 #define PREF_SEG "#pref_seg"

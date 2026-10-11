@@ -26,6 +26,7 @@
 #include "loader.h"
 #include "network.h"
 #include "scriptengine/scripting.h"
+#include "segmentation/objectinventory.h"
 #include "stateInfo.h"
 #include "viewer.h"
 #include "widgets/mainwindow.h"
@@ -224,6 +225,11 @@ int main(int argc, char * argv[]) { boost::leaf::try_handle_all([argc, &argv]() 
     qRegisterMetaType<Dataset>("Dataset");
     qRegisterMetaType<Dataset::list_t>("Dataset::list_t");
     qRegisterMetaType<floatCoordinate>();
+    qRegisterMetaType<objinv::State>("objinv::State");
+    qRegisterMetaType<objinv::ScanSpec>("objinv::ScanSpec");
+    qRegisterMetaType<QVector<objinv::MagOption>>("QVector<objinv::MagOption>");
+    qRegisterMetaType<std::vector<objinv::Record>>("std::vector<objinv::Record>");
+    qRegisterMetaType<std::vector<std::uint32_t>>("std::vector<std::uint32_t>");
     qRegisterMetaType<SnapshotOptions>();
     qRegisterMetaType<UserMoveType>();
     qRegisterMetaType<ViewportType>();

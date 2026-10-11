@@ -104,8 +104,8 @@ Segmentation::Segmentation() {
         QObject::connect(this, signal, this, [this](){ ++graphRevision; });
     }
     QObject::connect(this, &Segmentation::changedRow, this, [this](int){ ++graphRevision; });
-    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; });
-    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; });
+    QObject::connect(this, &Segmentation::merged, this, [this](quint64, quint64){ ++graphRevision; ++mergeRevision; });
+    QObject::connect(this, &Segmentation::unmerged, this, [this](quint64, quint64){ ++graphRevision; ++mergeRevision; });
 }
 
 bool Segmentation::hasSegData() const {
@@ -261,6 +261,18 @@ void Segmentation::setPaintingBackground(const bool paint) {
     emit paintingBackgroundChanged(paintsBackground);
 }
 
+void Segmentation::notePainted(const std::uint64_t written, const std::unordered_set<std::uint64_t> & replaced) {
+    const auto background = getBackgroundId();
+    if (written != background) {
+        emit subobjectPainted(written);
+    }
+    for (const auto soid : replaced) {
+        if (soid != background && soid != written) {
+            emit subobjectOverwritten(soid);
+        }
+    }
+}
+
 void Segmentation::setFillEnclosedHoles(const bool fill) {
     if (fillEnclosedHoles != fill) {
         fillEnclosedHoles = fill;
@@ -409,6 +421,35 @@ uint64_t Segmentation::tryLargestObjectContainingSubobject(const uint64_t subObj
         return 0;
     }
     return largestObjectContainingSubobject(it->second);
+}
+
+std::optional<uint64_t> Segmentation::objectIndexOfSubobject(const uint64_t subObjectId) const {
+    const auto it = subobjects.find(subObjectId);
+    if (it == std::end(subobjects)) {
+        return std::nullopt;
+    }
+    return largestObjectContainingSubobject(it->second);
+}
+
+std::vector<std::uint64_t> Segmentation::selectedSubobjectIds(const bool fragmentsOnly) const {
+    std::vector<std::uint64_t> ids;
+    if (fragmentsOnly) {
+        if (const auto one = currentPaintSubobjectId(); one && *one != backgroundId) {
+            ids.push_back(*one);
+        }
+        return ids;
+    }
+    for (const auto objectIndex : selectedObjectIndices) {
+        for (const auto & subobject : objects[objectIndex].subobjects) {
+            ids.push_back(subobject.get().id);
+        }
+    }
+    /* Sorted and deduplicated because two selected objects can share a subobject — the
+     * mergelist permits it, and a mask that counted one twice would be no different, but a
+     * caller sizing a palette by this list would be off. */
+    std::sort(std::begin(ids), std::end(ids));
+    ids.erase(std::unique(std::begin(ids), std::end(ids)), std::end(ids));
+    return ids;
 }
 
 uint64_t Segmentation::smallestImmutableObjectContainingSubobject(const Segmentation::SubObject & subobject) const {

@@ -22,6 +22,8 @@
 
 #include "undostack.h"
 
+#include "skeleton/skeletonizer.h"
+
 #include "annotation/annotation.h"
 #include "dataset.h"
 #include "loader.h"
@@ -180,6 +182,7 @@ void UndoStack::beginScope(const QString & description) {
     pending.objectHighestIndex = Segmentation::Object::highestIndex;
     pending.shapeInterpolation = ShapeInterpolation::singleton().saveState();
     graphRevisionAtScopeStart = seg.graphRevision;
+    mergeRevisionAtScopeStart = seg.mergeRevision;
 }
 
 /* Returns whether this call is the one that took the snapshot, so a caller that turns out
@@ -215,7 +218,18 @@ void UndoStack::accountForEntry(UndoEntry & entry) {
 }
 
 void UndoStack::endScope() {
-    if (--depth != 0 || pending.cubes.empty()) {
+    if (--depth != 0) {
+        return;
+    }
+    /* An operation that changed no voxels used to be dropped outright, which made merges
+     * impossible to undo: a merge is purely a change to the object graph, and the graph is
+     * already captured at scope start and restored by applyEntry(). So a voxel-less scope is
+     * kept when it merged or unmerged something — and only then, since a click that merely
+     * selected a fragment (creating an object for it) is not something to step back through.
+     * A merge tracing placement is kept whether or not it merged: those steps undo by
+     * removing nodes, and they must come off in the order they went on, or an older node
+     * would be cut out of the middle of a tree. */
+    if (pending.cubes.empty() && !pending.placedNodeId && Segmentation::singleton().mergeRevision == mergeRevisionAtScopeStart) {
         return;
     }
     accountForEntry(pending);
@@ -335,6 +349,15 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
         if (!restoredResident.empty()) {
             coordCubesMarkChanged(restoredResident);
         }
+        /* The node first: deleting it runs merge tracing's own bookkeeping, which unmerges
+         * its fragment once no other node in the tree claims it. The graph is then set to
+         * exactly what it was before the placement, whatever that bookkeeping decided. A node
+         * already deleted by hand is simply not there to remove. */
+        if (entry.placedNodeId) {
+            if (auto * node = Skeletonizer::singleton().findNodeByNodeID(*entry.placedNodeId)) {
+                Skeletonizer::singleton().delNode(0, node);
+            }
+        }
         // the object graph rides along, otherwise objects whose voxels just vanished stay
         // in the segmentation table
         restoreGraph(entry);
@@ -349,6 +372,13 @@ void UndoStack::applyEntry(UndoEntry & entry, std::deque<UndoEntry> & opposite, 
     state->viewer->reslice_notify();
     Annotation::singleton().setUnsavedChanges(true);
 
+    if (entry.placedNodeId) {
+        /* Nothing to redo with: the node is gone and there is no skeleton undo to bring it
+         * back. Clearing the redo tail too, since replaying an older step past a placement
+         * that cannot be replayed would put the history out of order. */
+        opposite.clear();
+        return;
+    }
     accountForEntry(inverse);
     opposite.push_back(std::move(inverse));
     while (opposite.size() > MAX_ENTRIES) {
