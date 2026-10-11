@@ -50,6 +50,7 @@
 #include <QAction>
 #include <QAbstractSpinBox>
 #include <QApplication>
+#include <QDateTime>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
@@ -721,6 +722,35 @@ void MainWindow::updateRecentFile(const QString & fileName) {
 void MainWindow::createMenus() {
     menuBar()->addMenu(&fileMenu);
     fileMenu.addAction(QIcon(":/resources/icons/menubar/choose-dataset.png"), tr("Choose Dataset …"), &widgetContainer.datasetLoadWidget, &DatasetLoadWidget::show);
+    /* Re-read every block from where it is served, for when the files changed underneath.
+     *
+     * Two things can keep old data on screen, and neither is a cache KNOSSOS keeps on disk —
+     * it installs no HTTP disk cache. One is the blocks already in memory, which stay until
+     * you move away from them; those are dropped here, the way a magnification change drops
+     * them, and loaded again. The other is Google's edge: GCS serves public objects with
+     * max-age=3600, so for up to an hour after an overwrite the edge may hand out the old
+     * file. Requests to GCS therefore carry a cache-busting parameter from now on (see
+     * Dataset::freshness) — for an hour, across restarts, since that is as long as the edge
+     * can be stale; after that plain requests are safe again and get the edge's speed back.
+     *
+     * Blocks painted in this annotation are not re-read: the edited copy is the unsaved
+     * annotation, it deliberately wins over the server, and dropping it would lose work. */
+    fileMenu.addAction(tr("Reload Dataset From Server"), this, [this]() {
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        Dataset::freshness = static_cast<std::uint64_t>(now);
+        QSettings{}.setValue(DATASET_WIDGET + '/' + DATASET_FRESH_SINCE, now);
+        state->viewer->updateDatasetMag(0);// unloads every block and loads them again
+        statusBar()->showMessage(tr("Reloading the dataset from the server. Blocks you painted keep your edits; "
+                                    "rescan the object inventory if objects changed."), 10000);
+    })->setToolTip(tr("Drop the blocks in memory and fetch them again, bypassing Google Cloud Storage's edge cache. "
+                      "For when the files on the server changed. Painted blocks keep your edits."));
+    {
+        // still inside the hour an earlier reload asked for? keep bypassing the edge
+        const auto since = QSettings{}.value(DATASET_WIDGET + '/' + DATASET_FRESH_SINCE, 0).toLongLong();
+        if (since > 0 && QDateTime::currentMSecsSinceEpoch() - since < 3600 * 1000) {
+            Dataset::freshness = static_cast<std::uint64_t>(since);
+        }
+    }
     fileMenu.addSeparator();
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/create-annotation.png"), tr("Create New Annotation"), this, &MainWindow::newAnnotationSlot, QKeySequence::New);
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/open-annotation.png"), tr("Open Annotation …"), this, &MainWindow::openSlot, QKeySequence::Open);

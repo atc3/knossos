@@ -648,6 +648,30 @@ QNetworkRequest Dataset::precomputedRequest(const CoordOfCube cubeCoord, bool & 
     return QNetworkRequest{base};
 }
 
+std::atomic<std::uint64_t> Dataset::freshness{0};
+
+namespace {
+// adds the edge-cache buster to a request for a file in a Google Cloud Storage bucket
+QNetworkRequest freshened(QNetworkRequest request) {
+    const auto generation = Dataset::freshness.load();
+    auto url = request.url();
+    const auto host = url.host();
+    /* Only GCS: it is the server this was confirmed against — it answers an unknown query
+     * parameter with the same object — and the one whose caching prompted it. Other servers
+     * carry their own auth tokens in the query and are left exactly as they were. */
+    const bool gcs = host == "storage.googleapis.com" || host.endsWith(".storage.googleapis.com");
+    if (generation == 0 || url.isEmpty() || !gcs) {
+        return request;
+    }
+    QUrlQuery query{url};
+    query.removeAllQueryItems("knossos_fresh");
+    query.addQueryItem("knossos_fresh", QString::number(generation));
+    url.setQuery(query);
+    request.setUrl(url);
+    return request;
+}
+}
+
 QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     switch (api) {
     case API::GoogleBrainmaps: {
@@ -657,11 +681,11 @@ QNetworkRequest Dataset::apiSwitch(const CoordOfCube cubeCoord) const {
     }
     case API::Heidelbrain:
     case API::PyKnossos: {
-        return QNetworkRequest{knossosCubeUrl(cubeCoord)};
+        return freshened(QNetworkRequest{knossosCubeUrl(cubeCoord)});
     }
     case API::NeuroglancerPrecomputed: {
         bool inVolume = false;
-        return precomputedRequest(cubeCoord, inVolume);
+        return freshened(precomputedRequest(cubeCoord, inVolume));
     }
     case API::OpenConnectome:
         return QNetworkRequest{openConnectomeCubeUrl(cubeCoord)};

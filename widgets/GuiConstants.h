@@ -30,6 +30,7 @@ const QString ANNOTATION_WIDGET = "tools_widget";
 const QString COMMENTS_TAB = "comments_tab";
 const QString DATASET_BROWSER = "dataset_browser";
 const QString DATASET_WIDGET = "dataset_widget";
+const QString DATASET_FRESH_SINCE = "dataset_fresh_since";// ms since epoch of the last "Reload Dataset From Server"
 const QString LAYER_DIALOG_WIDGET = "layer_dialog_widget";
 const QString MAIN_WINDOW = "main_window";
 const QString PREFERENCES_WIDGET = "preferences_widget";
