@@ -194,9 +194,16 @@ bool UndoStack::recordCube(const std::size_t layerId, const CoordOfCube & cubeCo
     if (pending.cubes.find(cubeCoord) != std::end(pending.cubes)) {
         return false;// already have this cube's "before" state for this operation
     }
+    /* Through a scratch string, keeping only an exact-size copy — compressing straight into
+     * the entry's string left each snapshot holding snappy's worst-case buffer, ~19.6 MB for
+     * a 16 MiB cube, while the budget below counted only the compressed length. The history
+     * then believed it held hundreds of megabytes while holding gigabytes. See
+     * Loader::Worker::snappyCacheBackupRaw for the same fix. */
+    thread_local std::string scratch;
+    snappy::Compress(reinterpret_cast<const char *>(rawCube), overlayCubeBytes(layerId), &scratch);
     auto & compressed = pending.cubes[cubeCoord];
-    snappy::Compress(reinterpret_cast<const char *>(rawCube), overlayCubeBytes(layerId), &compressed);
-    pending.bytes += compressed.size();
+    compressed = std::string(scratch.data(), scratch.size());
+    pending.bytes += compressed.capacity();// what it really holds, not just its length
     return true;
 }
 
