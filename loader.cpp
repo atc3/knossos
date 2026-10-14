@@ -383,10 +383,18 @@ void Loader::Worker::snappyCacheReplace(const std::size_t layerId, const quint64
 
 void Loader::Worker::snappyCacheBackupRaw(const std::size_t layerId, const CoordOfCube & cubeCoord, const void * cube) {
     QMutexLocker lock{&snappyCacheMutex};
-    //insert empty string into snappy cache
-    auto snappyIt = snappyCache[layerId][loaderMagnification].emplace(std::piecewise_construct, std::forward_as_tuple(cubeCoord), std::forward_as_tuple()).first;
-    //compress cube into the new string
-    snappy::Compress(reinterpret_cast<const char *>(cube), OBJID_BYTES * datasets[layerId].cubeShape.prod(), &snappyIt->second);
+    /* Compressed into a scratch string and stored as an exact-size copy.
+     *
+     * snappy::Compress(…, std::string *) first sizes the string to MaxCompressedLength — for
+     * a 16 MiB overlay cube 19.6 MB — compresses, then resizes down to the real length,
+     * typically well under 1 MB. Resizing a std::string down keeps its capacity, so every
+     * cube in this cache held ~19.6 MB for the rest of the session: the modified-cube cache
+     * of a long painting session reached gigabytes while holding a fraction of that in data.
+     * The scratch keeps the worst-case buffer once per thread; the cache gets only the bytes.
+     * Move-assigned, so a cube backed up again releases its previous buffer too. */
+    thread_local std::string scratch;
+    snappy::Compress(reinterpret_cast<const char *>(cube), OBJID_BYTES * datasets[layerId].cubeShape.prod(), &scratch);
+    snappyCache[layerId][loaderMagnification][cubeCoord] = std::string(scratch.data(), scratch.size());
 }
 
 void Loader::Worker::snappyCacheClear() {
