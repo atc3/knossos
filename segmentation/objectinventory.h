@@ -133,6 +133,11 @@ struct ScanSpec {
     std::size_t idCap{500000};
     int maxInFlight{4};
     QString cachePath;
+    /* The image layer at the same magnification, for each object's mean intensity. Only set
+     * when one lines up block for block with the segmentation — same cube shape, a level for
+     * this magnification, a format decodeImageCube() reads. */
+    Dataset image;
+    bool haveImage{false};
 };
 
 class Scanner : public QObject {
@@ -179,7 +184,7 @@ private:
     void completeCube(std::uint64_t code, bool decoded);
     void abortInFlight();
     Fetch decode(const CoordOfCube & cube, const QByteArray & payload, std::vector<std::uint64_t> & out) const;
-    void ingest(const CoordOfCube &, const std::vector<std::uint64_t> &);
+    void ingest(const CoordOfCube &, const std::vector<std::uint64_t> &, const std::uint8_t * image = nullptr);
     void flushDeltas(bool force);
     void maybeCheckpoint(bool force);
     void writeCache(bool complete);
@@ -202,6 +207,16 @@ private:
     std::uint32_t grid[3]{1, 1, 1};
     quint64 cubesTotal{0}, cubesDone{0}, cubesAbsent{0}, cubesEmpty{0}, cubesCorrupt{0};
     std::unordered_map<std::uint64_t, QNetworkReply *> inFlight;
+    /* Blocks whose labels are decoded and which now wait for their image block. Fetched only
+     * once a block turns out to hold an object, so the empty majority of a sparse
+     * segmentation costs no image traffic at all. */
+    std::unordered_map<std::uint64_t, QNetworkReply *> imageInFlight;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> awaitingImage;
+    std::vector<std::uint8_t> imageBuffer;
+    bool wantsImage(const std::vector<std::uint64_t> & voxels) const;
+    void requestImage(const CoordOfCube & cube, std::uint64_t code);
+    void finishImage(const CoordOfCube & cube, std::uint64_t code, const std::uint8_t * image);
+    bool readLocalImage(const CoordOfCube & cube);
     std::unordered_map<std::uint64_t, int> attempts;
     int consecutiveGiveUps{0};
     bool warnedAllAbsent{false};

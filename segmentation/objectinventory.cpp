@@ -84,9 +84,11 @@ namespace {
 
 constexpr auto CACHE_MAGIC = "KNOSINV";
 /* 2 adds the blocks completed ahead of the cursor, after the records; see SweepCursor::
- * completedAhead(). Version 1 files are still read — they simply have none, which is what
- * they were written assuming — so existing scans survive the change. */
-constexpr quint32 CACHE_VERSION = 2;
+ * completedAhead(). 3 grows Record from 80 to 128 bytes for the shape and intensity
+ * measures. Older files are still read: their records are widened with the measures marked
+ * unknown (see Record::measures), so existing scans survive both changes. */
+constexpr quint32 CACHE_VERSION = 3;
+constexpr quint32 LEGACY_RECORD_SIZE = 80;// versions 1 and 2
 constexpr int CACHE_HEADER_BYTES = 128;
 constexpr quint64 BYTES_PER_CUBE_GUESS = 150 * 1024;// what a compressed overlay block runs to
 constexpr int GIVE_UP_AFTER = 3;                    // retries per block
@@ -210,7 +212,9 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
     }
     quint32 version{0}, recordSize{0};
     in >> version >> recordSize;
-    if ((version != CACHE_VERSION && version != 1) || recordSize != sizeof(Record)) {
+    const bool current = version == CACHE_VERSION && recordSize == sizeof(Record);
+    const bool legacy = (version == 1 || version == 2) && recordSize == LEGACY_RECORD_SIZE;
+    if (!current && !legacy) {
         return out;// a newer or older layout; rescanning is cheaper than translating
     }
     char keyHash[20]{};
@@ -234,7 +238,7 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
     in >> out.cursor >> out.cubesDone >> out.cubesAbsent >> out.cubesEmpty >> out.cubesCorrupt
        >> recordCount >> out.scannedAt >> complete >> truncated;
 
-    const auto expected = static_cast<qint64>(recordCount) * static_cast<qint64>(sizeof(Record));
+    const auto expected = static_cast<qint64>(recordCount) * static_cast<qint64>(recordSize);
     const auto blob = file.read(expected);
     if (blob.size() != expected) {
         return out;
@@ -269,8 +273,19 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
         return out;
     }
     out.records.resize(recordCount);
-    if (recordCount != 0) {
+    if (recordCount != 0 && current) {
         std::memcpy(out.records.data(), blob.constData(), static_cast<std::size_t>(expected));
+    } else if (recordCount != 0) {
+        /* An older, narrower record: its fields are a prefix of today's, so each is copied
+         * over a default Record — whose measures are 0, i.e. unknown. Those stay unknown
+         * however many more blocks a resumed scan adds, because the blocks already folded in
+         * were never counted. */
+        for (quint64 i = 0; i < recordCount; ++i) {
+            Record r;
+            std::memcpy(&r, blob.constData() + i * recordSize, recordSize);
+            r.measures = 0;
+            out.records[i] = r;
+        }
     }
     out.complete = complete != 0;
     out.truncated = truncated != 0;
@@ -577,6 +592,15 @@ void Scanner::abortInFlight() {
         pair.second->abort();
         pair.second->deleteLater();
     }
+    auto images = std::move(imageInFlight);
+    imageInFlight.clear();
+    for (auto & pair : images) {
+        QObject::disconnect(pair.second, nullptr, this, nullptr);
+        pair.second->abort();
+        pair.second->deleteLater();
+    }
+    // their labels go too: the cursor never counted these blocks done, so a resume refetches them
+    awaitingImage.clear();
 }
 
 void Scanner::cancel() {
@@ -611,14 +635,14 @@ void Scanner::step() {
     maybeCheckpoint(false);
     emit progress(cubesDone, cubesTotal, acc.records().size());
 
-    if (sweep.finished() && inFlight.empty() && scheduledRetries == 0) {
+    if (sweep.finished() && inFlight.empty() && imageInFlight.empty() && scheduledRetries == 0) {
         stop(State::Complete, {});
         return;
     }
     /* Nothing is reposted while the only outstanding work is a block waiting out its
      * backoff — its retry will call back in. Otherwise this would spin the event loop for
      * the length of the wait. */
-    if (!inFlight.empty() || (!loaderBusy && !sweep.exhausted())) {
+    if (!inFlight.empty() || !imageInFlight.empty() || (!loaderBusy && !sweep.exhausted())) {
         stepQueued = true;
         QMetaObject::invokeMethod(this, [this]() {
             stepQueued = false;
@@ -631,12 +655,24 @@ void Scanner::issue() {
     const auto local = spec.layer.url.scheme() == "file";
     std::uint64_t code = 0;
     while (running && !paused && !loaderBusy
-           && static_cast<int>(inFlight.size()) < std::max(1, spec.maxInFlight)
+           && static_cast<int>(inFlight.size() + imageInFlight.size()) < std::max(1, spec.maxInFlight)
            && sweep.next(code, covers())) {
         const auto cube = cubeAt(code);
         if (local) {
             switch (readLocal(cube, decodeBuffer)) {
-            case Fetch::Decoded: ingest(cube, decodeBuffer); break;
+            case Fetch::Decoded:
+                if (wantsImage(decodeBuffer)) {
+                    if (spec.image.url.scheme() != "file") {
+                        // labels on disk, image on a server: wait for it like a remote block does
+                        awaitingImage[code] = decodeBuffer;
+                        requestImage(cube, code);
+                        return;
+                    }
+                    ingest(cube, decodeBuffer, readLocalImage(cube) ? imageBuffer.data() : nullptr);
+                } else {
+                    ingest(cube, decodeBuffer);
+                }
+                break;
             case Fetch::Absent: ++cubesAbsent; break;
             case Fetch::Corrupt:
                 ++cubesCorrupt;
@@ -650,6 +686,80 @@ void Scanner::issue() {
         }
         requestRemote(cube, code);
     }
+}
+
+// Worth fetching the image only for a block that holds part of an object.
+bool Scanner::wantsImage(const std::vector<std::uint64_t> & voxels) const {
+    if (!spec.haveImage) {
+        return false;
+    }
+    const auto background = spec.backgroundId;
+    return std::any_of(std::begin(voxels), std::end(voxels), [background](const std::uint64_t v){ return v != background; });
+}
+
+bool Scanner::readLocalImage(const CoordOfCube & cube) {
+    QString path;
+    try {
+        path = spec.image.knossosCubeUrl(cube).toLocalFile();
+    } catch (const std::exception &) {
+        return false;
+    }
+    QFile file(path);
+    if (path.isEmpty() || !file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const auto voxels = static_cast<std::size_t>(spec.image.cubeShape.prod());
+    imageBuffer.resize(voxels);
+    return Loader::decodeImageCube(spec.image.type, file.readAll(), voxels, imageBuffer.data());
+}
+
+/* The image block for a block whose labels are already decoded.
+ *
+ * Never retried and never able to stall the sweep: intensity is a second opinion on an
+ * object, not part of finding it, so an image block that will not come is simply left out —
+ * the object's mean is then over the voxels that did have image data. */
+void Scanner::requestImage(const CoordOfCube & cube, const std::uint64_t code) {
+    QNetworkRequest request;
+    try {
+        request = spec.image.apiSwitch(cube);
+    } catch (const std::exception &) {
+        finishImage(cube, code, nullptr);
+        return;
+    }
+    if (request.url().isEmpty()) {
+        finishImage(cube, code, nullptr);
+        return;
+    }
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::PreferNetwork);
+    request.setPriority(QNetworkRequest::LowPriority);
+    auto * reply = qnam.get(request);
+    imageInFlight[code] = reply;
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, code, cube]() {
+        const auto it = imageInFlight.find(code);
+        if (it == std::end(imageInFlight) || it->second != reply) {
+            reply->deleteLater();
+            return;// cancelled
+        }
+        imageInFlight.erase(it);
+        const auto ok = reply->error() == QNetworkReply::NoError;
+        const auto payload = reply->readAll();
+        reply->deleteLater();
+        const auto voxels = static_cast<std::size_t>(spec.image.cubeShape.prod());
+        imageBuffer.resize(voxels);
+        const auto decoded = ok && Loader::decodeImageCube(spec.image.type, payload, voxels, imageBuffer.data());
+        finishImage(cube, code, decoded ? imageBuffer.data() : nullptr);
+        step();
+    });
+}
+
+void Scanner::finishImage(const CoordOfCube & cube, const std::uint64_t code, const std::uint8_t * image) {
+    const auto it = awaitingImage.find(code);
+    if (it == std::end(awaitingImage)) {
+        return;// dropped by a cancel while the image was on its way
+    }
+    ingest(cube, it->second, image);
+    awaitingImage.erase(it);
+    completeCube(code, true);
 }
 
 Scanner::Fetch Scanner::readLocal(const CoordOfCube & cube, std::vector<std::uint64_t> & out) {
@@ -712,7 +822,11 @@ void Scanner::requestRemote(const CoordOfCube & cube, const std::uint64_t code) 
             completeCube(code, false);
         } else if (error == QNetworkReply::NoError) {
             const auto fetched = decode(cube, payload, decodeBuffer);
-            if (fetched == Fetch::Decoded) {
+            if (fetched == Fetch::Decoded && wantsImage(decodeBuffer)) {
+                consecutiveGiveUps = 0;
+                awaitingImage[code] = decodeBuffer;
+                requestImage(cube, code);// completes the block when the image lands or fails
+            } else if (fetched == Fetch::Decoded) {
                 ingest(cube, decodeBuffer);
                 consecutiveGiveUps = 0;
                 completeCube(code, true);
@@ -817,7 +931,7 @@ Scanner::Fetch Scanner::decode(const CoordOfCube & cube, const QByteArray & payl
     return ok ? Fetch::Decoded : Fetch::Corrupt;
 }
 
-void Scanner::ingest(const CoordOfCube & cube, const std::vector<std::uint64_t> & voxels) {
+void Scanner::ingest(const CoordOfCube & cube, const std::vector<std::uint64_t> & voxels, const std::uint8_t * image) {
     CubeGeometry geom;
     const auto origin = spec.layer.cube2global(cube);
     geom.origin[0] = origin.x;
@@ -835,7 +949,7 @@ void Scanner::ingest(const CoordOfCube & cube, const std::vector<std::uint64_t> 
     geom.nmPerVoxel[2] = spec.layer.scale.z;
 
     const auto before = acc.records().size();
-    acc.ingestCube(voxels.data(), geom, spec.backgroundId);
+    acc.ingestCube(voxels.data(), geom, spec.backgroundId, image);
     if (acc.records().size() == before && acc.touched().empty()) {
         ++cubesEmpty;
     }
@@ -1216,6 +1330,21 @@ void Inventory::startScan(const int requested) {
     spec.idCap = settings.value("objectInventoryIdCap", 500000).toULongLong();
     spec.maxInFlight = settings.value("objectInventoryMaxInFlight", 4).toInt();
     spec.cachePath = cachePathFor(chosen);
+    /* The image layer to read intensity from: the first one that lines up block for block
+     * with the segmentation at this magnification, in a format the shared decoder reads. A
+     * dataset without one still scans; its objects just have no intensity. */
+    for (const auto & layer : Dataset::datasets) {
+        const auto readable = layer.type == Dataset::CubeType::RAW_UNCOMPRESSED || layer.type == Dataset::CubeType::RAW_PNG
+                || layer.type == Dataset::CubeType::RAW_JPG || layer.type == Dataset::CubeType::RAW_J2K
+                || layer.type == Dataset::CubeType::RAW_JP2_6;
+        const auto blockApi = layer.api == Dataset::API::Heidelbrain || layer.api == Dataset::API::PyKnossos;
+        if (!layer.isOverlay() && readable && blockApi && layer.cubeShape == spec.layer.cubeShape
+                && option.magIndex < layer.scales.size()) {
+            spec.image = atMag(layer, option.magIndex);
+            spec.haveImage = true;
+            break;
+        }
+    }
 
     scanClock.start();
     doneAtStart = 0;// set from the first progress report, which carries the resumed count

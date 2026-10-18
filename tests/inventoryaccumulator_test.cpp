@@ -4,6 +4,8 @@
 #include "segmentation/inventoryaccumulator.h"
 
 #include <algorithm>
+#include <cmath>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -496,7 +498,7 @@ int main() {
 
     section("the cache record layout");
     {
-        check(sizeof(Record) == 80, "a record is 80 bytes");
+        check(sizeof(Record) == 128, "a record is 128 bytes, with the shape and intensity measures");
         Record r;
         r.id = 0xdeadbeefcafef00dull;
         r.voxels = 1ull << 40;
@@ -524,6 +526,115 @@ int main() {
         std::int32_t c[3];
         none.centroid(c);
         check(c[0] == 5 && c[1] == 6 && c[2] == 7, "an empty record's mean falls back to its position rather than dividing by zero");
+    }
+
+    section("surface: exposed faces, counted within each block");
+    {
+        /* Brute force: for every voxel of an id, each of its six neighbours that lies inside
+         * the block and holds a different id is one face. The accumulator gets the same
+         * answer from run ends and row comparisons, and has to agree exactly, per id and per
+         * axis, over randomised blocks. */
+        std::mt19937 rng(7171);
+        bool facesMatch = true;
+        for (int trial = 0; trial < 40; ++trial) {
+            const std::int32_t origin[3]{0, 0, 0}, step[3]{1, 1, 1};
+            auto b = makeBlock(9, origin, step);
+            for (auto & v : b.voxels) { v = rng() % 4; }// ids 1..3 and background 0
+            Accumulator acc;
+            acc.ingestCube(b.voxels.data(), b.geom, 0);
+            std::map<std::uint64_t, std::array<std::uint64_t, 3>> ref;
+            const int n = b.geom.shape[0];
+            for (int z = 0; z < n; ++z) for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+                const auto id = b.at(x, y, z);
+                if (id == 0) { continue; }
+                const int d[6][4]{{-1,0,0,0},{1,0,0,0},{0,-1,0,1},{0,1,0,1},{0,0,-1,2},{0,0,1,2}};
+                for (const auto & o : d) {
+                    const int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= n || ny >= n || nz >= n) { continue; }
+                    if (b.at(nx, ny, nz) != id) { ++ref[id][o[3]]; }
+                }
+            }
+            for (const auto & r : acc.records()) {
+                const auto want = ref[r.id];
+                facesMatch = facesMatch && r.faces[0] == want[0] && r.faces[1] == want[1] && r.faces[2] == want[2];
+            }
+        }
+        check(facesMatch, "face counts match brute force per id and per axis");
+
+        // a 4x3x2 box well inside one block has exactly the faces of a 4x3x2 box
+        const std::int32_t origin[3]{0, 0, 0}, step[3]{1, 1, 1};
+        auto box = makeBlock(12, origin, step);
+        for (int z = 3; z < 5; ++z) for (int y = 3; y < 6; ++y) for (int x = 3; x < 7; ++x) { box.at(x, y, z) = 5; }
+        Accumulator one;
+        one.ingestCube(box.voxels.data(), box.geom, 0);
+        const auto & r = one.records().front();
+        check(r.faces[0] == 2 * 3 * 2 && r.faces[1] == 2 * 4 * 2 && r.faces[2] == 2 * 4 * 3,
+              "a box inside a block has exactly a box's faces");
+
+        // the same box split across two blocks gains no surface at the seam
+        const std::int32_t o0[3]{0, 0, 0}, o1[3]{6, 0, 0};
+        auto left = makeBlock(6, o0, step), right = makeBlock(6, o1, step);
+        for (int z = 3; z < 5; ++z) for (int y = 2; y < 5; ++y) {
+            for (int x = 3; x < 6; ++x) { left.at(x, y, z) = 5; }// global x 3..5
+            for (int x = 0; x < 1; ++x) { right.at(x, y, z) = 5; }// global x 6
+        }
+        Accumulator split;
+        split.ingestCube(left.voxels.data(), left.geom, 0);
+        split.ingestCube(right.voxels.data(), right.geom, 0);
+        const auto & s2 = split.records().front();
+        // both real ends are inside their blocks and counted; the seam between them is not
+        check(s2.faces[0] == 2 * 3 * 2, "a seam between blocks adds no faces");
+        check(s2.faces[1] == 2 * 4 * 2 && s2.faces[2] == 2 * 4 * 3, "and the faces along the other axes are all there");
+    }
+
+    section("sphericity and mean intensity");
+    {
+        const std::int32_t origin[3]{0, 0, 0}, step[3]{1, 1, 1};
+        const double nm[3]{1, 1, 1};
+        auto b = makeBlock(32, origin, step);
+        std::vector<std::uint8_t> image(b.voxels.size(), 0);
+        // a ball of radius 9, and a long thin rod, with different intensities
+        std::uint64_t ballSum = 0, ballVoxels = 0;
+        for (int z = 0; z < 32; ++z) for (int y = 0; y < 32; ++y) for (int x = 0; x < 32; ++x) {
+            const auto i = (static_cast<std::size_t>(z) * 32 + y) * 32 + x;
+            const int dx = x - 15, dy = y - 15, dz = z - 15;
+            if (dx * dx + dy * dy + dz * dz <= 81) {
+                b.voxels[i] = 1;
+                image[i] = static_cast<std::uint8_t>(150 + (x % 7));
+                ballSum += image[i];
+                ++ballVoxels;
+            } else if (y == 29 && z == 29 && x >= 2 && x < 30) {
+                b.voxels[i] = 2;
+                image[i] = 20;
+            }
+        }
+        Accumulator acc;
+        acc.ingestCube(b.voxels.data(), b.geom, 0, image.data());
+        const auto & ball = acc.records()[acc.indexOfId(1)];
+        const auto & rod = acc.records()[acc.indexOfId(2)];
+        const auto ballPsi = objinv::sphericity(ball, nm);
+        const auto rodPsi = objinv::sphericity(rod, nm);
+        std::printf("    ball sphericity %.3f, rod %.3f\n", ballPsi, rodPsi);
+        check(ballPsi > 0.55 && ballPsi < 0.75, "a voxelised ball scores about two thirds, as the stepped surface implies");
+        // a 28x1x1 rod: V = 28, A = 114 faces, so pi^(1/3) (6V)^(2/3) / A = 0.391
+        check(std::abs(rodPsi - 0.391) < 0.001 && rodPsi < 0.6 * ballPsi, "a thin rod scores what the formula gives, well below the ball");
+        check(std::abs(objinv::meanIntensity(ball) - static_cast<double>(ballSum) / ballVoxels) < 1e-9,
+              "the mean intensity is exactly the mean of the image under the object");
+        check(objinv::meanIntensity(rod) == 20, "and each object gets its own");
+
+        Accumulator noImage;
+        noImage.ingestCube(b.voxels.data(), b.geom, 0);
+        check(objinv::meanIntensity(noImage.records().front()) < 0, "without image data the intensity is unknown, not zero");
+
+        auto legacy = ball;
+        legacy.measures = 0;// as adopted from a cache written before the measures existed
+        check(objinv::sphericity(legacy, nm) < 0 && objinv::meanIntensity(legacy) < 0,
+              "a record from an older cache reports both measures as unknown rather than partial");
+
+        const double aniso[3]{10, 10, 40};
+        check(std::abs(objinv::surfaceArea(ball, aniso)
+                       - (ball.faces[0] * 400.0 + ball.faces[1] * 400.0 + ball.faces[2] * 100.0)) < 1e-6,
+              "a face's area is the voxel side it is, on anisotropic data");
     }
 
     std::printf("\n%s\n", failures == 0 ? "all ok" : (std::to_string(failures) + " failed").c_str());

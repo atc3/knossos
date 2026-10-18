@@ -63,8 +63,7 @@ class ObjectInventoryModel : public QAbstractTableModel {
     Q_OBJECT
     friend class ObjectInventoryView;
 public:
-    enum Column { Ordinal, Id, Voxels, Position, StateCol, ColumnCount };
-    enum class Order { Scan, LargestFirst, NearestFirst };
+    enum Column { Ordinal, Id, Voxels, Sphericity, Intensity, Distance, Position, StateCol, ColumnCount };
 
     explicit ObjectInventoryModel(QObject * parent = nullptr);
     int rowCount(const QModelIndex & = {}) const override;
@@ -80,12 +79,11 @@ public:
 
     void setFilter(const objinv::Filter &);
     const objinv::Filter & filter() const { return activeFilter; }
-    void setOrder(Order);
-    Order order() const { return activeOrder; }
-    /* Re-applies the current order to everything discovered since it was last applied.
-     * Deliberately manual: re-sorting on every batch would renumber the list under a walk
-     * in progress, which is the one thing the navigation keys cannot tolerate. */
-    void reapplyOrder();
+    /* Sorts by a column, from a click on its header. A one-off: rows found afterwards are
+     * appended at the end rather than slotted in, because re-sorting on every batch would
+     * renumber the list under a walk in progress — the one thing the navigation keys cannot
+     * tolerate. Clicking the header again re-sorts, taking them in. */
+    void sort(int column, Qt::SortOrder order) override;
     std::size_t shownCount() const { return rows.size(); }
     std::size_t visitedCount() const;
     bool orderIsStale() const { return staleUnderOrder; }
@@ -99,11 +97,16 @@ public:
 private:
     bool accepts(std::size_t recordIndex) const;
     void sortRows();
+    // scan order, ascending: the order the sweep appends in, so new rows never fall out of it
+    bool natural() const { return sortColumn == Ordinal && sortOrder == Qt::AscendingOrder; }
+    double distanceOf(const objinv::Record &) const;
 
-    std::vector<std::uint32_t> rows;// view row -> record index; strictly increasing under Order::Scan
+    std::vector<std::uint32_t> rows;// view row -> record index; strictly increasing in natural order
     std::vector<bool> visited;
     objinv::Filter activeFilter;
-    Order activeOrder{Order::Scan};
+    int sortColumn{Ordinal};
+    Qt::SortOrder sortOrder{Qt::AscendingOrder};
+    Coordinate distanceFrom;// the crosshair when the list was last sorted; see the Distance column
     bool staleUnderOrder{false};
 };
 
@@ -124,8 +127,6 @@ class ObjectInventoryView : public QWidget {
     QSpinBox minVoxelsSpin;
     QCheckBox hideKnownCheck{tr("hide annotated")};
     QCheckBox hideVisitedCheck{tr("hide visited")};
-    QComboBox orderCombo;
-    QPushButton reorderButton{tr("↻")};
 
     QTreeView table;
     bool sawScanning{false};// was the inventory scanning at the last state change
