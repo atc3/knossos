@@ -67,12 +67,6 @@ class Worker;
 
 namespace Loader {
 using DecompressionResult = std::tuple<bool, void*, QIODevice*>;
-/* One image-layer cube — raw 8-bit, PNG, JPEG or JPEG 2000 — decoded to 8-bit grey in KNOSSOS
- * cube order. Shared by the loader and the object inventory's sweep, which reads the image
- * under each object for its mean intensity. False when the bytes do not decode to a cube of
- * exactly `voxels`. */
-bool decodeImageCube(Dataset::CubeType type, const QByteArray & data, std::size_t voxels, std::uint8_t * out);
-
 class Worker : public QObject {
     Q_OBJECT
     friend class Loader::Controller;

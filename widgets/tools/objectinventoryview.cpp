@@ -85,8 +85,6 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
         case Sphericity: return tr("How compact the object is: 1 for a perfect ball, lower for flat, thin or ragged shapes.\n"
                                    "From its voxel faces, so a voxelised ball scores about 0.66 — compare objects with each\n"
                                    "other rather than with 1. Blank for objects scanned before this was measured: rescan.");
-        case Intensity: return tr("Mean image intensity under the object, 0–255, from the image layer at the scan\n"
-                                  "magnification. Blank without an image layer, or for objects scanned before this was measured.");
         case Distance: return tr("Distance from where the crosshair was when the list was last sorted.\n"
                                  "Sort by it to list what is nearest; sort again after moving to update it.");
         default: return tr("Click to sort by this column; click again to reverse.");
@@ -100,7 +98,6 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
     case Id: return tr("Subobject ID");
     case Voxels: return tr("Voxels");
     case Sphericity: return tr("Sphericity");
-    case Intensity: return tr("Intensity");
     case Distance: return tr("Distance");
     case Position: return tr("Position");
     case StateCol: return tr("State");
@@ -222,8 +219,8 @@ double ObjectInventoryModel::distanceOf(const objinv::Record & r) const {
  *
  * Keys are worked out once per row rather than inside the comparison — sphericity is a cube
  * root and a power, and at a few hundred thousand rows a comparator recomputing it would do
- * that tens of millions of times. Objects whose value is unknown (sphericity or intensity
- * from an older scan, or no image layer) go last in both directions, so "lowest first" is
+ * that tens of millions of times. Objects whose value is unknown (sphericity from a scan made
+ * before it was measured) go last in both directions, so "lowest first" is
  * not a screenful of blanks. Ties fall back to scan order, so the same list always sorts the
  * same way. */
 void ObjectInventoryModel::sortRows() {
@@ -247,7 +244,6 @@ void ObjectInventoryModel::sortRows() {
         case Id: value = static_cast<double>(r.id); break;
         case Voxels: value = static_cast<double>(r.voxels); break;
         case Sphericity: value = objinv::sphericity(r, nm); known = value >= 0; break;
-        case Intensity: value = objinv::meanIntensity(r); known = value >= 0; break;
         case Distance: value = distanceOf(r); break;
         case Position: {
             const auto p = positionOf(r);
@@ -386,10 +382,6 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
         const auto psi = objinv::sphericity(*r, nm);
         return psi < 0 ? QVariant{QStringLiteral("—")} : QVariant{QString::number(psi, 'f', 2)};
     }
-    case Intensity: {
-        const auto mean = objinv::meanIntensity(*r);
-        return mean < 0 ? QVariant{QStringLiteral("—")} : QVariant{QString::number(mean, 'f', 1)};
-    }
     case Distance: {
         const auto nm = distanceOf(*r);
         return nm >= 1000 ? tr("%1 µm").arg(nm / 1000, 0, 'f', 1) : tr("%1 nm").arg(nm, 0, 'f', 0);
@@ -476,7 +468,6 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     table.setColumnWidth(ObjectInventoryModel::Id, 110);
     table.setColumnWidth(ObjectInventoryModel::Voxels, 90);
     table.setColumnWidth(ObjectInventoryModel::Sphericity, 80);
-    table.setColumnWidth(ObjectInventoryModel::Intensity, 75);
     table.setColumnWidth(ObjectInventoryModel::Distance, 80);
     table.setColumnWidth(ObjectInventoryModel::Position, 150);
 

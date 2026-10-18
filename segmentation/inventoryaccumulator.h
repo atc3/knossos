@@ -78,8 +78,6 @@ struct Record {
      * have. That undercounts only where an object's true surface coincides with a block
      * face, which is rare. At the scan magnification, like `voxels`. */
     std::uint64_t faces[3]{};
-    std::uint64_t intensitySum{0};   // Σ image intensity under this object's voxels
-    std::uint64_t intensityVoxels{0};// voxels that had image data to sum; mean = sum / this
     /* Which measures cover the whole object. Set when the record is created, so a record
      * adopted from a cache written before the measures existed — which saw some blocks
      * without counting them — never presents a partial count as the real one. */
@@ -94,13 +92,12 @@ struct Record {
         }
     }
 };
-static_assert(sizeof(Record) == 128, "the cache format stores Record verbatim");
+static_assert(sizeof(Record) == 112, "the cache format stores Record verbatim");
 // older caches hold 80-byte records, widened on load by copying them over the start of this one
 static_assert(offsetof(Record, faces) == 80, "the measures must follow the version-2 fields, which form a prefix");
 
 namespace Measure {
 constexpr std::uint32_t Faces = 1u << 0;
-constexpr std::uint32_t Intensity = 1u << 1;
 }
 
 /* Surface area in nm², from the face counts and the size of a voxel at the scan
@@ -129,13 +126,6 @@ inline double sphericity(const Record & r, const double nm[3]) {
     return std::cbrt(3.14159265358979323846) * std::pow(6 * volume, 2.0 / 3.0) / area;
 }
 
-// Mean image intensity under the object, or negative when no image data was summed.
-inline double meanIntensity(const Record & r) {
-    if ((r.measures & Measure::Intensity) == 0 || r.intensityVoxels == 0) {
-        return -1;
-    }
-    return static_cast<double>(r.intensitySum) / static_cast<double>(r.intensityVoxels);
-}
 static_assert(alignof(Record) == 8, "");
 
 /* Where a block sits and how big its voxels are.
@@ -187,10 +177,7 @@ public:
      * or swept in a different order entirely. It also lands you in the object's thickest
      * part rather than on a thin tendril that happens to pass near the mean, which is the
      * better place to start refining. */
-    /* `image` is the matching block of the image layer, same shape and order, or null when
-     * there is none — then intensity is simply not summed for this block. */
-    void ingestCube(const std::uint64_t * voxels, const CubeGeometry & geom, const std::uint64_t backgroundId,
-                    const std::uint8_t * image = nullptr) {
+    void ingestCube(const std::uint64_t * voxels, const CubeGeometry & geom, const std::uint64_t backgroundId) {
         if (voxels == nullptr || !geom.sane()) {
             return;
         }
@@ -231,7 +218,7 @@ public:
             return;
         }
         /* pass 2 — the voxel of each run nearest that object's block mean, and per run the
-         * exposed faces and the image intensity. Faces along x come free from the run itself:
+         * exposed faces. Faces along x come free from the run itself:
          * a run ends exactly where the id changes, so each end is a face unless it is the
          * block's edge. Along y and z each voxel is compared with the rows beside it, which is
          * sequential memory and no hashing; the object's entry is touched once per run. */
@@ -243,7 +230,6 @@ public:
                 const auto * above = y + 1 < sy ? row + rowStride : nullptr;
                 const auto * before = z > 0 ? row - planeStride : nullptr;
                 const auto * after = z + 1 < sz ? row + planeStride : nullptr;
-                const auto * pixels = image != nullptr ? image + rowOffset : nullptr;
                 for (int x = 0; x < sx; ) {
                     const auto id = row[x];
                     int end = x + 1;
@@ -257,12 +243,7 @@ public:
                             s.faces[2] += static_cast<std::uint64_t>((before != nullptr && before[i] != id ? 1 : 0)
                                                                     + (after != nullptr && after[i] != id ? 1 : 0));
                         }
-                        if (pixels != nullptr) {
-                            std::uint64_t sum = 0;
-                            for (int i = x; i < end; ++i) { sum += pixels[i]; }
-                            s.intensitySum += sum;
-                            s.intensityVoxels += static_cast<std::uint64_t>(end - x);
-                        }
+
                         const auto n = static_cast<double>(s.count);
                         const double cx = s.sum[0] / n, cy = s.sum[1] / n, cz = s.sum[2] / n;
                         // best x within this run is closed form; y and z are fixed by the row
@@ -341,8 +322,6 @@ private:
         int best[3]{0, 0, 0};
         double bestDist2{std::numeric_limits<double>::max()};
         std::uint64_t faces[3]{};
-        std::uint64_t intensitySum{0};
-        std::uint64_t intensityVoxels{0};
     };
 
     // A tiebreak on the coordinate itself, so which block got there first cannot matter.
@@ -367,8 +346,8 @@ private:
                 idx = recs.size();
                 Record fresh;
                 fresh.id = id;
-                // counted from its very first block, so both measures cover all of it
-                fresh.measures = Measure::Faces | Measure::Intensity;
+                // counted from its very first block, so the face count covers all of it
+                fresh.measures = Measure::Faces;
                 for (int a = 0; a < 3; ++a) {
                     fresh.bboxMin[a] = std::numeric_limits<std::int32_t>::max();
                     fresh.bboxMax[a] = std::numeric_limits<std::int32_t>::min();
@@ -380,8 +359,6 @@ private:
             auto & r = recs[idx];
             r.voxels += s.count;
             for (int a = 0; a < 3; ++a) { r.faces[a] += s.faces[a]; }
-            r.intensitySum += s.intensitySum;
-            r.intensityVoxels += s.intensityVoxels;
             std::int32_t candidate[3];
             for (int a = 0; a < 3; ++a) {
                 r.sum[a] += static_cast<std::int64_t>(s.count) * geom.origin[a]

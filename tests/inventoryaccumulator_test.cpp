@@ -498,7 +498,7 @@ int main() {
 
     section("the cache record layout");
     {
-        check(sizeof(Record) == 128, "a record is 128 bytes, with the shape and intensity measures");
+        check(sizeof(Record) == 112, "a record is 112 bytes, with the face counts behind sphericity");
         Record r;
         r.id = 0xdeadbeefcafef00dull;
         r.voxels = 1ull << 40;
@@ -587,29 +587,23 @@ int main() {
         check(s2.faces[1] == 2 * 4 * 2 && s2.faces[2] == 2 * 4 * 3, "and the faces along the other axes are all there");
     }
 
-    section("sphericity and mean intensity");
+    section("sphericity");
     {
         const std::int32_t origin[3]{0, 0, 0}, step[3]{1, 1, 1};
         const double nm[3]{1, 1, 1};
         auto b = makeBlock(32, origin, step);
-        std::vector<std::uint8_t> image(b.voxels.size(), 0);
-        // a ball of radius 9, and a long thin rod, with different intensities
-        std::uint64_t ballSum = 0, ballVoxels = 0;
+        // a ball of radius 9, and a long thin rod
         for (int z = 0; z < 32; ++z) for (int y = 0; y < 32; ++y) for (int x = 0; x < 32; ++x) {
             const auto i = (static_cast<std::size_t>(z) * 32 + y) * 32 + x;
             const int dx = x - 15, dy = y - 15, dz = z - 15;
             if (dx * dx + dy * dy + dz * dz <= 81) {
                 b.voxels[i] = 1;
-                image[i] = static_cast<std::uint8_t>(150 + (x % 7));
-                ballSum += image[i];
-                ++ballVoxels;
             } else if (y == 29 && z == 29 && x >= 2 && x < 30) {
                 b.voxels[i] = 2;
-                image[i] = 20;
             }
         }
         Accumulator acc;
-        acc.ingestCube(b.voxels.data(), b.geom, 0, image.data());
+        acc.ingestCube(b.voxels.data(), b.geom, 0);
         const auto & ball = acc.records()[acc.indexOfId(1)];
         const auto & rod = acc.records()[acc.indexOfId(2)];
         const auto ballPsi = objinv::sphericity(ball, nm);
@@ -618,18 +612,9 @@ int main() {
         check(ballPsi > 0.55 && ballPsi < 0.75, "a voxelised ball scores about two thirds, as the stepped surface implies");
         // a 28x1x1 rod: V = 28, A = 114 faces, so pi^(1/3) (6V)^(2/3) / A = 0.391
         check(std::abs(rodPsi - 0.391) < 0.001 && rodPsi < 0.6 * ballPsi, "a thin rod scores what the formula gives, well below the ball");
-        check(std::abs(objinv::meanIntensity(ball) - static_cast<double>(ballSum) / ballVoxels) < 1e-9,
-              "the mean intensity is exactly the mean of the image under the object");
-        check(objinv::meanIntensity(rod) == 20, "and each object gets its own");
-
-        Accumulator noImage;
-        noImage.ingestCube(b.voxels.data(), b.geom, 0);
-        check(objinv::meanIntensity(noImage.records().front()) < 0, "without image data the intensity is unknown, not zero");
-
         auto legacy = ball;
-        legacy.measures = 0;// as adopted from a cache written before the measures existed
-        check(objinv::sphericity(legacy, nm) < 0 && objinv::meanIntensity(legacy) < 0,
-              "a record from an older cache reports both measures as unknown rather than partial");
+        legacy.measures = 0;// as adopted from a cache written before the face counts existed
+        check(objinv::sphericity(legacy, nm) < 0, "a record from an older cache reports sphericity as unknown rather than partial");
 
         const double aniso[3]{10, 10, 40};
         check(std::abs(objinv::surfaceArea(ball, aniso)

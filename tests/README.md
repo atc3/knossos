@@ -118,13 +118,12 @@ The block-count checks also pin the real dataset sizes the feature was designed 
 (1344 blocks at 8× for the largest volume, 880 at magnification 1 for a crop), because
 those numbers are what the scan budget is set against.
 
-The shape and intensity measures are checked the same way. Exposed faces are compared
-with brute force — every voxel against its six in-block neighbours — per id and per axis over
-randomised blocks; a box split across two blocks must gain no faces at the seam; and the mean
-intensity must equal the plain mean of the image under each object. Sphericity is pinned on a
+Sphericity is checked the same way. Exposed faces are compared with brute force — every
+voxel against its six in-block neighbours — per id and per axis over randomised blocks, and a
+box split across two blocks must gain no faces at the seam. Sphericity itself is pinned on a
 voxelised ball (about 0.67, from the stepped surface) and on a 28×1×1 rod, whose value the
-formula gives exactly. A record carried over from an older cache must report both measures as
-unknown rather than as partial counts.
+formula gives exactly. A record carried over from an older cache must report it as unknown
+rather than as a partial count.
 
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/invacc_test inventoryaccumulator_test.cpp && /tmp/invacc_test

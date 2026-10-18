@@ -493,26 +493,6 @@ void Loader::Worker::abortDownloadsFinishDecompression(std::size_t layerId, Func
     }
 }
 
-bool Loader::decodeImageCube(const Dataset::CubeType type, const QByteArray & data, const std::size_t voxels, std::uint8_t * const out) {
-    if (type == Dataset::CubeType::RAW_UNCOMPRESSED) {
-        if (static_cast<std::size_t>(data.size()) != voxels) {
-            return false;
-        }
-        std::copy(std::begin(data), std::end(data), out);
-        return true;
-    }
-    if (type == Dataset::CubeType::RAW_JPG || type == Dataset::CubeType::RAW_J2K
-            || type == Dataset::CubeType::RAW_JP2_6 || type == Dataset::CubeType::RAW_PNG) {
-        const auto image = QImage::fromData(data).convertToFormat(QImage::Format_Grayscale8);
-        if (static_cast<std::size_t>(image.sizeInBytes()) != voxels) {
-            return false;
-        }
-        std::copy(image.bits(), image.bits() + image.sizeInBytes(), out);
-        return true;
-    }
-    return false;
-}
-
 Loader::DecompressionResult decompressCube(void * currentSlot, QIODevice & reply, const std::size_t layerId, const Dataset dataset, decltype(state->cube2Pointer)::value_type::value_type & cubeHash, const CoordOfCube cubeCoord) {
     if (!reply.isOpen()) {// sanity check, finished replies with no error should be ready for reading (https://bugreports.qt.io/browse/QTBUG-45944)
         qCritical() << layerId << cubeCoord << static_cast<int>(dataset.type) << "decompression failed → no fill";
@@ -524,10 +504,19 @@ Loader::DecompressionResult decompressCube(void * currentSlot, QIODevice & reply
     auto data = reply.read(reply.bytesAvailable());//readAll can be very slow – https://bugreports.qt.io/browse/QTBUG-45926
     const auto cubeVxCount = dataset.cubeShape.prod();
     const std::size_t availableSize = data.size();
-    if (dataset.type == Dataset::CubeType::RAW_UNCOMPRESSED || dataset.type == Dataset::CubeType::RAW_JPG
-            || dataset.type == Dataset::CubeType::RAW_J2K || dataset.type == Dataset::CubeType::RAW_JP2_6
-            || dataset.type == Dataset::CubeType::RAW_PNG) {
-        success = Loader::decodeImageCube(dataset.type, data, static_cast<std::size_t>(cubeVxCount), reinterpret_cast<std::uint8_t *>(currentSlot));
+    if (dataset.type == Dataset::CubeType::RAW_UNCOMPRESSED) {
+        const std::size_t expectedSize = cubeVxCount;
+        if (availableSize == expectedSize) {
+            std::copy(std::begin(data), std::end(data), reinterpret_cast<std::uint8_t *>(currentSlot));
+            success = true;
+        }
+    } else if (dataset.type == Dataset::CubeType::RAW_JPG || dataset.type == Dataset::CubeType::RAW_J2K || dataset.type == Dataset::CubeType::RAW_JP2_6 || dataset.type == Dataset::CubeType::RAW_PNG) {
+        const auto image = QImage::fromData(data).convertToFormat(QImage::Format_Grayscale8);
+        const qint64 expectedSize = cubeVxCount;
+        if (image.sizeInBytes() == expectedSize) {
+            std::copy(image.bits(), image.bits() + image.sizeInBytes(), reinterpret_cast<std::uint8_t *>(currentSlot));
+            success = true;
+        }
     } else if (dataset.type == Dataset::CubeType::SEGMENTATION_UNCOMPRESSED_16) {
         const std::size_t expectedSize = cubeVxCount * OBJID_BYTES / 4;
         if (availableSize == expectedSize) {
