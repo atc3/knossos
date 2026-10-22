@@ -36,22 +36,25 @@
  * few downloads. */
 class LabelOnlyLoading {
     std::vector<bool> previous;
+    bool switchedOff{false};// whether any layer actually stopped loading, so restoring matters
+    unsigned int loadsAtStart{0};// the loader's request count, to tell whether it was moved
 
 public:
-    LabelOnlyLoading() {
-        previous.reserve(Dataset::datasets.size());
-        for (auto & dataset : Dataset::datasets) {
-            previous.push_back(dataset.loadingEnabled);
-            if (!dataset.isOverlay()) {
-                dataset.loadingEnabled = false;
-            }
-        }
-    }
-    ~LabelOnlyLoading() {
-        for (std::size_t i = 0; i < Dataset::datasets.size() && i < previous.size(); ++i) {
-            Dataset::datasets[i].loadingEnabled = previous[i];
-        }
-    }
+    LabelOnlyLoading();
+    /* Restores each layer's loading and then restarts loading at the crosshair.
+     *
+     * The restart is the half that was missing. Every user of this drives the loader
+     * somewhere else — to the blocks an adopted slice, a fill or an erase reaches — and the
+     * loader evicts whatever lies outside the area it is pointed at, the image blocks around
+     * the crosshair included. Moving the view back was not enough either: the users that do
+     * it do so while this is still in scope, so that reload ran with the image layers
+     * switched off. The image then stayed blank, with nothing pending, until a pan happened
+     * to ask for it.
+     *
+     * Only when the loader was in fact moved: a brush stroke reads its plane under this too,
+     * loading nothing, and restarting the loader after every stroke would abort whatever it
+     * had in flight. Defined in the .cpp so this header need not include the loader. */
+    ~LabelOnlyLoading();
     LabelOnlyLoading(const LabelOnlyLoading &) = delete;
     LabelOnlyLoading & operator=(const LabelOnlyLoading &) = delete;
 };
