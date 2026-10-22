@@ -48,6 +48,7 @@ const QString INVENTORY_MIN_VOXELS = "inventory_min_voxels";
 const QString INVENTORY_HIDE_KNOWN = "inventory_hide_known";
 const QString INVENTORY_HIDE_VISITED = "inventory_hide_visited";
 const QString INVENTORY_ORDER = "inventory_order";
+const QString INVENTORY_HEADER_V2 = "inventory_header_v2";// columns, widths and the sort, since the measure columns
 const QString MORPHOLOGY_WIDGET = "morphology_widget";
 const QString MORPH_RADIUS = "morph_radius_nm";// a length, not a voxel count — see morphology.h
 const QString MORPH_DIRECTION = "morph_direction";

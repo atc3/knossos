@@ -42,9 +42,27 @@
 #include <QSettings>
 
 #include <algorithm>
+#include <unordered_map>
 #include <cmath>
 
 namespace {
+/* Nanometres per voxel at the magnification the inventory was scanned at — the voxels its
+ * counts are in, so the size sphericity has to be computed in. */
+void scanVoxelNm(double (& nm)[3]) {
+    nm[0] = nm[1] = nm[2] = 1;
+    const auto layerId = Segmentation::singleton().layerId;
+    if (layerId >= Dataset::datasets.size()) {
+        return;
+    }
+    const auto & layer = Dataset::datasets[layerId];
+    const auto magIndex = static_cast<std::size_t>(std::lround(std::log2(std::max(1, objinv::Inventory::singleton().scanMag()))));
+    if (layer.scales.empty()) {
+        return;
+    }
+    const auto & s = layer.scales[std::min(magIndex, layer.scales.size() - 1)];
+    nm[0] = s.x; nm[1] = s.y; nm[2] = s.z;
+}
+
 Coordinate positionOf(const objinv::Record & r) {
     return Coordinate(r.rep[0], r.rep[1], r.rep[2]);
 }
@@ -58,13 +76,29 @@ int ObjectInventoryModel::rowCount(const QModelIndex &) const { return static_ca
 int ObjectInventoryModel::columnCount(const QModelIndex &) const { return ColumnCount; }
 
 QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientation orientation, const int role) const {
-    if (orientation != Qt::Horizontal || role != Qt::DisplayRole) {
+    if (orientation != Qt::Horizontal) {
+        return {};
+    }
+    if (role == Qt::ToolTipRole) {
+        switch (section) {
+        case Ordinal: return tr("Scan order. Sorted ascending, newly found objects join at the end in place.");
+        case Sphericity: return tr("How compact the object is: 1 for a perfect ball, lower for flat, thin or ragged shapes.\n"
+                                   "From its voxel faces, so a voxelised ball scores about 0.66 — compare objects with each\n"
+                                   "other rather than with 1. Blank for objects scanned before this was measured: rescan.");
+        case Distance: return tr("Distance from where the crosshair was when the list was last sorted.\n"
+                                 "Sort by it to list what is nearest; sort again after moving to update it.");
+        default: return tr("Click to sort by this column; click again to reverse.");
+        }
+    }
+    if (role != Qt::DisplayRole) {
         return {};
     }
     switch (section) {
     case Ordinal: return tr("#");
     case Id: return tr("Subobject ID");
     case Voxels: return tr("Voxels");
+    case Sphericity: return tr("Sphericity");
+    case Distance: return tr("Distance");
     case Position: return tr("Position");
     case StateCol: return tr("State");
     }
@@ -107,9 +141,7 @@ void ObjectInventoryModel::rebuild() {
                                  return i < r.size()
                                          && (objinv::Inventory::singleton().flagsFor(r[i].id) & objinv::Flag::Visited) != 0;
                              });
-    if (activeOrder != Order::Scan) {
-        sortRows();
-    }
+    sortRows();
     staleUnderOrder = false;
     endResetModel();
 }
@@ -131,11 +163,11 @@ void ObjectInventoryModel::onAppended(const std::size_t first, const std::size_t
     }
     /* Appended at the tail whatever order is active, so the rows a walk has already passed
      * never renumber. When an order other than scan order is active that leaves the new ones
-     * out of place, which `reapplyOrder` fixes on request and the status line admits to. */
+     * out of place until the header is clicked again, which the status line admits to. */
     beginInsertRows({}, static_cast<int>(rows.size()), static_cast<int>(rows.size() + passing.size()) - 1);
     rows.insert(std::end(rows), std::begin(passing), std::end(passing));
     endInsertRows();
-    if (activeOrder != Order::Scan) {
+    if (!natural()) {
         staleUnderOrder = true;
     }
 }
@@ -148,7 +180,7 @@ void ObjectInventoryModel::onRevised(const std::size_t first, const std::size_t 
      * go stale. Repainting the whole table for that would be tens of millions of cells; the
      * view asks for what it can see, so a blanket dataChanged over the row range it might
      * touch is enough and costs nothing for rows that are scrolled away. */
-    if (activeOrder != Order::Scan) {
+    if (!natural()) {
         // rows are not in record order under any other one, so there is no range to narrow to
         emit dataChanged(index(0, Voxels), index(static_cast<int>(rows.size()) - 1, StateCol));
         return;
@@ -175,45 +207,97 @@ void ObjectInventoryModel::setFilter(const objinv::Filter & f) {
     rebuild();
 }
 
-void ObjectInventoryModel::setOrder(const Order o) {
-    activeOrder = o;
-    rebuild();
+double ObjectInventoryModel::distanceOf(const objinv::Record & r) const {
+    const auto scale = Dataset::current().scales.empty() ? floatCoordinate{1, 1, 1} : Dataset::current().scales.front();
+    const double dx = (r.rep[0] - distanceFrom.x) * scale.x;
+    const double dy = (r.rep[1] - distanceFrom.y) * scale.y;
+    const double dz = (r.rep[2] - distanceFrom.z) * scale.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-void ObjectInventoryModel::reapplyOrder() {
-    if (activeOrder == Order::Scan) {
-        rebuild();
+/* Orders `rows` by the active column.
+ *
+ * Keys are worked out once per row rather than inside the comparison — sphericity is a cube
+ * root and a power, and at a few hundred thousand rows a comparator recomputing it would do
+ * that tens of millions of times. Objects whose value is unknown (sphericity from a scan made
+ * before it was measured) go last in both directions, so "lowest first" is
+ * not a screenful of blanks. Ties fall back to scan order, so the same list always sorts the
+ * same way. */
+void ObjectInventoryModel::sortRows() {
+    distanceFrom = state->viewerState->currentPosition;
+    if (natural()) {
+        std::sort(std::begin(rows), std::end(rows));
         return;
     }
-    beginResetModel();
-    sortRows();
-    staleUnderOrder = false;
-    endResetModel();
+    const auto & records = objinv::Inventory::singleton().records();
+    double nm[3];
+    scanVoxelNm(nm);
+    struct Key { double value; bool known; std::uint32_t row; };
+    std::vector<Key> keys;
+    keys.reserve(rows.size());
+    for (const auto i : rows) {
+        const auto & r = records[i];
+        double value = 0;
+        bool known = true;
+        switch (sortColumn) {
+        case Ordinal: value = i; break;
+        case Id: value = static_cast<double>(r.id); break;
+        case Voxels: value = static_cast<double>(r.voxels); break;
+        case Sphericity: value = objinv::sphericity(r, nm); known = value >= 0; break;
+        case Distance: value = distanceOf(r); break;
+        case Position: {
+            const auto p = positionOf(r);
+            value = (static_cast<double>(p.z) * 1048576.0 + p.y) * 1048576.0 + p.x;
+            break;
+        }
+        case StateCol: {
+            const auto bits = objinv::Inventory::singleton().flagsFor(r.id);
+            const auto worked = (bits & (objinv::Flag::Painted | objinv::Flag::Erased | objinv::Flag::Skeleton)) != 0
+                    || Segmentation::singleton().subobjectExists(r.id);
+            value = (worked ? 2 : 0) + ((bits & objinv::Flag::Visited) != 0 ? 1 : 0);
+            break;
+        }
+        default: break;
+        }
+        keys.push_back({value, known, i});
+    }
+    const bool descending = sortOrder == Qt::DescendingOrder;
+    std::sort(std::begin(keys), std::end(keys), [descending](const Key & a, const Key & b) {
+        if (a.known != b.known) { return a.known; }// unknown last, whichever way
+        if (a.value != b.value) { return descending ? a.value > b.value : a.value < b.value; }
+        return a.row < b.row;
+    });
+    for (std::size_t k = 0; k < keys.size(); ++k) {
+        rows[k] = keys[k].row;
+    }
 }
 
-void ObjectInventoryModel::sortRows() {
-    const auto & records = objinv::Inventory::singleton().records();
-    if (activeOrder == Order::LargestFirst) {
-        std::sort(std::begin(rows), std::end(rows), [&records](const std::uint32_t a, const std::uint32_t b) {
-            if (records[a].voxels != records[b].voxels) { return records[a].voxels > records[b].voxels; }
-            return a < b;// a total order, so the same list always sorts the same way
-        });
-    } else if (activeOrder == Order::NearestFirst) {
-        const auto here = state->viewerState->currentPosition;
-        const auto scale = Dataset::current().scales.empty() ? floatCoordinate{1, 1, 1} : Dataset::current().scales.front();
-        const auto distance = [&](const std::uint32_t i) {
-            const auto & r = records[i];
-            const double dx = (r.rep[0] - here.x) * scale.x;
-            const double dy = (r.rep[1] - here.y) * scale.y;
-            const double dz = (r.rep[2] - here.z) * scale.z;
-            return dx * dx + dy * dy + dz * dz;
-        };
-        std::sort(std::begin(rows), std::end(rows), [&](const std::uint32_t a, const std::uint32_t b) {
-            const auto da = distance(a), db = distance(b);
-            if (da != db) { return da < db; }
-            return a < b;
-        });
+/* A header click. Done as a layout change with the persistent indexes moved along with
+ * their rows, so the current row stays on the same object and . and , carry on from it. */
+void ObjectInventoryModel::sort(const int column, const Qt::SortOrder order) {
+    if (column < 0 || column >= ColumnCount) {
+        return;
     }
+    sortColumn = column;
+    sortOrder = order;
+    emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+    const auto before = rows;
+    sortRows();
+    std::unordered_map<std::uint32_t, int> newRowOf;
+    newRowOf.reserve(rows.size() * 2);
+    for (int k = 0; k < static_cast<int>(rows.size()); ++k) {
+        newRowOf.emplace(rows[k], k);
+    }
+    const auto persistent = persistentIndexList();
+    QModelIndexList moved;
+    moved.reserve(persistent.size());
+    for (const auto & old : persistent) {
+        const auto it = old.row() >= 0 && old.row() < static_cast<int>(before.size()) ? newRowOf.find(before[old.row()]) : newRowOf.end();
+        moved.append(it == newRowOf.end() ? QModelIndex{} : index(it->second, old.column()));
+    }
+    changePersistentIndexList(persistent, moved);
+    staleUnderOrder = false;
+    emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
 }
 
 const objinv::Record * ObjectInventoryModel::recordAt(const int row) const {
@@ -232,7 +316,7 @@ std::size_t ObjectInventoryModel::recordIndexAt(const int row) const {
 }
 
 int ObjectInventoryModel::rowOfRecord(const std::size_t recordIndex) const {
-    if (activeOrder == Order::Scan) {
+    if (natural()) {
         return objinv::reanchor(rows, static_cast<std::uint32_t>(recordIndex));
     }
     const auto it = std::find(std::begin(rows), std::end(rows), static_cast<std::uint32_t>(recordIndex));
@@ -292,6 +376,16 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
     case Id: return static_cast<qulonglong>(r->id);
     case Voxels: return role == Qt::UserRole ? QVariant{static_cast<qulonglong>(r->voxels)}
                                              : QVariant{QLocale{}.toString(static_cast<qulonglong>(r->voxels))};
+    case Sphericity: {
+        double nm[3];
+        scanVoxelNm(nm);
+        const auto psi = objinv::sphericity(*r, nm);
+        return psi < 0 ? QVariant{QStringLiteral("—")} : QVariant{QString::number(psi, 'f', 2)};
+    }
+    case Distance: {
+        const auto nm = distanceOf(*r);
+        return nm >= 1000 ? tr("%1 µm").arg(nm / 1000, 0, 'f', 1) : tr("%1 nm").arg(nm, 0, 'f', 0);
+    }
     case Position: {
         const auto p = positionOf(*r);
         return QString("%1, %2, %3").arg(p.x).arg(p.y).arg(p.z);
@@ -332,14 +426,6 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     minVoxelsSpin.setToolTip(tr("Hide anything smaller than this, so the walk is not mostly specks."));
     hideKnownCheck.setToolTip(tr("Hide objects the annotation already has, so the list drains as you work."));
     hideVisitedCheck.setToolTip(tr("Hide objects you have already stepped to."));
-    orderCombo.addItem(tr("scan order"), static_cast<int>(ObjectInventoryModel::Order::Scan));
-    orderCombo.addItem(tr("largest first"), static_cast<int>(ObjectInventoryModel::Order::LargestFirst));
-    orderCombo.addItem(tr("nearest first"), static_cast<int>(ObjectInventoryModel::Order::NearestFirst));
-    orderCombo.setToolTip(tr("The order the table shows, which is also the order the keys walk.\n"
-                             "Applied once when you pick it — newly found objects are added at the end\n"
-                             "rather than slotted in, so a walk in progress never renumbers."));
-    reorderButton.setToolTip(tr("Apply the order again, taking in everything found since."));
-    reorderButton.setMaximumWidth(30);
     progressBar.setTextVisible(false);
     progressBar.setMaximumWidth(140);
     progressBar.hide();
@@ -359,8 +445,6 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     filterLayout.addWidget(&hideKnownCheck);
     filterLayout.addWidget(&hideVisitedCheck);
     filterLayout.addStretch();
-    filterLayout.addWidget(&orderCombo);
-    filterLayout.addWidget(&reorderButton);
 
     table.setModel(&model);
     table.setAllColumnsShowFocus(true);
@@ -372,13 +456,19 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
      * selected ids would create an object for each. */
     table.setSelectionMode(QAbstractItemView::SingleSelection);
     table.setSelectionBehavior(QAbstractItemView::SelectRows);
-    /* No live sorting, which is what lets the keys follow the visible order without the
-     * order shifting under them. The order combo does it once instead. */
-    table.setSortingEnabled(false);
-    table.header()->setSectionsClickable(false);
+    /* Click a header to sort by it, click again to reverse; the caret says which. Each click
+     * sorts once (see ObjectInventoryModel::sort) — rows found afterwards join at the end —
+     * which is what lets the keys walk the visible order without it shifting under them.
+     * Scan order ascending is the starting point, and the only order new rows never break. */
+    table.header()->setSortIndicator(ObjectInventoryModel::Ordinal, Qt::AscendingOrder);
+    table.header()->setSortIndicatorShown(true);
+    table.header()->setSectionsClickable(true);
+    table.setSortingEnabled(true);
     table.setColumnWidth(ObjectInventoryModel::Ordinal, 70);
     table.setColumnWidth(ObjectInventoryModel::Id, 110);
     table.setColumnWidth(ObjectInventoryModel::Voxels, 90);
+    table.setColumnWidth(ObjectInventoryModel::Sphericity, 80);
+    table.setColumnWidth(ObjectInventoryModel::Distance, 80);
     table.setColumnWidth(ObjectInventoryModel::Position, 150);
 
     layout.addLayout(&controlLayout);
@@ -444,14 +534,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
     QObject::connect(&hideKnownCheck, &QCheckBox::toggled, this, [this]() { applyFilterFromControls(); });
     QObject::connect(&hideVisitedCheck, &QCheckBox::toggled, this, [this]() { applyFilterFromControls(); });
-    QObject::connect(&orderCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-        model.setOrder(static_cast<ObjectInventoryModel::Order>(orderCombo.currentData().toInt()));
-        refreshStatus();
-    });
-    QObject::connect(&reorderButton, &QPushButton::clicked, this, [this]() {
-        model.reapplyOrder();
-        refreshStatus();
-    });
+    QObject::connect(table.header(), &QHeaderView::sortIndicatorChanged, this, [this]() { refreshStatus(); });
 
     QObject::connect(&inv, &objinv::Inventory::recordsAppended, this, [this](const quint64 first, const quint64 count) {
         model.onAppended(first, count);
@@ -595,7 +678,7 @@ void ObjectInventoryView::refreshStatus() {
         line += tr(" · %1 visited").arg(seen);
     }
     if (model.orderIsStale()) {
-        line += tr(" · newly found objects are at the end, press ↻ to reorder");
+        line += tr(" · newly found objects are at the end; click the column header to re-sort");
     }
     statusLabel.setText(line);
 }
@@ -746,10 +829,9 @@ void ObjectInventoryView::loadSettings() {
     minVoxelsSpin.setValue(settings.value(INVENTORY_MIN_VOXELS, 0).toInt());
     hideKnownCheck.setChecked(settings.value(INVENTORY_HIDE_KNOWN, false).toBool());
     hideVisitedCheck.setChecked(settings.value(INVENTORY_HIDE_VISITED, false).toBool());
-    const auto order = settings.value(INVENTORY_ORDER, 0).toInt();
-    const auto orderIndex = orderCombo.findData(order);
-    orderCombo.setCurrentIndex(orderIndex >= 0 ? orderIndex : 0);
-    const auto header = settings.value(HEADER).toByteArray();
+    // the header state carries the sort column and direction; keyed afresh, since the one
+    // saved before the extra columns existed describes a five-column table
+    const auto header = settings.value(INVENTORY_HEADER_V2).toByteArray();
     if (!header.isEmpty()) {
         table.header()->restoreState(header);
     }
@@ -763,8 +845,7 @@ void ObjectInventoryView::saveSettings() {
     settings.setValue(INVENTORY_MIN_VOXELS, minVoxelsSpin.value());
     settings.setValue(INVENTORY_HIDE_KNOWN, hideKnownCheck.isChecked());
     settings.setValue(INVENTORY_HIDE_VISITED, hideVisitedCheck.isChecked());
-    settings.setValue(INVENTORY_ORDER, orderCombo.currentData().toInt());
-    settings.setValue(HEADER, table.header()->saveState());
+    settings.setValue(INVENTORY_HEADER_V2, table.header()->saveState());
     settings.endGroup();
 }
 

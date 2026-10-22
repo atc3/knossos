@@ -71,6 +71,18 @@ struct Record {
     std::int32_t bboxMin[3]{};
     std::int32_t bboxMax[3]{};
     std::uint32_t bestCubeVoxels{0};// how good `rep` is; see ingestCube
+    /* Exposed voxel faces, by the axis they face along: a face counts where a voxel of this
+     * object meets a voxel of anything else, *inside the same block*. Faces on a block's
+     * outer boundary are skipped, because the neighbour across it is not in hand — counting
+     * them would give every object crossing a block edge a sheet of surface it does not
+     * have. That undercounts only where an object's true surface coincides with a block
+     * face, which is rare. At the scan magnification, like `voxels`. */
+    std::uint64_t faces[3]{};
+    /* Which measures cover the whole object. Set when the record is created, so a record
+     * adopted from a cache written before the measures existed — which saw some blocks
+     * without counting them — never presents a partial count as the real one. */
+    std::uint32_t measures{0};
+    std::uint32_t reserved{0};
 
     // The mean position. Inside the object for a blob, possibly outside it for anything
     // bent — which is why it is not what `rep` holds.
@@ -80,7 +92,40 @@ struct Record {
         }
     }
 };
-static_assert(sizeof(Record) == 80, "the cache format stores Record verbatim");
+static_assert(sizeof(Record) == 112, "the cache format stores Record verbatim");
+// older caches hold 80-byte records, widened on load by copying them over the start of this one
+static_assert(offsetof(Record, faces) == 80, "the measures must follow the version-2 fields, which form a prefix");
+
+namespace Measure {
+constexpr std::uint32_t Faces = 1u << 0;
+}
+
+/* Surface area in nm², from the face counts and the size of a voxel at the scan
+ * magnification. A face normal to x has the area of a y-by-z voxel side, and so on, which
+ * is what makes this right on anisotropic data. */
+inline double surfaceArea(const Record & r, const double nm[3]) {
+    return static_cast<double>(r.faces[0]) * nm[1] * nm[2]
+         + static_cast<double>(r.faces[1]) * nm[0] * nm[2]
+         + static_cast<double>(r.faces[2]) * nm[0] * nm[1];
+}
+
+/* Sphericity: π^(1/3) (6V)^(2/3) / A — 1 for a perfect ball, lower the less compact the
+ * shape. Computed from voxel faces, so a voxelised ball scores about 0.66 rather than 1: its
+ * stepped surface is roughly 1.5 times a smooth one's. That bias is shared by every object,
+ * so the value ranks shapes fairly even though it is not the textbook number. Negative when
+ * unknown. */
+inline double sphericity(const Record & r, const double nm[3]) {
+    if ((r.measures & Measure::Faces) == 0 || r.voxels == 0) {
+        return -1;
+    }
+    const auto area = surfaceArea(r, nm);
+    if (area <= 0) {
+        return -1;
+    }
+    const auto volume = static_cast<double>(r.voxels) * nm[0] * nm[1] * nm[2];
+    return std::cbrt(3.14159265358979323846) * std::pow(6 * volume, 2.0 / 3.0) / area;
+}
+
 static_assert(alignof(Record) == 8, "");
 
 /* Where a block sits and how big its voxels are.
@@ -172,16 +217,33 @@ public:
         if (local.empty()) {
             return;
         }
-        // pass 2 — the voxel of each run nearest that object's block mean
+        /* pass 2 — the voxel of each run nearest that object's block mean, and per run the
+         * exposed faces. Faces along x come free from the run itself:
+         * a run ends exactly where the id changes, so each end is a face unless it is the
+         * block's edge. Along y and z each voxel is compared with the rows beside it, which is
+         * sequential memory and no hashing; the object's entry is touched once per run. */
         for (int z = 0; z < sz; ++z) {
             for (int y = 0; y < sy; ++y) {
-                const auto * row = voxels + static_cast<std::size_t>(z) * planeStride + static_cast<std::size_t>(y) * rowStride;
+                const auto rowOffset = static_cast<std::size_t>(z) * planeStride + static_cast<std::size_t>(y) * rowStride;
+                const auto * row = voxels + rowOffset;
+                const auto * below = y > 0 ? row - rowStride : nullptr;
+                const auto * above = y + 1 < sy ? row + rowStride : nullptr;
+                const auto * before = z > 0 ? row - planeStride : nullptr;
+                const auto * after = z + 1 < sz ? row + planeStride : nullptr;
                 for (int x = 0; x < sx; ) {
                     const auto id = row[x];
                     int end = x + 1;
                     while (end < sx && row[end] == id) { ++end; }
                     if (id != backgroundId) {
                         auto & s = local[id];
+                        s.faces[0] += static_cast<std::uint64_t>((x > 0 ? 1 : 0) + (end < sx ? 1 : 0));
+                        for (int i = x; i < end; ++i) {
+                            s.faces[1] += static_cast<std::uint64_t>((below != nullptr && below[i] != id ? 1 : 0)
+                                                                    + (above != nullptr && above[i] != id ? 1 : 0));
+                            s.faces[2] += static_cast<std::uint64_t>((before != nullptr && before[i] != id ? 1 : 0)
+                                                                    + (after != nullptr && after[i] != id ? 1 : 0));
+                        }
+
                         const auto n = static_cast<double>(s.count);
                         const double cx = s.sum[0] / n, cy = s.sum[1] / n, cz = s.sum[2] / n;
                         // best x within this run is closed form; y and z are fixed by the row
@@ -259,6 +321,7 @@ private:
         int hi[3]{std::numeric_limits<int>::min(), std::numeric_limits<int>::min(), std::numeric_limits<int>::min()};
         int best[3]{0, 0, 0};
         double bestDist2{std::numeric_limits<double>::max()};
+        std::uint64_t faces[3]{};
     };
 
     // A tiebreak on the coordinate itself, so which block got there first cannot matter.
@@ -283,6 +346,8 @@ private:
                 idx = recs.size();
                 Record fresh;
                 fresh.id = id;
+                // counted from its very first block, so the face count covers all of it
+                fresh.measures = Measure::Faces;
                 for (int a = 0; a < 3; ++a) {
                     fresh.bboxMin[a] = std::numeric_limits<std::int32_t>::max();
                     fresh.bboxMax[a] = std::numeric_limits<std::int32_t>::min();
@@ -293,6 +358,7 @@ private:
             touchedIdx.push_back(idx);
             auto & r = recs[idx];
             r.voxels += s.count;
+            for (int a = 0; a < 3; ++a) { r.faces[a] += s.faces[a]; }
             std::int32_t candidate[3];
             for (int a = 0; a < 3; ++a) {
                 r.sum[a] += static_cast<std::int64_t>(s.count) * geom.origin[a]

@@ -84,9 +84,11 @@ namespace {
 
 constexpr auto CACHE_MAGIC = "KNOSINV";
 /* 2 adds the blocks completed ahead of the cursor, after the records; see SweepCursor::
- * completedAhead(). Version 1 files are still read — they simply have none, which is what
- * they were written assuming — so existing scans survive the change. */
-constexpr quint32 CACHE_VERSION = 2;
+ * completedAhead(). 3 grows Record from 80 to 112 bytes for the face counts behind
+ * sphericity. Older files are still read: their records are widened with the measure marked
+ * unknown (see Record::measures), so existing scans survive both changes. */
+constexpr quint32 CACHE_VERSION = 3;
+constexpr quint32 LEGACY_RECORD_SIZE = 80;// versions 1 and 2
 constexpr int CACHE_HEADER_BYTES = 128;
 constexpr quint64 BYTES_PER_CUBE_GUESS = 150 * 1024;// what a compressed overlay block runs to
 constexpr int GIVE_UP_AFTER = 3;                    // retries per block
@@ -210,7 +212,9 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
     }
     quint32 version{0}, recordSize{0};
     in >> version >> recordSize;
-    if ((version != CACHE_VERSION && version != 1) || recordSize != sizeof(Record)) {
+    const bool current = version == CACHE_VERSION && recordSize == sizeof(Record);
+    const bool legacy = (version == 1 || version == 2) && recordSize == LEGACY_RECORD_SIZE;
+    if (!current && !legacy) {
         return out;// a newer or older layout; rescanning is cheaper than translating
     }
     char keyHash[20]{};
@@ -234,7 +238,7 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
     in >> out.cursor >> out.cubesDone >> out.cubesAbsent >> out.cubesEmpty >> out.cubesCorrupt
        >> recordCount >> out.scannedAt >> complete >> truncated;
 
-    const auto expected = static_cast<qint64>(recordCount) * static_cast<qint64>(sizeof(Record));
+    const auto expected = static_cast<qint64>(recordCount) * static_cast<qint64>(recordSize);
     const auto blob = file.read(expected);
     if (blob.size() != expected) {
         return out;
@@ -269,8 +273,19 @@ CacheContents readCache(const QString & path, const Dataset & layer, const int m
         return out;
     }
     out.records.resize(recordCount);
-    if (recordCount != 0) {
+    if (recordCount != 0 && current) {
         std::memcpy(out.records.data(), blob.constData(), static_cast<std::size_t>(expected));
+    } else if (recordCount != 0) {
+        /* An older, narrower record: its fields are a prefix of today's, so each is copied
+         * over a default Record — whose measures are 0, i.e. unknown. They stay unknown
+         * however many more blocks a resumed scan adds, because the blocks already folded in
+         * were never counted. */
+        for (quint64 i = 0; i < recordCount; ++i) {
+            Record r;
+            std::memcpy(&r, blob.constData() + i * recordSize, recordSize);
+            r.measures = 0;
+            out.records[i] = r;
+        }
     }
     out.complete = complete != 0;
     out.truncated = truncated != 0;
