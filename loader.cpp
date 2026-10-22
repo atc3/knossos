@@ -40,6 +40,7 @@
 #include <QBuffer>
 #include <QFile>
 #include <QFuture>
+#include <QDateTime>
 #include <QHostInfo>
 #include <QImage>
 #include <QMutexLocker>
@@ -860,9 +861,26 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                         if(maybeReply != nullptr && maybeReply->error() != QNetworkReply::OperationCanceledError) {
                             qCritical() << layerId << cubeCoord << static_cast<int>(dataset.type) << maybeReply->request().url() << maybeReply->errorString() << maybeReply->readAll();
                             if (maybeReply->error() == QNetworkReply::HostNotFoundError) {
-                                for (const auto & url : {maybeReply->request().url().host(), QString{"google.com"}}) {
-                                    const auto & info = QHostInfo::fromName(url);
-                                    qDebug() << info.hostName() << info.addresses() << (info.error() != QHostInfo::HostInfoError::NoError ? info.errorString() : "");
+                                /* DNS diagnostics, asynchronous and at most once a minute.
+                                 *
+                                 * These used to be QHostInfo::fromName() — a synchronous lookup —
+                                 * for every block that failed this way. With the network down
+                                 * every block fails this way, and each lookup waits out the
+                                 * resolver's timeout, so the loader thread sat in DNS for minutes.
+                                 * Painting waits on this thread for every edited block
+                                 * (markCubeAsModified is a blocking call), so the whole
+                                 * application froze mid-stroke the moment the connection dropped.
+                                 * The lookups only ever fed a log line; that line still appears,
+                                 * whenever the answer comes, without anything waiting for it. */
+                                static qint64 lastDnsProbe{0};
+                                const auto now = QDateTime::currentMSecsSinceEpoch();
+                                if (now - lastDnsProbe > 60 * 1000) {
+                                    lastDnsProbe = now;
+                                    for (const auto & host : {maybeReply->request().url().host(), QString{"google.com"}}) {
+                                        QHostInfo::lookupHost(host, [](const QHostInfo & info) {
+                                            qDebug() << info.hostName() << info.addresses() << (info.error() != QHostInfo::HostInfoError::NoError ? info.errorString() : "");
+                                        });
+                                    }
                                 }
                             }
                             if (dataset.api == Dataset::API::GoogleBrainmaps) {
