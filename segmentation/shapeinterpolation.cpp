@@ -24,6 +24,7 @@
 
 #include "dataset.h"
 #include "segmentation/distancetransform.h"
+#include "segmentation/holefill.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
 #include "segmentation/planarwrite.h"
@@ -45,6 +46,22 @@ namespace {
 // margin around the union of two slice bounding boxes, so a shape shrinking towards
 // nothing has room to do so instead of being clipped at the border
 constexpr int PAD = 16;
+
+/* The cells a slice walls in: background that cannot reach the edge of the slice's grid,
+ * 4-connected, exactly as the stroke-end hole fill decides it. Empty when nothing is
+ * enclosed or the slice is unsized. A concavity open to the grid's edge stays open — and the
+ * grid is the slice's own extent, so a shape running off the dataset is never closed off
+ * against it. */
+std::vector<std::uint8_t> interiorOf(const SISlice & slice) {
+    std::vector<std::uint8_t> out;
+    if (slice.uSize <= 0 || slice.vSize <= 0 || slice.mask.size() != static_cast<std::size_t>(slice.uSize) * slice.vSize) {
+        return out;
+    }
+    if (holefill::enclosed(slice.mask, slice.uSize, slice.vSize, out) == 0) {
+        out.clear();
+    }
+    return out;
+}
 /* Refuse to interpolate a region larger than this many mask pixels.
  *
  * The grid is the union of the two key slices' bounding boxes, so this is a limit on how
@@ -713,7 +730,28 @@ const SISlice * ShapeInterpolation::previewAt(const int depth) {
     if (!started || !preview || previewDeferred || hasSliceAt(depth)) {
         return nullptr;// a painted slice is already shown as real overlay voxels
     }
-    return maskAtDepth(depth);
+    const auto * mask = maskAtDepth(depth);
+    /* With fill-enclosed-areas on, show what accepting will write: the interpolated slice
+     * with its holes filled. Without this the preview showed holes the commit then filled,
+     * or — before the commit filled them — holes that stayed. */
+    if (mask == nullptr || !Segmentation::singleton().fillEnclosedHoles) {
+        return mask;
+    }
+    if (filledPreviewValid && filledPreview.depth == depth && filledPreviewGen == gen) {
+        return &filledPreview;
+    }
+    filledPreview = *mask;
+    const auto interior = interiorOf(*mask);
+    if (!interior.empty()) {
+        auto merged = mask->mask;
+        for (std::size_t i = 0; i < merged.size(); ++i) {
+            merged[i] |= interior[i];
+        }
+        filledPreview.adoptMask(std::move(merged));
+    }
+    filledPreviewGen = gen;
+    filledPreviewValid = true;
+    return &filledPreview;
 }
 
 void ShapeInterpolation::setCentroidAlignment(const bool enabled) {
@@ -792,10 +830,44 @@ void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, cons
      * which tests/planarwrite_test.cpp asserts directly. It is a speed one, and a large
      * one — a block nothing is written to never enters the loader's cache, so every later
      * slice fetched it from the server again. */
-    const auto plan = planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
+    /* With fill-enclosed-areas on, the holes the slice walls in are filled as it is written —
+     * the interpolated slices and the key slices both, not only planes a brush stroke closed.
+     *
+     * Key slices adopted by clicking keep whatever pinholes the object had in the data, and
+     * an interpolated slice inherits a key slice's hole wherever the other key slice has
+     * background close by, so a chain over a large object came out riddled with the
+     * segmentation's own pinholes even with this setting on. The interior is written past the
+     * overwrite guard, as the stroke-end fill writes it: a voxel walled in by the object is
+     * inside it, not something the brush is moving over, and the gap mode in particular would
+     * otherwise leave a ring of background around every stray fragment inside it.
+     *
+     * The blocks are planned from the slice *with* its interior, or a block lying wholly
+     * inside a large hole — a lumen — would be skipped as unreached. */
+    std::vector<std::uint8_t> interior;
+    SISlice planned;
+    const SISlice * planFrom = &mask;
+    if (Segmentation::singleton().fillEnclosedHoles) {
+        interior = interiorOf(mask);
+        if (!interior.empty()) {
+            planned = mask;
+            auto merged = mask.mask;
+            for (std::size_t i = 0; i < merged.size(); ++i) {
+                merged[i] |= interior[i];
+            }
+            planned.adoptMask(std::move(merged));
+            planFrom = &planned;
+        }
+    }
+    const auto plan = planarwrite::plan(*planFrom, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
 
     const auto inside = [this, &mask](const Coordinate & pos){
         return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
+    };
+    const auto walledIn = [this, &mask, &interior](const Coordinate & pos){
+        const auto u = mask.uIndexOf(axisGet(pos, uAxisIdx));
+        const auto v = mask.vIndexOf(axisGet(pos, vAxisIdx));
+        return u >= 0 && v >= 0 && u < mask.uSize && v < mask.vSize
+                && interior[static_cast<std::size_t>(v) * mask.uSize + u] != 0;
     };
 
     for (const auto & block : plan.blocks) {
@@ -836,6 +908,10 @@ void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, cons
              * every wide object and buried the real ones. */
             const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
             ctx.unmarked.insert(std::begin(touched), std::end(touched));
+            if (!interior.empty()) {
+                const auto filled = writeVoxelsWhere(regionFirst, regionLast, walledIn, value, false, false);
+                ctx.unmarked.insert(std::begin(filled), std::end(filled));
+            }
         }
         if (ctx.cancelled) {
             return;

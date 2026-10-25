@@ -338,6 +338,13 @@ private:
     SISlice previewSlice;
     std::uint64_t previewGen{0};
     bool previewValid{false};
+    /* The preview as shown when fill-enclosed-areas is on: previewSlice with its walled-in
+     * holes filled. Kept apart from previewSlice, which the commit reads, because the commit
+     * needs to know which voxels are interior — they are written past the overwrite guard,
+     * the way a hole fill after a stroke writes them. */
+    SISlice filledPreview;
+    std::uint64_t filledPreviewGen{0};
+    bool filledPreviewValid{false};
     bool preview{true};
     std::uint64_t gen{1};
     QString error;
