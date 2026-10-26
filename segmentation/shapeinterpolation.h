@@ -331,6 +331,8 @@ private:
     };
     void flushMarks(WriteCtx &);
     void writeMaskAt(const SISlice & mask, int depth, std::uint64_t value, QProgressDialog & progress, WriteCtx &);
+    bool makeResident(const Coordinate & first, const Coordinate & last, const Coordinate & centre, QProgressDialog & progress, WriteCtx &);
+    void resyncKeySlice(SISlice & slice, int depth, QProgressDialog & progress, WriteCtx &);
 
     bool alignCentroids{true};
 
