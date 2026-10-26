@@ -63,7 +63,7 @@ class ObjectInventoryModel : public QAbstractTableModel {
     Q_OBJECT
     friend class ObjectInventoryView;
 public:
-    enum Column { Ordinal, Id, Voxels, Sphericity, Distance, Position, StateCol, ColumnCount };
+    enum Column { Ordinal, Id, Voxels, Mag1Voxels, Sphericity, Distance, Position, StateCol, ColumnCount };
 
     explicit ObjectInventoryModel(QObject * parent = nullptr);
     int rowCount(const QModelIndex & = {}) const override;

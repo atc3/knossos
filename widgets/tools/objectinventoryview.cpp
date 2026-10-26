@@ -63,6 +63,25 @@ void scanVoxelNm(double (& nm)[3]) {
     nm[0] = s.x; nm[1] = s.y; nm[2] = s.z;
 }
 
+/* How many magnification-1 voxels one voxel of the scanned magnification stands for: the
+ * ratio of their volumes. 8 per halving for an isotropic pyramid, but taken from the
+ * declared voxel sizes, so a pyramid that does not downsample z gets 4 rather than 8. */
+double mag1VoxelsPerScanVoxel() {
+    const auto layerId = Segmentation::singleton().layerId;
+    if (layerId >= Dataset::datasets.size()) {
+        return 1;
+    }
+    const auto & layer = Dataset::datasets[layerId];
+    if (layer.scales.empty()) {
+        return 1;
+    }
+    double nm[3];
+    scanVoxelNm(nm);
+    const auto & s = layer.scales.front();
+    const auto mag1Volume = static_cast<double>(s.x) * s.y * s.z;
+    return mag1Volume > 0 ? nm[0] * nm[1] * nm[2] / mag1Volume : 1;
+}
+
 Coordinate positionOf(const objinv::Record & r) {
     return Coordinate(r.rep[0], r.rep[1], r.rep[2]);
 }
@@ -85,6 +104,9 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
         case Sphericity: return tr("How compact the object is: 1 for a perfect ball, lower for flat, thin or ragged shapes.\n"
                                    "From its voxel faces, so a voxelised ball scores about 0.66 — compare objects with each\n"
                                    "other rather than with 1. Blank for objects scanned before this was measured: rescan.");
+        case Mag1Voxels: return tr("Approximate size at magnification 1: the scanned voxel count times how many\n"
+                                   "magnification-1 voxels one scanned voxel covers (8 per halving). An estimate —\n"
+                                   "nothing at magnification 1 is read. The same as Voxels for a 1× scan.");
         case Distance: return tr("Distance from where the crosshair was when the list was last sorted.\n"
                                  "Sort by it to list what is nearest; sort again after moving to update it.");
         default: return tr("Click to sort by this column; click again to reverse.");
@@ -97,6 +119,7 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
     case Ordinal: return tr("#");
     case Id: return tr("Subobject ID");
     case Voxels: return tr("Voxels");
+    case Mag1Voxels: return tr("≈ Voxels at 1×");
     case Sphericity: return tr("Sphericity");
     case Distance: return tr("Distance");
     case Position: return tr("Position");
@@ -232,6 +255,7 @@ void ObjectInventoryModel::sortRows() {
     const auto & records = objinv::Inventory::singleton().records();
     double nm[3];
     scanVoxelNm(nm);
+    const auto mag1Factor = mag1VoxelsPerScanVoxel();
     struct Key { double value; bool known; std::uint32_t row; };
     std::vector<Key> keys;
     keys.reserve(rows.size());
@@ -243,6 +267,7 @@ void ObjectInventoryModel::sortRows() {
         case Ordinal: value = i; break;
         case Id: value = static_cast<double>(r.id); break;
         case Voxels: value = static_cast<double>(r.voxels); break;
+        case Mag1Voxels: value = static_cast<double>(r.voxels) * mag1Factor; break;
         case Sphericity: value = objinv::sphericity(r, nm); known = value >= 0; break;
         case Distance: value = distanceOf(r); break;
         case Position: {
@@ -376,6 +401,10 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
     case Id: return static_cast<qulonglong>(r->id);
     case Voxels: return role == Qt::UserRole ? QVariant{static_cast<qulonglong>(r->voxels)}
                                              : QVariant{QLocale{}.toString(static_cast<qulonglong>(r->voxels))};
+    case Mag1Voxels: {
+        const auto estimate = static_cast<qulonglong>(std::llround(static_cast<double>(r->voxels) * mag1VoxelsPerScanVoxel()));
+        return role == Qt::UserRole ? QVariant{estimate} : QVariant{QLocale{}.toString(estimate)};
+    }
     case Sphericity: {
         double nm[3];
         scanVoxelNm(nm);
@@ -467,6 +496,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     table.setColumnWidth(ObjectInventoryModel::Ordinal, 70);
     table.setColumnWidth(ObjectInventoryModel::Id, 110);
     table.setColumnWidth(ObjectInventoryModel::Voxels, 90);
+    table.setColumnWidth(ObjectInventoryModel::Mag1Voxels, 110);
     table.setColumnWidth(ObjectInventoryModel::Sphericity, 80);
     table.setColumnWidth(ObjectInventoryModel::Distance, 80);
     table.setColumnWidth(ObjectInventoryModel::Position, 150);
@@ -829,9 +859,9 @@ void ObjectInventoryView::loadSettings() {
     minVoxelsSpin.setValue(settings.value(INVENTORY_MIN_VOXELS, 0).toInt());
     hideKnownCheck.setChecked(settings.value(INVENTORY_HIDE_KNOWN, false).toBool());
     hideVisitedCheck.setChecked(settings.value(INVENTORY_HIDE_VISITED, false).toBool());
-    // the header state carries the sort column and direction; keyed afresh, since the one
-    // saved before the extra columns existed describes a five-column table
-    const auto header = settings.value(INVENTORY_HEADER_V2).toByteArray();
+    // the header state carries the sort column and direction; keyed afresh whenever a column
+    // is added, since a saved state describes the table as it was
+    const auto header = settings.value(INVENTORY_HEADER_V3).toByteArray();
     if (!header.isEmpty()) {
         table.header()->restoreState(header);
     }
@@ -845,7 +875,7 @@ void ObjectInventoryView::saveSettings() {
     settings.setValue(INVENTORY_MIN_VOXELS, minVoxelsSpin.value());
     settings.setValue(INVENTORY_HIDE_KNOWN, hideKnownCheck.isChecked());
     settings.setValue(INVENTORY_HIDE_VISITED, hideVisitedCheck.isChecked());
-    settings.setValue(INVENTORY_HEADER_V2, table.header()->saveState());
+    settings.setValue(INVENTORY_HEADER_V3, table.header()->saveState());
     settings.endGroup();
 }
 

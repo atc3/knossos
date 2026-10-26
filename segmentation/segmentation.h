@@ -233,9 +233,9 @@ public:
      * however the volume was cropped. Because it wraps the whole dataset it connects every
      * unlabelled region to every other one, so a fill that reaches it escapes the object
      * entirely and runs until the safety cap stops it. Nothing worth labelling lives in
-     * that shell, so it is excluded by default; the toggle is there because "by default"
-     * is not "always". */
-    bool floodFillAvoidsDatasetEdge{true};
+     * that shell, so it can be excluded. Off by default: a cropped volume can have real
+     * objects running into its boundary, and those should fill out to the edge. */
+    bool floodFillAvoidsDatasetEdge{false};
     /* Whether finishing a brush stroke fills anything the plane now encloses.
      *
      * Off by default: it changes what a stroke does, and a stroke that accidentally closes
