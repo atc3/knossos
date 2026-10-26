@@ -768,6 +768,73 @@ void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
     }
 }
 
+/* Brings the cubes under [first, last] into memory by moving the loader to `centre`, and
+ * reports whether they made it. */
+bool ShapeInterpolation::makeResident(const Coordinate & first, const Coordinate & last, const Coordinate & centre,
+                                      QProgressDialog & progress, WriteCtx & ctx) {
+    if (regionCubeResidency(first, last).second.empty()) {
+        return true;
+    }
+    // Everything written so far must be marked before the position moves, or moving away
+    // discards it: eviction preserves a cube's edits only if it is already queued as
+    // modified.
+    flushMarks(ctx);
+    state->viewer->setPosition(centre, USERMOVE_NEUTRAL);
+    if (!awaitLoader(progress)) {
+        ctx.cancelled = ctx.cancelled || progress.wasCanceled();
+    }
+    /* Ask again rather than assuming the wait worked.
+     *
+     * awaitLoader() also returns on its timeout, and the write that followed went into a
+     * cube that was still not there — where it is dropped without a word. A wide object is
+     * the case that needs loading at all, walks the most cubes, and gives the loader the
+     * least time per cube, so one slow load was enough to punch a hole in the result at a
+     * chunk boundary. */
+    return regionCubeResidency(first, last).second.empty();
+}
+
+/* Re-reads a key slice from the volume, over its own extent, so the interpolation starts
+ * from what is actually on that plane.
+ *
+ * A key slice is drawn as the real voxels on its plane, never as its stored mask, so the
+ * mask is state nobody can see, and only the brush and the fills in this mode keep it up
+ * to date. Everything else that writes the plane — the morphology and inventory commands,
+ * a merge, an edit made in another mode, an undo of any of those — leaves it behind, and
+ * interpolating from the stale copy then contradicts the screen. Reported on heart_4_dense_vessel_crop_flat_126: the key slices
+ * at x = 15 and 29 had had their pinholes filled and showed none, but the chain still held
+ * them as they were adopted, so every plane in between came out with a column of holes at
+ * exactly those positions — 595 of the 620 pixels that were holes in all thirteen planes
+ * had been holes in both key slices before the fill.
+ *
+ * Blocks that cannot be made resident keep what the mask had there. */
+void ShapeInterpolation::resyncKeySlice(SISlice & slice, const int depth, QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & dataset = Dataset::current();
+    const auto & areaMin = Annotation::singleton().movementAreaMin;
+    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
+    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
+    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
+    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
+    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
+    // every block of the extent, not only those the mask reaches: a hole can be wider than
+    // a block, and a block inside it is exactly what has to be read
+    const auto plan = planarwrite::plan(slice, depth, axes, cubeShape, stepA, areaLo, areaHi, false);
+    for (const auto & block : plan.blocks) {
+        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
+        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
+        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
+        const auto centre = dataset.cube2global(cube) + dataset.scaleFactor.componentMul(dataset.cubeShape) / 2;
+        if (makeResident(regionFirst, regionLast, centre, progress, ctx)) {
+            readRegion(regionFirst, regionLast, [&](const std::uint64_t voxel, const Coordinate & pos){
+                slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), voxel == soid ? 1 : 0);
+            });
+        }
+        if (ctx.cancelled) {
+            return;
+        }
+    }
+}
+
 /* Writes one planar mask at one depth, cube by cube, making each cube resident first.
  *
  * KNOSSOS keeps only an M³ supercube around the current position in memory and drops
@@ -805,25 +872,7 @@ void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, cons
         const auto cubeFirst = dataset.cube2global(cube);
         const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
 
-        bool resident = regionCubeResidency(regionFirst, regionLast).second.empty();
-        if (!resident) {
-            // Everything written so far must be marked before the position moves, or moving
-            // away discards it: eviction preserves a cube's edits only if it is already
-            // queued as modified.
-            flushMarks(ctx);
-            state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
-            if (!awaitLoader(progress)) {
-                ctx.cancelled = ctx.cancelled || progress.wasCanceled();
-            }
-            /* Ask again rather than assuming the wait worked.
-             *
-             * awaitLoader() also returns on its timeout, and the write that followed went
-             * into a cube that was still not there — where it is dropped without a word. A
-             * wide object is the case that needs loading at all, walks the most cubes, and
-             * gives the loader the least time per cube, so one slow load was enough to
-             * punch a hole in the result at a chunk boundary. */
-            resident = regionCubeResidency(regionFirst, regionLast).second.empty();
-        }
+        const bool resident = makeResident(regionFirst, regionLast, cubeFirst + cubeExtent / 2, progress, ctx);
         if (!resident) {
             ++ctx.cubesMissing;
             if (ctx.missing.size() < 64) {// enough to diagnose, not enough to flood the log
@@ -952,9 +1001,30 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
     const LabelOnlyLoading labelOnly;
 
     WriteCtx ctx;
+    /* Accepting interpolates from what the key slices hold on screen, not from what the
+     * chain last recorded for them — see resyncKeySlice(). Only for the whole chain: erasing
+     * the key slices removes what was painted into them, not every voxel of the object that
+     * has since appeared on those planes. */
+    if (wholeChain) {
+        for (auto & [depth, slice] : slices) {
+            resyncKeySlice(slice, depth, progress, ctx);
+            if (ctx.cancelled || progress.wasCanceled()) {
+                ctx.cancelled = true;
+                break;
+            }
+        }
+        interpolants.clear();
+        previewValid = false;
+        invalidateCrossSections();
+        ++gen;
+    }
+
     SISlice writeSlice;
     int done = 0;
     for (const auto depth : depths) {
+        if (ctx.cancelled) {
+            break;
+        }
         progress.setValue(done++);
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
         if (progress.wasCanceled()) {
