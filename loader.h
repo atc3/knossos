@@ -67,6 +67,13 @@ class Worker;
 
 namespace Loader {
 using DecompressionResult = std::tuple<bool, void*, QIODevice*>;
+/* The blocks a load is limited to, or null for the whole supercube.
+ *
+ * A move always makes the M³ supercube around its centre the resident set, and normally
+ * fetches all of it. A caller that knows which blocks it needs — the shape-interpolation
+ * commit walks a planned set — passes them here, and the rest of the supercube is left
+ * unfetched instead of downloaded for nothing. Eviction is unchanged. */
+using CubeFilter = std::shared_ptr<const std::unordered_set<CoordOfCube>>;
 class Worker : public QObject {
     Q_OBJECT
     friend class Loader::Controller;
@@ -106,7 +113,40 @@ private:
     void abortDownloadsFinishDecompression(std::size_t, Func);
 
     decltype(Dataset::datasets) datasets;
+
+    /* Server payloads, as downloaded, of recently loaded blocks — see payloadFind().
+     *
+     * A block that was never edited is simply dropped when it leaves the supercube, and the
+     * next time it is needed it is downloaded again. Panning back and forth, adopting a wide
+     * slice and then accepting over it, or any walk that has to move the supercube more than
+     * once all fetched the same blocks repeatedly. The payload is the compressed bytes the
+     * server sent, ~50–200 KB a block, so a modest budget covers thousands of blocks and
+     * a hit costs a decompression and no network. Edited blocks never come from here:
+     * snappyCache is consulted first and always wins. */
+    struct PayloadKey {
+        std::size_t layerId;
+        std::size_t mag;
+        CoordOfCube cube;
+        bool operator==(const PayloadKey & other) const { return layerId == other.layerId && mag == other.mag && cube == other.cube; }
+    };
+    struct PayloadKeyHash {
+        std::size_t operator()(const PayloadKey & key) const {
+            return std::hash<CoordOfCube>{}(key.cube) ^ (key.layerId * 0x9E3779B97F4A7C15ull) ^ (key.mag << 48);
+        }
+    };
+    using PayloadList = std::list<std::pair<PayloadKey, QByteArray>>;
+    PayloadList payloadLru;// most recently used first
+    std::unordered_map<PayloadKey, PayloadList::iterator, PayloadKeyHash> payloadIndex;
+    std::size_t payloadBytes{0};
+    std::uint64_t payloadFreshness{0};// Dataset::freshness the cached payloads were fetched under
+    const QByteArray * payloadFind(std::size_t layerId, const CoordOfCube & cube);
+    void payloadStore(std::size_t layerId, const CoordOfCube & cube, QByteArray bytes);
+    void payloadClear(std::size_t layerId);
 public://matsch
+    static constexpr std::size_t PAYLOAD_BUDGET = 256 * 1024 * 1024;
+    /* Where blocks came from, for the shape-interpolation commit's log line: one count per
+     * block made resident, by source. Only ever read as a difference across an operation. */
+    std::atomic<std::uint64_t> fromNetwork{0}, fromPayloadCache{0}, fromEdits{0};
     using CacheQueue = std::unordered_set<CoordOfCube>;
     std::vector<std::vector<CacheQueue>> modifiedCacheQueue;
     using SnappySet = std::unordered_map<CoordOfCube, std::string>;
@@ -135,7 +175,7 @@ signals:
     void progress(bool incremented, int count);
 public slots:
     void cleanup(const Coordinate center);
-    void downloadAndLoadCubes(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, Dataset::list_t changedDatasets, const size_t cacheSize);
+    void downloadAndLoadCubes(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, Dataset::list_t changedDatasets, const size_t cacheSize, const Loader::CubeFilter only);
 };
 
 class Controller : public QObject {
@@ -154,7 +194,7 @@ public:
     virtual ~Controller() override;
     void unloadCurrentMagnification();
 
-    void startLoading(const Coordinate & center, const UserMoveType userMoveType, const floatCoordinate &direction);
+    void startLoading(const Coordinate & center, const UserMoveType userMoveType, const floatCoordinate &direction, CubeFilter only = {});
     template<typename... Args>
     void snappyCacheSupplySnappy(Args&&... args) {
         emit snappyCacheSupplySnappySignal(std::forward<Args>(args)...);
@@ -195,7 +235,7 @@ signals:
     void progress(int count);
     void refCountChange(bool isIncrement, int refCount);
     void unloadCurrentMagnificationSignal();
-    void loadSignal(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, const Dataset::list_t & changedDatasets, const quint64 cacheSize);
+    void loadSignal(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, const Dataset::list_t & changedDatasets, const quint64 cacheSize, const Loader::CubeFilter & only);
     void markCubeAsModifiedSignal(const std::size_t layerId, const CoordOfCube &cubeCoord, const int magnification);
     void snappyCacheSupplySnappySignal(const std::size_t layerId, const CoordOfCube, const quint64 cubeMagnification, const std::string cube);
     void snappyCacheReplaceSignal(const std::size_t layerId, const quint64 cubeMagnification, const Loader::Worker::SnappySet cubes);
@@ -203,3 +243,4 @@ signals:
 }//namespace Loader
 
 Q_DECLARE_METATYPE(Loader::Worker::SnappySet)
+Q_DECLARE_METATYPE(Loader::CubeFilter)

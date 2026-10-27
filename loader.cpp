@@ -602,11 +602,11 @@ void Loader::Worker::cleanup(const Coordinate center) {
     }
 }
 
-void Loader::Controller::startLoading(const Coordinate & center, const UserMoveType userMoveType, const floatCoordinate & direction) {
+void Loader::Controller::startLoading(const Coordinate & center, const UserMoveType userMoveType, const floatCoordinate & direction, CubeFilter only) {
     if (worker && !Dataset::datasets.empty()) {
         worker->isFinished = false;
         workerThread.start();
-        emit loadSignal(++loadingNr, center, userMoveType, direction, Dataset::datasets, state->M);
+        emit loadSignal(++loadingNr, center, userMoveType, direction, Dataset::datasets, state->M, only);
     }
 }
 
@@ -619,8 +619,66 @@ void Loader::Worker::broadcastProgress(bool startup) {
     emit progress(startup, count);
 }
 
-void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, Dataset::list_t changedDatasets, const size_t cacheSize) {
+const QByteArray * Loader::Worker::payloadFind(const std::size_t layerId, const CoordOfCube & cube) {
+    if (payloadFreshness != Dataset::freshness) {
+        // Reload Dataset From Server asked for every block to be fetched again; nothing
+        // held from before it counts
+        for (std::size_t i = 0; i < datasets.size(); ++i) {
+            payloadClear(i);
+        }
+        payloadFreshness = Dataset::freshness;
+    }
+    const auto it = payloadIndex.find({layerId, loaderMagnification, cube});
+    if (it == std::end(payloadIndex)) {
+        return nullptr;
+    }
+    payloadLru.splice(std::begin(payloadLru), payloadLru, it->second);
+    return &it->second->second;
+}
+
+void Loader::Worker::payloadStore(const std::size_t layerId, const CoordOfCube & cube, QByteArray bytes) {
+    if (payloadFreshness != Dataset::freshness || static_cast<std::size_t>(bytes.size()) > PAYLOAD_BUDGET / 16) {
+        return;// fetched under another freshness generation, or too big to be worth holding
+    }
+    const PayloadKey key{layerId, loaderMagnification, cube};
+    const auto existing = payloadIndex.find(key);
+    if (existing != std::end(payloadIndex)) {
+        payloadBytes -= existing->second->second.size();
+        payloadLru.erase(existing->second);
+        payloadIndex.erase(existing);
+    }
+    payloadBytes += bytes.size();
+    payloadLru.emplace_front(key, std::move(bytes));
+    payloadIndex.emplace(key, std::begin(payloadLru));
+    while (payloadBytes > PAYLOAD_BUDGET && !payloadLru.empty()) {
+        payloadBytes -= payloadLru.back().second.size();
+        payloadIndex.erase(payloadLru.back().first);
+        payloadLru.pop_back();
+    }
+}
+
+void Loader::Worker::payloadClear(const std::size_t layerId) {
+    for (auto it = std::begin(payloadLru); it != std::end(payloadLru);) {
+        if (it->first.layerId == layerId) {
+            payloadBytes -= it->second.size();
+            payloadIndex.erase(it->first);
+            it = payloadLru.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, Dataset::list_t changedDatasets, const size_t cacheSize, const Loader::CubeFilter only) {
     cleanup(center);
+    // a layer that now points somewhere else must not be served the old one's payloads;
+    // layers are compared by what they fetch, since their index can be reused
+    for (std::size_t layerId{0}; layerId < datasets.size(); ++layerId) {
+        if (layerId >= changedDatasets.size() || datasets[layerId].url.adjusted(QUrl::RemoveQuery) != changedDatasets[layerId].url.adjusted(QUrl::RemoveQuery)
+                || datasets[layerId].type != changedDatasets[layerId].type || datasets[layerId].cubeShape != changedDatasets[layerId].cubeShape) {
+            payloadClear(layerId);
+        }
+    }
     // freeSlots[] are lists of pointers to locations that
     // can hold data or overlay cubes. Whenever we want to load a new
     // datacube, we load it into a location from this list. Whenever a
@@ -695,6 +753,9 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
     //split dcoi into slice planes and rest
     std::vector<std::pair<std::size_t, CoordOfCube>> allCubes;
     for (auto && todo : Dcoi) {
+        if (only && only->count(todo) == 0) {
+            continue;// the caller said which blocks it needs; the rest of the supercube can wait
+        }
         QMutexLocker locker(&state->protectCube2Pointer);
         for (std::size_t layerId{0}; layerId < datasets.size(); ++layerId) {
             // only queue downloads which are necessary
@@ -739,6 +800,7 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                         state->protectCube2Pointer.lock();
                         cubeHash[cubeCoord] = currentSlot;
                         state->protectCube2Pointer.unlock();
+                        ++fromEdits;
 
                         state->viewer->reslice_notify_all(layerId, cubeCoord);
                     } else {
@@ -797,6 +859,29 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                     return;
                 }
             }
+            // the bytes the server sent last time, if they are still held: no network at all
+            const auto decompressFrom = [this, layerId, dataset, cubeCoord, &decompressions, &freeSlots, &cubeHash](QIODevice & device){
+                auto * currentSlot = freeSlots.front();
+                freeSlots.pop_front();
+                auto * watcher = new QFutureWatcher<DecompressionResult>;
+                QObject::connect(watcher, &QFutureWatcher<DecompressionResult>::finished, this, [this, watcher, &freeSlots, &decompressions, cubeCoord](){
+                    finalizeDecompression(*watcher, freeSlots, decompressions, cubeCoord);
+                });
+                decompressions[cubeCoord].reset(watcher);
+                watcher->setFuture(QtConcurrent::run(&decompressionPool, std::bind(&decompressCube, currentSlot, std::ref(device), layerId, dataset, std::ref(cubeHash), cubeCoord)));
+            };
+            if (dataset.url.scheme() != "file" && !freeSlots.empty()) {
+                if (const auto * cached = payloadFind(layerId, cubeCoord)) {
+                    auto * buffer = new QBuffer;
+                    buffer->setData(*cached);
+                    buffer->open(QIODevice::ReadOnly);
+                    ++fromPayloadCache;
+                    decompressFrom(*buffer);
+                    broadcastProgress(true);
+                    return;
+                }
+            }
+
             auto request = dataset.apiSwitch(cubeCoord);
 //            request.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, true);
 //            request.setAttribute(QNetworkRequest::SpdyAllowedAttribute, true);
@@ -827,7 +912,7 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                     return *qnam.get(request);
                 }
             }();
-            auto processDownload = [this, layerId, dataset, &io, cubeCoord, &downloads, &decompressions, &freeSlots, &cubeHash](bool exists = false){
+            auto processDownload = [this, layerId, dataset, &io, cubeCoord, &downloads, &decompressions, &freeSlots, &cubeHash, decompressFrom](bool exists = false){
                 if (freeSlots.empty()) {
                     qCritical() << layerId << cubeCoord << static_cast<int>(dataset.type) << "no slots for decompression" << cubeHash.size() << freeSlots.size();
                     io.deleteLater();
@@ -836,17 +921,22 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                     return;
                 }
                 auto * maybeReply = dynamic_cast<QNetworkReply*>(&io);
-                if ((maybeReply != nullptr && maybeReply->error() == QNetworkReply::NoError) || (maybeReply == nullptr && exists)) {
-                    auto * currentSlot = freeSlots.front();
-                    freeSlots.pop_front();
-                    auto * watcher = new QFutureWatcher<DecompressionResult>;
-                    QObject::connect(watcher, &QFutureWatcher<DecompressionResult>::finished, this, [this, watcher, &freeSlots, &decompressions, cubeCoord](){
-                        finalizeDecompression(*watcher, freeSlots, decompressions, cubeCoord);
-                    });
-                    io.setParent(nullptr);// reparent, so it doesn’t get destroyed with qnam
-                    decompressions[cubeCoord].reset(watcher);
+                if (maybeReply != nullptr && maybeReply->error() == QNetworkReply::NoError) {
+                    /* Kept as well as decompressed, so this block is not downloaded again
+                     * the next time it is needed (see payloadFind). The decompression reads
+                     * a copy in a buffer; the reply itself is done with. */
+                    auto bytes = io.read(io.bytesAvailable());//readAll can be very slow – https://bugreports.qt.io/browse/QTBUG-45926
+                    auto * buffer = new QBuffer;
+                    buffer->setData(bytes);
+                    buffer->open(QIODevice::ReadOnly);
+                    payloadStore(layerId, cubeCoord, std::move(bytes));
+                    ++fromNetwork;
                     downloads.erase(cubeCoord);
-                    watcher->setFuture(QtConcurrent::run(&decompressionPool, std::bind(&decompressCube, currentSlot, std::ref(io), layerId, dataset, std::ref(cubeHash), cubeCoord)));
+                    io.deleteLater();
+                    decompressFrom(*buffer);
+                } else if (maybeReply == nullptr && exists) {
+                    io.setParent(nullptr);// reparent, so it doesn’t get destroyed with qnam
+                    decompressFrom(io);
                 } else {
                     if ((maybeReply != nullptr && maybeReply->error() == QNetworkReply::ContentNotFoundError) || (maybeReply == nullptr && !exists)) {//404 → fill
                         auto * currentSlot = freeSlots.front();
