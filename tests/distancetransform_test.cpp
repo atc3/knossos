@@ -145,6 +145,45 @@ int main() {
         check(areaRadius(out) > 13.0 && areaRadius(out) < 17.0, "halfway to a point is about r=15", areaRadius(out), 15);
     }
 
+    std::printf("8. a rectangle of the blend is the same crop of the whole blend\n");
+    {
+        std::vector<float> d1, d2;
+        const auto a = disc(W, H, 70, 90, 25);
+        const auto b = disc(W, H, 130, 110, 35);
+        signedEdt(a, d1, W, H, 4.f, 4.f);
+        signedEdt(b, d2, W, H, 4.f, 4.f);
+        float c1u, c1v, c2u, c2v;
+        maskCentroid(a, W, c1u, c1v);
+        maskCentroid(b, W, c2u, c2v);
+        std::size_t mismatches = 0, rects = 0;
+        for (const float t : {0.f, 0.3f, 0.5f, 0.9f, 1.f}) {
+            for (const bool align : {false, true}) {
+                const float du = align ? c2u - c1u : 0.f, dv = align ? c2v - c1v : 0.f;
+                std::vector<std::uint8_t> whole, part;
+                blendSigned(d1, d2, W, H, t, du, dv, whole);
+                // inside, straddling each edge, and wholly outside
+                const int rectsUV[][4]{{40, 60, 100, 150}, {-10, -5, 30, 40}, {W - 20, H - 30, W + 10, H + 5}, {0, 0, W, H}, {W + 5, 0, W + 9, 10}};
+                for (const auto & r : rectsUV) {
+                    blendSignedRect(d1, d2, W, H, t, du, dv, r[0], r[1], r[2], r[3], part);
+                    const int u0 = std::max(0, r[0]), v0 = std::max(0, r[1]), u1 = std::min(W, r[2]), v1 = std::min(H, r[3]);
+                    if (u1 <= u0 || v1 <= v0) {
+                        mismatches += !part.empty();
+                        continue;
+                    }
+                    ++rects;
+                    mismatches += part.size() != std::size_t(u1 - u0) * (v1 - v0);
+                    for (int v = v0; v < v1 && part.size() == std::size_t(u1 - u0) * (v1 - v0); ++v) {
+                        for (int u = u0; u < u1; ++u) {
+                            mismatches += part[std::size_t(v - v0) * (u1 - u0) + (u - u0)] != whole[std::size_t(v) * W + u];
+                        }
+                    }
+                }
+            }
+        }
+        check(mismatches == 0, "rectangle blend equals the cropped full blend", double(mismatches), 0);
+        check(rects == 40, "rectangles compared", double(rects), 40);
+    }
+
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "THERE WERE FAILURES");
     return failures != 0;
 }

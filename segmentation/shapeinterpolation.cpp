@@ -23,6 +23,7 @@
 #include "shapeinterpolation.h"
 
 #include "dataset.h"
+#include "segmentation/blocktour.h"
 #include "segmentation/distancetransform.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
@@ -214,9 +215,26 @@ bool ShapeInterpolation::seedSliceFromPlane(SISlice & slice, const Coordinate & 
                 ++scan.unreachable;
                 continue;
             }
-            // drive the loader to this block. startLoading takes its own centre, so
-            // viewerState->currentPosition — the crosshair — is untouched.
-            Loader::Controller::singleton().startLoading(dataset.cube2global(block) + cubeExtent / 2, USERMOVE_NEUTRAL, {});
+            /* Drive the loader to this block. startLoading takes its own centre, so
+             * viewerState->currentPosition — the crosshair — is untouched.
+             *
+             * Only this plane's layer of the supercube is fetched: the walk never leaves
+             * the plane, and the supercube is M blocks deep along its normal, so fetching
+             * all of it downloaded M times what the walk could ever read. The rest of the
+             * layer comes along, since the walk is spreading through it. */
+            const int extentA[3]{static_cast<int>(cubeExtent.x), static_cast<int>(cubeExtent.y), static_cast<int>(cubeExtent.z)};
+            blocktour::Block lo, hi;
+            blocktour::windowAround({block.x, block.y, block.z}, std::max(1, state->M), extentA, lo, hi);
+            auto layer = std::make_shared<std::unordered_set<CoordOfCube>>();
+            for (int u = lo[uAxisIdx]; u <= hi[uAxisIdx]; ++u) {
+                for (int v = lo[vAxisIdx]; v <= hi[vAxisIdx]; ++v) {
+                    auto c = block;
+                    axisSet(c, uAxisIdx, u);
+                    axisSet(c, vAxisIdx, v);
+                    layer->insert(c);
+                }
+            }
+            Loader::Controller::singleton().startLoading(dataset.cube2global(block) + cubeExtent / 2, USERMOVE_NEUTRAL, {}, std::move(layer));
             if (!awaitLoader(progress) || !regionCubeResidency(first, last).second.empty()) {
                 ++scan.unreachable;
                 continue;
@@ -768,128 +786,198 @@ void ShapeInterpolation::flushMarks(WriteCtx & ctx) {
     }
 }
 
-/* Brings the cubes under [first, last] into memory by moving the loader to `centre`, and
- * reports whether they made it. */
-bool ShapeInterpolation::makeResident(const Coordinate & first, const Coordinate & last, const Coordinate & centre,
-                                      QProgressDialog & progress, WriteCtx & ctx) {
-    if (regionCubeResidency(first, last).second.empty()) {
+planarwrite::Plan ShapeInterpolation::planFor(const SISlice & mask, const int depth, const bool skipUnreached) const {
+    const auto & dataset = Dataset::current();
+    const auto & areaMin = Annotation::singleton().movementAreaMin;
+    const auto & areaMax = Annotation::singleton().movementAreaMax;
+    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
+    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
+    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
+    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
+    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
+    return planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, skipUnreached);
+}
+
+/* Moves the loader to `centre`, fetching only `cubes` out of the supercube there — see
+ * Loader::CubeFilter — unless they are all resident already. */
+bool ShapeInterpolation::moveLoaderOnto(const Coordinate & centre, const std::vector<CoordOfCube> & cubes,
+                                        QProgressDialog & progress, WriteCtx & ctx) {
+    const auto & dataset = Dataset::current();
+    const auto extent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+    const auto resident = [&](const CoordOfCube & cube){
+        const auto first = dataset.cube2global(cube);
+        return regionCubeResidency(first, first + extent - 1).second.empty();
+    };
+    if (std::all_of(std::begin(cubes), std::end(cubes), resident)) {
         return true;
     }
     // Everything written so far must be marked before the position moves, or moving away
     // discards it: eviction preserves a cube's edits only if it is already queued as
     // modified.
     flushMarks(ctx);
-    state->viewer->setPosition(centre, USERMOVE_NEUTRAL);
+    // the loader's own centre, so the crosshair stays where the user left it
+    Loader::Controller::singleton().startLoading(centre, USERMOVE_NEUTRAL, {},
+                                                 std::make_shared<const std::unordered_set<CoordOfCube>>(std::begin(cubes), std::end(cubes)));
+    ++ctx.moves;
     if (!awaitLoader(progress)) {
         ctx.cancelled = ctx.cancelled || progress.wasCanceled();
     }
-    /* Ask again rather than assuming the wait worked.
-     *
-     * awaitLoader() also returns on its timeout, and the write that followed went into a
-     * cube that was still not there — where it is dropped without a word. A wide object is
-     * the case that needs loading at all, walks the most cubes, and gives the loader the
-     * least time per cube, so one slow load was enough to punch a hole in the result at a
-     * chunk boundary. */
-    return regionCubeResidency(first, last).second.empty();
+    return std::all_of(std::begin(cubes), std::end(cubes), resident);
 }
 
-/* Re-reads a key slice from the volume, over its own extent, so the interpolation starts
- * from what is actually on that plane.
+/* Visits every block of every plane in `jobs` once, a supercube at a time.
  *
- * A key slice is drawn as the real voxels on its plane, never as its stored mask, so the
- * mask is state nobody can see, and only the brush and the fills in this mode keep it up
- * to date. Everything else that writes the plane — the morphology and inventory commands,
- * a merge, an edit made in another mode, an undo of any of those — leaves it behind, and
- * interpolating from the stale copy then contradicts the screen. Reported on heart_4_dense_vessel_crop_flat_126: the key slices
- * at x = 15 and 29 had had their pinholes filled and showed none, but the chain still held
- * them as they were adopted, so every plane in between came out with a column of holes at
- * exactly those positions — 595 of the 620 pixels that were holes in all thirteen planes
- * had been holes in both key slices before the fill.
+ * KNOSSOS keeps only the M³ supercube around one position in memory and drops writes to
+ * anything outside it without a word (cubeloader.cpp), so work spanning more than that has
+ * to move the loader. This used to happen plane by plane and block by block: each block not
+ * in memory moved the loader to that block's centre, which wasted half the supercube past
+ * the edge of the object and evicted the start of the row while finishing it — and the next
+ * plane started by fetching it again. A block is 128 planes deep, so a chain across one
+ * block layer fetched the same blocks once per plane, tens of times over.
  *
- * Blocks that cannot be made resident keep what the mask had there. */
-void ShapeInterpolation::resyncKeySlice(SISlice & slice, const int depth, QProgressDialog & progress, WriteCtx & ctx) {
+ * Now the walk is planned first (blocktour.h): the blocks every plane needs are tiled with
+ * whole supercubes, each supercube is made resident with a single move that fetches only
+ * the blocks the walk needs (Loader::CubeFilter), and every plane's work in it is done
+ * before moving on. Each block is loaded once.
+ *
+ * `visit` gets, per supercube and per job, the job's blocks there that are resident. Any
+ * that did not load are retried once on their own, and if they still are not resident are
+ * counted as missing, so the caller's report can say the result may have holes. */
+void ShapeInterpolation::walkPlanes(const std::vector<PlaneJob> & jobs, const PlaneVisitor & visit,
+                                    QProgressDialog & progress, WriteCtx & ctx) {
     const auto & dataset = Dataset::current();
-    const auto & areaMin = Annotation::singleton().movementAreaMin;
-    const auto & areaMax = Annotation::singleton().movementAreaMax;
-    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
-    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
-    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
-    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
-    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
-    // every block of the extent, not only those the mask reaches: a hole can be wider than
-    // a block, and a block inside it is exactly what has to be read
-    const auto plan = planarwrite::plan(slice, depth, axes, cubeShape, stepA, areaLo, areaHi, false);
-    for (const auto & block : plan.blocks) {
-        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
-        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
-        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
-        const auto centre = dataset.cube2global(cube) + dataset.scaleFactor.componentMul(dataset.cubeShape) / 2;
-        if (makeResident(regionFirst, regionLast, centre, progress, ctx)) {
-            readRegion(regionFirst, regionLast, [&](const std::uint64_t voxel, const Coordinate & pos){
-                slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), voxel == soid ? 1 : 0);
-            });
+    const auto extent = dataset.scaleFactor.componentMul(dataset.cubeShape);
+    const int extentA[3]{static_cast<int>(extent.x), static_cast<int>(extent.y), static_cast<int>(extent.z)};
+    std::vector<blocktour::Block> needed;
+    {
+        std::set<blocktour::Block> unique;
+        for (const auto & job : jobs) {
+            for (const auto & block : job.blocks) {
+                unique.insert({block.cube[0], block.cube[1], block.cube[2]});
+            }
         }
-        if (ctx.cancelled) {
-            return;
+        needed.assign(std::begin(unique), std::end(unique));
+    }
+    const auto tour = blocktour::plan(needed, std::max(1, state->M), extentA);
+    std::map<blocktour::Block, std::size_t> windowOf;
+    for (std::size_t w = 0; w < tour.size(); ++w) {
+        for (const auto & b : tour[w].blocks) {
+            windowOf[b] = w;
         }
     }
+    // per window, per job, the job's blocks there — jobs stay in order, so planes are
+    // visited in depth order inside each supercube
+    std::vector<std::vector<std::pair<std::size_t, const planarwrite::Block *>>> work(tour.size());
+    for (std::size_t j = 0; j < jobs.size(); ++j) {
+        for (const auto & block : jobs[j].blocks) {
+            work[windowOf.at({block.cube[0], block.cube[1], block.cube[2]})].emplace_back(j, &block);
+        }
+    }
+    const auto toCube = [](const blocktour::Block & b){ return CoordOfCube{b[0], b[1], b[2]}; };
+    const auto centreOf = [&](const blocktour::Block & b){ return dataset.cube2global(toCube(b)) + extent / 2; };
+    const auto isResident = [&](const planarwrite::Block & block){
+        return regionCubeResidency({block.first[0], block.first[1], block.first[2]}, {block.last[0], block.last[1], block.last[2]}).second.empty();
+    };
+    const auto runJobs = [&](const std::vector<std::pair<std::size_t, const planarwrite::Block *>> & items){
+        std::vector<const planarwrite::Block *> group;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            group.push_back(items[i].second);
+            if (i + 1 == items.size() || items[i + 1].first != items[i].first) {
+                visit(items[i].first, group);
+                group.clear();
+            }
+        }
+    };
+
+    progress.setRange(0, static_cast<int>(tour.size()));
+    for (std::size_t w = 0; w < tour.size() && !ctx.cancelled; ++w) {
+        progress.setValue(static_cast<int>(w));
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+        if (progress.wasCanceled()) {
+            ctx.cancelled = true;
+            break;
+        }
+        std::vector<CoordOfCube> cubes;
+        for (const auto & b : tour[w].blocks) {
+            cubes.push_back(toCube(b));
+        }
+        moveLoaderOnto(centreOf(tour[w].centre), cubes, progress, ctx);
+        // Ask per block rather than trusting the move: awaitLoader() also returns on its
+        // timeout, and a write into a block that is not there is dropped without a word.
+        std::vector<std::pair<std::size_t, const planarwrite::Block *>> ready, late;
+        for (const auto & item : work[w]) {
+            (isResident(*item.second) ? ready : late).push_back(item);
+        }
+        runJobs(ready);
+        // the stragglers, one block at a time, the way every block used to be fetched
+        std::map<blocktour::Block, std::vector<std::pair<std::size_t, const planarwrite::Block *>>> byBlock;
+        for (const auto & item : late) {
+            byBlock[{item.second->cube[0], item.second->cube[1], item.second->cube[2]}].push_back(item);
+        }
+        for (const auto & [b, items] : byBlock) {
+            if (ctx.cancelled) {
+                break;
+            }
+            if (moveLoaderOnto(centreOf(b), {toCube(b)}, progress, ctx) && isResident(*items.front().second)) {
+                runJobs(items);
+            } else {
+                ++ctx.cubesMissing;
+                if (ctx.missing.size() < 64) {// enough to diagnose, not enough to flood the log
+                    ctx.missing.push_back(toCube(b));
+                }
+            }
+        }
+    }
+    progress.setValue(static_cast<int>(tour.size()));
 }
 
-/* Writes one planar mask at one depth, cube by cube, making each cube resident first.
- *
- * KNOSSOS keeps only an M³ supercube around the current position in memory and drops
- * writes to anything outside it without a word (cubeloader.cpp). There is no on-demand
- * cube loading anywhere in the codebase, so the only lever is to move the position and let
- * the loader follow. Doing that per cube keeps peak memory at one supercube however wide
- * the object is, and the residency check means the common case — everything just painted
- * and still resident — costs no movement at all. */
-void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
-                                     QProgressDialog & progress, WriteCtx & ctx) {
-    const auto & dataset = Dataset::current();
-    const auto & areaMin = Annotation::singleton().movementAreaMin;
-    const auto & areaMax = Annotation::singleton().movementAreaMax;
-    const planarwrite::Axes axes{axis, uAxisIdx, vAxisIdx};
-    const int cubeShape[3]{dataset.cubeShape.x, dataset.cubeShape.y, dataset.cubeShape.z};
-    const int stepA[3]{std::max(1, step.x), std::max(1, step.y), std::max(1, step.z)};
-    const int areaLo[3]{areaMin.x, areaMin.y, areaMin.z};
-    const int areaHi[3]{areaMax.x, areaMax.y, areaMax.z};
-    /* Blocks the mask does not reach are left out.
-     *
-     * Not an accuracy trade: the plan without them covers exactly the same mask voxels,
-     * which tests/planarwrite_test.cpp asserts directly. It is a speed one, and a large
-     * one — a block nothing is written to never enters the loader's cache, so every later
-     * slice fetched it from the server again. */
-    const auto plan = planarwrite::plan(mask, depth, axes, cubeShape, stepA, areaLo, areaHi, true);
-
+void ShapeInterpolation::writeBlocks(const SISlice & mask, const std::vector<const planarwrite::Block *> & blocks,
+                                     const std::uint64_t value, WriteCtx & ctx) {
     const auto inside = [this, &mask](const Coordinate & pos){
         return mask.at(mask.uIndexOf(axisGet(pos, uAxisIdx)), mask.vIndexOf(axisGet(pos, vAxisIdx))) != 0;
     };
-
-    for (const auto & block : plan.blocks) {
-        const CoordOfCube cube{block.cube[0], block.cube[1], block.cube[2]};
-        const Coordinate regionFirst{block.first[0], block.first[1], block.first[2]};
-        const Coordinate regionLast{block.last[0], block.last[1], block.last[2]};
-        const auto cubeFirst = dataset.cube2global(cube);
-        const auto cubeExtent = dataset.scaleFactor.componentMul(dataset.cubeShape);
-
-        const bool resident = makeResident(regionFirst, regionLast, cubeFirst + cubeExtent / 2, progress, ctx);
-        if (!resident) {
-            ++ctx.cubesMissing;
-            if (ctx.missing.size() < 64) {// enough to diagnose, not enough to flood the log
-                ctx.missing.push_back(cube);
-            }
-        } else {
-            /* An empty result means this cube held none of the shape, not that it failed:
-             * processRegion() reports the cubes it changed, and most cubes in a wide slice's
-             * bounding box are outside the outline. Counting those as missing cried wolf on
-             * every wide object and buried the real ones. */
-            const auto touched = writeVoxelsWhere(regionFirst, regionLast, inside, value, false);
-            ctx.unmarked.insert(std::begin(touched), std::end(touched));
-        }
-        if (ctx.cancelled) {
-            return;
-        }
+    for (const auto * block : blocks) {
+        /* An empty result means this cube held none of the shape, not that it failed:
+         * processRegion() reports the cubes it changed, and most cubes in a wide slice's
+         * bounding box are outside the outline. */
+        const auto touched = writeVoxelsWhere({block->first[0], block->first[1], block->first[2]},
+                                              {block->last[0], block->last[1], block->last[2]}, inside, value, false);
+        ctx.unmarked.insert(std::begin(touched), std::end(touched));
     }
+}
+
+/* Writes one planar mask at one depth. Blocks the mask does not reach are left out: the
+ * plan without them covers exactly the same mask voxels (tests/planarwrite_test.cpp), and
+ * fetching a block only to write nothing to it is pure cost. */
+void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, const std::uint64_t value,
+                                     QProgressDialog & progress, WriteCtx & ctx) {
+    const std::vector<PlaneJob> jobs{{depth, planFor(mask, depth, true).blocks}};
+    walkPlanes(jobs, [&](std::size_t, const std::vector<const planarwrite::Block *> & blocks){
+        writeBlocks(mask, blocks, value, ctx);
+    }, progress, ctx);
+}
+
+void ShapeInterpolation::blendRect(const Interpolant & in, const int depth, int u0, int v0, int u1, int v1, SISlice & out) const {
+    const auto span = static_cast<float>(in.z2 - in.z1);
+    const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
+    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
+    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    u0 = std::max(0, u0); v0 = std::max(0, v0);
+    u1 = std::min(in.uSize, u1); v1 = std::min(in.vSize, v1);
+    std::vector<std::uint8_t> mask;
+    distance_transform::blendSignedRect(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, u0, v0, u1, v1, mask);
+    out = SISlice{};
+    out.depth = depth;
+    out.uStep = in.uStep;
+    out.vStep = in.vStep;
+    if (mask.empty()) {
+        return;
+    }
+    out.uMin = in.uMin + u0 * in.uStep;
+    out.vMin = in.vMin + v0 * in.vStep;
+    out.uSize = u1 - u0;
+    out.vSize = v1 - v0;
+    out.adoptMask(std::move(mask));
 }
 
 bool ShapeInterpolation::copySliceAt(const int depth, QString & note) {
@@ -1001,37 +1089,58 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
     const LabelOnlyLoading labelOnly;
 
     WriteCtx ctx;
+    auto & loaderWorker = *Loader::Controller::singleton().worker;
+    const std::uint64_t network0 = loaderWorker.fromNetwork, payload0 = loaderWorker.fromPayloadCache, edits0 = loaderWorker.fromEdits;
+
     /* Accepting interpolates from what the key slices hold on screen, not from what the
-     * chain last recorded for them — see resyncKeySlice(). Only for the whole chain: erasing
-     * the key slices removes what was painted into them, not every voxel of the object that
-     * has since appeared on those planes. */
+     * chain last recorded for them.
+     *
+     * A key slice is drawn as the real voxels on its plane, never as its stored mask, so the
+     * mask is state nobody can see, and only the brush and the fills in this mode keep it up
+     * to date. Everything else that writes the plane — the morphology and inventory
+     * commands, a merge, an edit made in another mode, an undo of any of those — leaves it
+     * behind, and interpolating from the stale copy then contradicts the screen. Reported on
+     * heart_4_dense_vessel_crop_flat_126: the key slices at x = 15 and 29 had had their
+     * pinholes filled and showed none, but the chain still held them as they were adopted,
+     * so every plane in between came out with a column of holes at exactly those positions.
+     *
+     * Each key slice is re-read over its whole extent — every block of it, not only those
+     * the mask reaches, since a hole can be wider than a block. Blocks that cannot be made
+     * resident keep what the mask had there. Only for the whole chain: erasing the key
+     * slices removes what was painted into them, not every voxel of the object that has
+     * since appeared on those planes. */
     if (wholeChain) {
+        progress.setLabelText(QObject::tr("Reading the key slices…"));
+        std::vector<PlaneJob> keyJobs;
+        std::vector<SISlice *> keySlices;
         for (auto & [depth, slice] : slices) {
-            resyncKeySlice(slice, depth, progress, ctx);
-            if (ctx.cancelled || progress.wasCanceled()) {
-                ctx.cancelled = true;
-                break;
-            }
+            keyJobs.push_back({depth, planFor(slice, depth, false).blocks});
+            keySlices.push_back(&slice);
         }
+        walkPlanes(keyJobs, [&](const std::size_t job, const std::vector<const planarwrite::Block *> & blocks){
+            auto & slice = *keySlices[job];
+            for (const auto * block : blocks) {
+                readRegion({block->first[0], block->first[1], block->first[2]}, {block->last[0], block->last[1], block->last[2]},
+                           [&](const std::uint64_t voxel, const Coordinate & pos){
+                    slice.set(slice.uIndexOf(axisGet(pos, uAxisIdx)), slice.vIndexOf(axisGet(pos, vAxisIdx)), voxel == soid ? 1 : 0);
+                });
+            }
+        }, progress, ctx);
         interpolants.clear();
         previewValid = false;
         invalidateCrossSections();
         ++gen;
+        progress.setLabelText(title);
     }
 
-    SISlice writeSlice;
-    int done = 0;
+    /* Which blocks each depth's mask reaches, planned before anything is fetched, so the
+     * write below can visit them a supercube at a time. Computing a mask is cheap next to
+     * moving the loader; only the block lists are kept, not the masks. */
+    std::vector<PlaneJob> jobs;
     for (const auto depth : depths) {
         if (ctx.cancelled) {
             break;
         }
-        progress.setValue(done++);
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
-        if (progress.wasCanceled()) {
-            ctx.cancelled = true;
-            break;
-        }
-
         const auto * maskPtr = maskAtDepth(depth);
         if (maskPtr == nullptr || maskPtr->count() == 0) {
             // Not necessarily benign: interpolantFor() also returns nothing when a slice
@@ -1042,22 +1151,46 @@ ShapeInterpolation::WriteResult ShapeInterpolation::writeAll(const bool wholeCha
             }
             continue;
         }
-        /* The mask being written is copied out, not pointed at.
-         *
-         * maskAtDepth() returns the one shared preview slice, and awaitLoader() inside the
-         * walk runs processEvents() to keep the progress dialog alive — which repaints,
-         * which asks for the preview at whatever depth the viewports are showing and
-         * overwrites it under us. Holding the pointer across that wrote one depth's outline
-         * at another depth. Reusing one buffer keeps the copy off the allocator. */
-        writeSlice = *maskPtr;
-        writeMaskAt(writeSlice, depth, value, progress, ctx);
-        ++result.depthsWritten;
-        if (ctx.cancelled) {
-            break;
-        }
+        jobs.push_back({depth, planFor(*maskPtr, depth, true).blocks});
     }
+
+    /* The masks themselves are rebuilt per supercube, over that supercube's part of the
+     * plane only, so the total blending is one slice's worth per depth however many
+     * supercubes the object spans. A key slice is written from the slice itself. */
+    std::set<int> depthsTouched;
+    SISlice rect;
+    walkPlanes(jobs, [&](const std::size_t job, const std::vector<const planarwrite::Block *> & blocks){
+        const auto depth = jobs[job].depth;
+        depthsTouched.insert(depth);
+        const auto key = slices.find(depth);
+        if (key != std::end(slices)) {
+            writeBlocks(key->second, blocks, value, ctx);
+            return;
+        }
+        const auto lo = prevDepth(depth);
+        const auto hi = nextDepth(depth);
+        const auto * in = (lo && hi) ? interpolantFor(*lo, *hi) : nullptr;
+        if (in == nullptr) {
+            return;// planned from this very interpolant a moment ago, so not expected
+        }
+        int uLo = std::numeric_limits<int>::max(), uHi = std::numeric_limits<int>::min();
+        int vLo = std::numeric_limits<int>::max(), vHi = std::numeric_limits<int>::min();
+        for (const auto * block : blocks) {
+            uLo = std::min(uLo, block->first[uAxisIdx]); uHi = std::max(uHi, block->last[uAxisIdx]);
+            vLo = std::min(vLo, block->first[vAxisIdx]); vHi = std::max(vHi, block->last[vAxisIdx]);
+        }
+        blendRect(*in, depth, siFloorDiv(uLo - in->uMin, in->uStep), siFloorDiv(vLo - in->vMin, in->vStep),
+                  siFloorDiv(uHi - in->uMin, in->uStep) + 1, siFloorDiv(vHi - in->vMin, in->vStep) + 1, rect);
+        if (rect.count() != 0) {
+            writeBlocks(rect, blocks, value, ctx);
+        }
+    }, progress, ctx);
+    result.depthsWritten = depthsTouched.size();
     flushMarks(ctx);
-    progress.setValue(static_cast<int>(depths.size()));
+
+    qDebug().noquote() << QString("shape interpolation: %1 move(s); blocks from the network %2, from memory %3, from edits %4")
+                              .arg(ctx.moves).arg(loaderWorker.fromNetwork - network0)
+                              .arg(loaderWorker.fromPayloadCache - payload0).arg(loaderWorker.fromEdits - edits0);
 
     state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
     result.cancelled = ctx.cancelled;

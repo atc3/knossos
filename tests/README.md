@@ -12,7 +12,9 @@ distance-field blend behind shape interpolation. Checks the sign convention, tha
 anisotropic voxel spacing is measured in nanometres rather than pixels, that interpolating
 between two discs tracks the expected radius, that the key slices reproduce exactly at
 t=0 and t=1, and that centroid alignment keeps a laterally drifting shape from pinching or
-vanishing.
+vanishing. Also that `blendSignedRect`, which the commit uses to blend one supercube's
+part of a slice at a time, equals the same crop of the full blend — with and without
+centroid alignment, and for rectangles inside, straddling and outside the grid.
 
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/dt_test distancetransform_test.cpp && /tmp/dt_test
@@ -294,4 +296,18 @@ to move a voxel across a 0.5 threshold.
 
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/morphregion_test morphregion_test.cpp && /tmp/morphregion_test
+```
+
+## blocktour_test
+
+Exercises `segmentation/blocktour.h`, which plans where the shape-interpolation commit
+moves the loader so each block it needs is made resident once. Checks that the predicted
+supercube matches a transcription of `Loader::Worker::DcoiFromPos` for M = 2–7 and
+non-cubic blocks; that over 300 randomised full and sparse block sets every needed block
+is assigned to exactly one window that really holds it, no window is empty, and a full box
+takes ⌈span/M⌉ windows per axis walked one step at a time; and that crop 126's 6 × 4
+blocks take one move at M = 7 and four at M = 3.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/blocktour_test blocktour_test.cpp && /tmp/blocktour_test
 ```

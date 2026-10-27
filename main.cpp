@@ -220,6 +220,7 @@ int main(int argc, char * argv[]) { boost::leaf::try_handle_all([argc, &argv]() 
 #endif
     qRegisterMetaType<std::string>();
     qRegisterMetaType<Loader::Worker::SnappySet>("Loader::Worker::SnappySet");
+    qRegisterMetaType<Loader::CubeFilter>("Loader::CubeFilter");
     qRegisterMetaType<Coordinate>();
     qRegisterMetaType<CoordOfCube>();
     qRegisterMetaType<Dataset>("Dataset");
