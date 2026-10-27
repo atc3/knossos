@@ -133,6 +133,39 @@ inline void blendSigned(const std::vector<float> & d1, const std::vector<float> 
     }
 }
 
+/* blendSigned() over the rectangle [u0, u1) × [v0, v1) of the grid only, into a mask of
+ * (u1 − u0) × (v1 − v0). Pixel for pixel the same as cropping a full blendSigned(), which
+ * tests/distancetransform_test.cpp checks. For writing one supercube's worth of a slice at
+ * a time without blending the whole slice once per supercube. The rectangle is clamped to
+ * the grid; `out` is left empty when nothing of it is inside. */
+inline void blendSignedRect(const std::vector<float> & d1, const std::vector<float> & d2, const int w, const int h,
+                            const float t, const float du, const float dv,
+                            int u0, int v0, int u1, int v1, std::vector<std::uint8_t> & out) {
+    u0 = std::max(0, u0); v0 = std::max(0, v0);
+    u1 = std::min(w, u1); v1 = std::min(h, v1);
+    out.clear();
+    if (u1 <= u0 || v1 <= v0) {
+        return;
+    }
+    const auto rw = u1 - u0;
+    out.assign(static_cast<std::size_t>(rw) * (v1 - v0), 0);
+    const auto shift1u = static_cast<int>(std::lround(-t * du));
+    const auto shift1v = static_cast<int>(std::lround(-t * dv));
+    const auto shift2u = static_cast<int>(std::lround((1.f - t) * du));
+    const auto shift2v = static_cast<int>(std::lround((1.f - t) * dv));
+    constexpr float FAR = 1e20f;
+    const auto sample = [&](const std::vector<float> & d, const int u, const int v){
+        return (u < 0 || v < 0 || u >= w || v >= h) ? FAR : d[static_cast<std::size_t>(v) * w + u];
+    };
+    for (int v = v0; v < v1; ++v) {
+        for (int u = u0; u < u1; ++u) {
+            const auto a = sample(d1, u + shift1u, v + shift1v);
+            const auto b = sample(d2, u + shift2u, v + shift2v);
+            out[static_cast<std::size_t>(v - v0) * rw + (u - u0)] = ((1.f - t) * a + t * b) <= 0.f ? 1 : 0;
+        }
+    }
+}
+
 /* Centroid of a binary mask, in pixel coordinates. Returns false for an empty mask. */
 inline bool maskCentroid(const std::vector<std::uint8_t> & bin, const int w, float & cu, float & cv) {
     double su{0}, sv{0};

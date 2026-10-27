@@ -24,6 +24,7 @@
 
 #include "coordinate.h"
 #include "segmentation/segmentationsplit.h"
+#include "segmentation/planarwrite.h"
 #include "segmentation/sislice.h"
 
 #include <QObject>
@@ -33,6 +34,7 @@
 class QProgressDialog;
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <unordered_set>
@@ -328,11 +330,22 @@ private:
         std::size_t cubesMissing{0};
         std::vector<CoordOfCube> missing;// for the log; a silent hole is the bug to avoid
         bool cancelled{false};
+        std::size_t moves{0};// loader moves made, for the log line
     };
     void flushMarks(WriteCtx &);
+    /* The blocks one plane touches, and the work to do there. See walkPlanes(). */
+    struct PlaneJob {
+        int depth{0};
+        std::vector<planarwrite::Block> blocks;
+    };
+    planarwrite::Plan planFor(const SISlice & mask, int depth, bool skipUnreached) const;
+    using PlaneVisitor = std::function<void(std::size_t job, const std::vector<const planarwrite::Block *> & blocks)>;
+    void walkPlanes(const std::vector<PlaneJob> & jobs, const PlaneVisitor & visit, QProgressDialog & progress, WriteCtx &);
+    bool moveLoaderOnto(const Coordinate & centre, const std::vector<CoordOfCube> & cubes, QProgressDialog & progress, WriteCtx &);
+    void writeBlocks(const SISlice & mask, const std::vector<const planarwrite::Block *> & blocks, std::uint64_t value, WriteCtx &);
     void writeMaskAt(const SISlice & mask, int depth, std::uint64_t value, QProgressDialog & progress, WriteCtx &);
-    bool makeResident(const Coordinate & first, const Coordinate & last, const Coordinate & centre, QProgressDialog & progress, WriteCtx &);
-    void resyncKeySlice(SISlice & slice, int depth, QProgressDialog & progress, WriteCtx &);
+    // the interpolated mask at `depth` over grid indices [u0, u1) × [v0, v1) of `in` only
+    void blendRect(const Interpolant & in, int depth, int u0, int v0, int u1, int v1, SISlice & out) const;
 
     bool alignCentroids{true};
 
