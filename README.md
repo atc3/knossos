@@ -50,6 +50,7 @@ An **Inventory** tab in the annotation window lists every object in the segmenta
 ### Datasets and loading
 - **Neuroglancer precomputed segmentations** (`ServerFormat = 'precomputed'` in a `.k.toml`): sharded and unsharded, `compressed_segmentation` and raw, uint64. Volumes the reader cannot handle yet (other data types, gzip shards, a non-zero `voxel_offset`) are refused with the reason rather than shown wrong.
 - **Google Cloud Storage** datasets load (they were mistaken for Brainmaps volumes, and sent auth requests GCS does not answer).
+- **File ▸ Open Annotation From URL** downloads a `.k.zip` or `.nml` (https:// or gs://) into `annotationFiles/downloaded/` and opens it; dragging such a link onto the window does the same.
 - **File ▸ Reload Dataset From Server** re-fetches blocks when files changed on the server, bypassing Google's edge cache for an hour. Blocks you painted keep your edits.
 - A `.k.toml` layer can declare `MaxId`, so new objects get ids above those already in the data.
 - An unreadable `ServerFormat` is reported instead of the layer silently loading empty.

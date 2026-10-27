@@ -69,6 +69,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QInputDialog>
+#include <QSaveFile>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -754,6 +755,8 @@ void MainWindow::createMenus() {
     fileMenu.addSeparator();
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/create-annotation.png"), tr("Create New Annotation"), this, &MainWindow::newAnnotationSlot, QKeySequence::New);
     addApplicationShortcut(fileMenu, QIcon(":/resources/icons/menubar/open-annotation.png"), tr("Open Annotation …"), this, &MainWindow::openSlot, QKeySequence::Open);
+    fileMenu.addAction(QIcon(":/resources/icons/menubar/open-annotation.png"), tr("Open Annotation From URL …"), this, &MainWindow::openUrlSlot)
+            ->setToolTip(tr("Download a .k.zip or .nml from the web (https:// or gs://) into the annotations folder and open it."));
     auto & recentfileMenu = *fileMenu.addMenu(QIcon(":/resources/icons/menubar/open-recent.png"), tr("Recent Annotation File(s)"));
     int i = 0;
     for (auto & elem : historyEntryActions) {
@@ -1556,6 +1559,81 @@ void MainWindow::openSlot() {
     }
 }
 
+void MainWindow::openUrlSlot() {
+    QSettings settings;
+    const auto last = settings.value(ANNOTATION_LAST_URL).toString();
+    bool ok = false;
+    const auto text = state->viewer->suspend([this, &last, &ok]{
+        return QInputDialog::getText(this, tr("Open Annotation From URL"),
+                                     tr("URL of a .k.zip or .nml file (https:// or gs://):"), QLineEdit::Normal, last, &ok);
+    }).trimmed();// pasted URLs often carry a stray space or newline, as in the dataset dialog
+    if (!ok || text.isEmpty()) {
+        return;
+    }
+    settings.setValue(ANNOTATION_LAST_URL, text);
+    openAnnotationUrl(QUrl{text});
+}
+
+/* Downloads an annotation and opens the copy.
+ *
+ * The file is kept, in annotationFiles/downloaded/ under its own name, rather than read
+ * from a temporary: everything downstream — the recent-files list, Save writing back to
+ * where the annotation came from, autosave next to it — works on a path, and Save should
+ * land somewhere the user can find again rather than in a temp directory that is cleaned
+ * away. An existing file of that name is never overwritten, since it may hold edits made
+ * after an earlier download; the new copy gets a numbered name instead. */
+bool MainWindow::openAnnotationUrl(QUrl url) {
+    const auto fail = [this](const QString & why){
+        QMessageBox box{this};
+        box.setIcon(QMessageBox::Warning);
+        box.setText(tr("Could not open the annotation from that URL."));
+        box.setInformativeText(why);
+        state->viewer->suspend([&box]{ return box.exec(); });
+        return false;
+    };
+    if (url.scheme() == "gs") {// gs://bucket/path is the same object as storage.googleapis.com/bucket/path
+        url = QUrl{QString{"https://storage.googleapis.com/%1%2"}.arg(url.host(), url.path())};
+    }
+    if (!url.isValid() || (url.scheme() != "https" && url.scheme() != "http")) {
+        return fail(tr("Only http://, https:// and gs:// URLs can be opened this way. For a file on this computer use Open Annotation …"));
+    }
+    auto name = url.fileName();
+    const QStringList accepted{".k.zip", ".zip", ".nml", ".nmx"};
+    if (std::none_of(std::begin(accepted), std::end(accepted), [&name](const QString & ext){ return name.endsWith(ext, Qt::CaseInsensitive); })) {
+        return fail(tr("“%1” does not look like an annotation file. The URL has to end in .k.zip, .zip, .nml or .nmx.").arg(name));
+    }
+
+    statusBar()->showMessage(tr("Downloading %1 …").arg(name));
+    const auto download = state->viewer->suspend([&url]{ return Network::singleton().refresh(url); });
+    statusBar()->clearMessage();
+    if (!download.first) {
+        return fail(tr("The download failed: %1").arg(QString::fromUtf8(download.second.left(300))));
+    }
+    const auto & bytes = download.second;
+    if (name.endsWith(".zip", Qt::CaseInsensitive) && !bytes.startsWith("PK")) {
+        // a login page or an error document served with 200, not the archive
+        return fail(tr("The server answered, but not with a zip archive (%1 bytes). Check that the URL is public and points at the file itself.").arg(bytes.size()));
+    }
+
+    const auto folder = QStandardPaths::writableLocation(QStandardPaths::DataLocation) + "/annotationFiles/downloaded";
+    if (!QDir{}.mkpath(folder)) {
+        return fail(tr("Could not create %1.").arg(folder));
+    }
+    // keep the full extension (.k.zip is two suffixes) when numbering a duplicate
+    const auto extension = std::find_if(std::begin(accepted), std::end(accepted), [&name](const QString & ext){ return name.endsWith(ext, Qt::CaseInsensitive); });
+    const auto stem = name.left(name.size() - extension->size());
+    auto path = folder + '/' + name;
+    for (int n = 2; QFileInfo::exists(path); ++n) {
+        path = folder + '/' + QString{"%1 (%2)%3"}.arg(stem).arg(n).arg(name.right(extension->size()));
+    }
+    QSaveFile file{path};
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+        return fail(tr("Could not save the download to %1: %2").arg(path, file.errorString()));
+    }
+    qDebug() << "downloaded annotation" << url.toString(QUrl::RemoveQuery) << "to" << path;
+    return openFileDispatch({path});
+}
+
 void MainWindow::saveSlot() {
     if (!settleShapeInterpolationBeforeSaving()) {
         return;
@@ -2137,7 +2215,12 @@ void MainWindow::resizeEvent(QResizeEvent *) {
 
 void MainWindow::dropEvent(QDropEvent *event) {
     QStringList files;
+    QList<QUrl> remote;
     for (auto && url : event->mimeData()->urls()) {
+        if (url.scheme() == "http" || url.scheme() == "https" || url.scheme() == "gs") {
+            remote.append(url);// a link dragged from a browser: download it, then open the copy
+            continue;
+        }
         const auto localPath = url.toLocalFile();
         if (localPath.endsWith(".conf") || localPath.endsWith(".k.toml")) {
             emit datasetDropped(url);
@@ -2145,8 +2228,11 @@ void MainWindow::dropEvent(QDropEvent *event) {
             files.append(localPath);
         }
     }
-    QTimer::singleShot(0, [this, files](){
+    QTimer::singleShot(0, [this, files, remote](){
         openFileDispatch(files);
+        for (const auto & url : remote) {
+            openAnnotationUrl(url);
+        }
     });
     event->accept();
 }
@@ -2157,6 +2243,14 @@ void MainWindow::dragEnterEvent(QDragEnterEvent * event) {
         QList<QUrl> urls = event->mimeData()->urls();
         for (auto && url : urls) {
             qDebug() << url;//in case its no working
+            if (url.scheme() == "http" || url.scheme() == "https" || url.scheme() == "gs") {
+                // an annotation linked on a web page, opened via openAnnotationUrl()
+                for (const auto & extension : {".k.zip", ".zip", ".nml", ".nmx"}) {
+                    if (url.fileName().endsWith(extension)) {
+                        event->accept();
+                    }
+                }
+            }
             if (url.isLocalFile()) {
                 const auto fileName(url.toLocalFile());
                 for (const auto & extension : validExtensions) {

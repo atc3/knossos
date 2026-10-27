@@ -85,6 +85,7 @@ const QString DATASET_CUBE_EDGE = "cube_edge";
 const QString DATASET_LAST_USED = "dataset_last_used";
 const QString DATASET_MRU = "dataset_mru";
 const QString DATASET_OVERLAY = "overlay";
+const QString ANNOTATION_LAST_URL = "annotation_last_url";// the last URL given to File ▸ Open Annotation From URL
 const QString DATASET_SUPERCUBE_EDGE = "supercube_edge";
 
 // Zoom and Multires
