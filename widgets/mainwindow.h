@@ -316,6 +316,8 @@ public slots:
     /* skeleton menu */
     bool newAnnotationSlot();
     void openSlot();
+    void openUrlSlot();
+    bool openAnnotationUrl(QUrl url);
     void saveSlot();
     void saveAsSlotWrap();
     void saveAsSlot(const bool onlySelectedTrees = false, const bool saveTime = true, const bool saveDatasetPath = true);
