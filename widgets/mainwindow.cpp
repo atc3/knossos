@@ -1576,7 +1576,7 @@ void MainWindow::openUrlSlot() {
 
 /* Downloads an annotation and opens the copy.
  *
- * The file is kept, in annotationFiles/downloaded/ under its own name, rather than read
+ * The file is kept, in annotationFiles/ beside the autosaves, under its own name, rather than read
  * from a temporary: everything downstream — the recent-files list, Save writing back to
  * where the annotation came from, autosave next to it — works on a path, and Save should
  * land somewhere the user can find again rather than in a temp directory that is cleaned
@@ -1615,7 +1615,7 @@ bool MainWindow::openAnnotationUrl(QUrl url) {
         return fail(tr("The server answered, but not with a zip archive (%1 bytes). Check that the URL is public and points at the file itself.").arg(bytes.size()));
     }
 
-    const auto folder = QStandardPaths::writableLocation(QStandardPaths::DataLocation) + "/annotationFiles/downloaded";
+    const auto folder = QStandardPaths::writableLocation(QStandardPaths::DataLocation) + "/annotationFiles";
     if (!QDir{}.mkpath(folder)) {
         return fail(tr("Could not create %1.").arg(folder));
     }
