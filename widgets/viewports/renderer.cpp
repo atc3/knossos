@@ -39,7 +39,6 @@
 #include "stateInfo.h"
 #include "viewer.h"
 
-#include <QElapsedTimer>
 #include <QMatrix4x4>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLPaintDevice>
@@ -1619,11 +1618,7 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
     }
     const bool resized = plane.uSize != interpolationPreviewUSize || plane.vSize != interpolationPreviewVSize;
     const auto key = static_cast<std::uint64_t>(plane.fixedCoord) * 4 + static_cast<std::uint64_t>(viewportType);
-    static QElapsedTimer antsClock;
-    if (!antsClock.isValid()) {
-        antsClock.start();
-    }
-    const auto antsPhase = antsClock.elapsed() / Viewer::ANTS_STEP_MS;
+    const auto antsPhase = state->viewer->antsPhase();
     const bool stale = resized || key != interpolationPreviewKey || si.generation() != interpolationPreviewGen;
     constexpr std::array<std::uint8_t, 4> interpolatedColor{{38, 217, 242, 115}};// cyan, ~45% alpha
     constexpr std::array<std::uint8_t, 4> keySliceColor{{255, 176, 32, 130}};// amber: painted, not inferred
@@ -1833,12 +1828,37 @@ void ViewportOrtho::renderBrush(const Coordinate coord) {
             const auto lineRhs = rhs - center;
             return std::atan2(start.x * lineLhs.y - start.y * lineLhs.x, start.dot(lineLhs)) < std::atan2(start.x * lineRhs.y - start.y * lineRhs.x, start.dot(lineRhs));
         });
-        glBegin(GL_LINE_LOOP);
-        glColor4f(r, g, b, 1.);
-        for (const auto & point : vertices) {
-            glVertex3f(point.x, point.y, point.z);
+        const auto outline = [this, &vertices](const float r, const float g, const float b) {
+            glBegin(GL_LINE_LOOP);
+            glColor4f(r, g, b, 1.);
+            for (const auto & point : vertices) {
+                glVertex3f(point.x, point.y, point.z);
+            }
+            glEnd();
+        };
+        if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {
+            /* Marching ants, like the outlines of the chain's slices, so the mode shows at
+             * the cursor before there is any chain to outline.
+             *
+             * A dark loop underneath, then the colour stippled over it: 4 on, 4 off, each
+             * bit 3 px. Line stipple counts along the loop in vertex order, so rotating the
+             * pattern by a bit each step moves the dashes along that order. The vertices are
+             * sorted by increasing angle in the brush's own frame, which is clockwise on
+             * screen in XY; the rotations onto XZ and ZY above mirror it, so those turn the
+             * pattern the other way. */
+            outline(0.06f, 0.06f, 0.06f);
+            const auto step = static_cast<unsigned>(state->viewer->antsPhase() % 16);
+            const auto turn = viewportType == VIEWPORT_XY ? step : (16 - step) % 16;
+            const std::uint16_t dashes = 0x0F0F;
+            const auto pattern = static_cast<GLushort>(((dashes << turn) | (dashes >> (16 - turn))) & 0xFFFF);
+            glPushAttrib(GL_LINE_BIT | GL_ENABLE_BIT);
+            glEnable(GL_LINE_STIPPLE);
+            glLineStipple(3, pattern);
+            outline(r, g, b);
+            glPopAttrib();
+        } else {
+            outline(r, g, b);
         }
-        glEnd();
         if (Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_Paint) && Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_OverPaint)) { // fill brush with object color
             glBegin(GL_TRIANGLE_FAN);
             glColor4f(r, g, b, .25);

@@ -61,8 +61,9 @@ Viewer::Viewer() : evilHack{[this](){ state->viewer = this; return true; }()} {
     recalcTextureOffsets();
 
     QObject::connect(&timer, &QTimer::timeout, this, &Viewer::run);// timer is started in main
+    antsClock.start();
     QObject::connect(&antsTimer, &QTimer::timeout, this, [this](){
-        if (ShapeInterpolation::singleton().active() && ShapeInterpolation::singleton().previewEnabled()) {
+        if (antsVisible()) {
             window->forEachOrthoVPDo([](ViewportOrtho & vp){ vp.update(); });
         }
     });
@@ -1116,6 +1117,12 @@ void Viewer::calculateMissingOrthoGPUCubes(const Dataset & dset, TextureLayer & 
             layer.pendingOrthoCubes.emplace_back(gpuCoord, offset);
         }
     }
+}
+
+bool Viewer::antsVisible() const {
+    const auto & si = ShapeInterpolation::singleton();
+    return Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            || (si.active() && si.previewEnabled());
 }
 
 void Viewer::reslice_notify() {

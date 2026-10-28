@@ -225,6 +225,11 @@ public:
      * marching ants around its slices crawl (ViewportOrtho::renderShapeInterpolationPreview). */
     QTimer antsTimer;
     static constexpr int ANTS_STEP_MS = 120;
+    QElapsedTimer antsClock;
+    // which step of the crawl to draw; shared so the slice outlines and the brush move together
+    std::int64_t antsPhase() const { return antsClock.elapsed() / ANTS_STEP_MS; }
+    // the crawl runs whenever there is something showing it: interpolation mode, or a chain
+    bool antsVisible() const;
 
     void arbCubes(ViewportArb & vp);
     void arbCubes(ViewportArb & vp, const Dataset & layer, TextureLayer & textureLayer);
