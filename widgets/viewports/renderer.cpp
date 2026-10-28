@@ -39,6 +39,7 @@
 #include "stateInfo.h"
 #include "viewer.h"
 
+#include <QElapsedTimer>
 #include <QMatrix4x4>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLPaintDevice>
@@ -1592,7 +1593,14 @@ void Viewport3D::renderSkeletonVP(const RenderOptions &options) {
  *
  * The controller hands back an axis-aligned PlanarMask for whichever ortho viewport asks,
  * so the two planes the chain does not live in show a cross-section through the whole
- * volume and the shape is visible from the side while it is being built. */
+ * volume and the shape is visible from the side while it is being built.
+ *
+ * Its outline is drawn as marching ants crawling clockwise, so a chain in progress cannot
+ * be mistaken for ordinary segmentation at a glance. Clockwise is decided per edge pixel:
+ * the empty neighbours give the outward normal, turning that a quarter to the right gives
+ * the direction to crawl in, and the dash pattern runs along it in screen terms — so the
+ * ZY viewport, whose mask u axis is vertical on screen, swaps the axes first. Only this
+ * small texture is rebuilt each step; see Viewer's antsTimer for what drives it. */
 void ViewportOrtho::renderShapeInterpolationPreview() {
     if (viewportType != VIEWPORT_XY && viewportType != VIEWPORT_XZ && viewportType != VIEWPORT_ZY) {
         return;
@@ -1611,7 +1619,14 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
     }
     const bool resized = plane.uSize != interpolationPreviewUSize || plane.vSize != interpolationPreviewVSize;
     const auto key = static_cast<std::uint64_t>(plane.fixedCoord) * 4 + static_cast<std::uint64_t>(viewportType);
+    static QElapsedTimer antsClock;
+    if (!antsClock.isValid()) {
+        antsClock.start();
+    }
+    const auto antsPhase = antsClock.elapsed() / Viewer::ANTS_STEP_MS;
     const bool stale = resized || key != interpolationPreviewKey || si.generation() != interpolationPreviewGen;
+    constexpr std::array<std::uint8_t, 4> interpolatedColor{{38, 217, 242, 115}};// cyan, ~45% alpha
+    constexpr std::array<std::uint8_t, 4> keySliceColor{{255, 176, 32, 130}};// amber: painted, not inferred
     if (stale) {
         if (resized) {
             // RGBA8 rather than a single-channel format: the GL context is 2.0 compatibility
@@ -1625,19 +1640,58 @@ void ViewportOrtho::renderShapeInterpolationPreview() {
             interpolationPreviewUSize = plane.uSize;
             interpolationPreviewVSize = plane.vSize;
         }
-        constexpr std::array<std::uint8_t, 4> interpolatedColor{{38, 217, 242, 115}};// cyan, ~45% alpha
-        constexpr std::array<std::uint8_t, 4> keySliceColor{{255, 176, 32, 130}};// amber: painted, not inferred
-        interpolationPreviewRGBA.assign(plane.mask->size() * 4, 0);
-        for (std::size_t i = 0; i < plane.mask->size(); ++i) {
-            const auto value = (*plane.mask)[i];
-            if (value != 0) {
-                const auto & color = (plane.keySlice || value == 2) ? keySliceColor : interpolatedColor;
+        const auto & mask = *plane.mask;
+        const int uSize = plane.uSize, vSize = plane.vSize;
+        const auto empty = [&](const int u, const int v) {
+            return u < 0 || v < 0 || u >= uSize || v >= vSize || mask[static_cast<std::size_t>(v) * uSize + u] == 0;
+        };
+        // the ZY viewport shows z across and y down, but the mask's u is y: swap to screen axes
+        const bool transposed = plane.uAxis != (viewportType == VIEWPORT_ZY ? 2 : 0);
+        const int uOrigin = plane.uMin / std::max(1, plane.uStep), vOrigin = plane.vMin / std::max(1, plane.vStep);
+        interpolationPreviewRGBA.assign(mask.size() * 4, 0);
+        interpolationPreviewEdges.clear();
+        for (int v = 0; v < vSize; ++v) {
+            for (int u = 0; u < uSize; ++u) {
+                const auto i = static_cast<std::size_t>(v) * uSize + u;
+                const auto value = mask[i];
+                if (value == 0) {
+                    continue;
+                }
+                const bool isKey = plane.keySlice || value == 2;
+                const auto & color = isKey ? keySliceColor : interpolatedColor;
                 std::copy(std::begin(color), std::end(color), std::begin(interpolationPreviewRGBA) + 4 * i);
+                if (empty(u + 1, v) || empty(u - 1, v) || empty(u, v + 1) || empty(u, v - 1)) {// on the outline
+                    const int nu = empty(u + 1, v) - empty(u - 1, v);
+                    const int nv = empty(u, v + 1) - empty(u, v - 1);
+                    // screen position (x right, y down) and outward normal
+                    const int x = transposed ? vOrigin + v : uOrigin + u, y = transposed ? uOrigin + u : vOrigin + v;
+                    const int nx = transposed ? nv : nu, ny = transposed ? nu : nv;
+                    // clockwise on screen is the normal turned a quarter right: (−ny, nx)
+                    const std::int64_t along = (nx == 0 && ny == 0) ? x + y : -ny * x + nx * y;
+                    interpolationPreviewEdges.push_back({static_cast<std::uint32_t>(i), along, isKey});
+                }
             }
         }
-        interpolationPreviewTex->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, interpolationPreviewRGBA.data());
         interpolationPreviewKey = key;
         interpolationPreviewGen = si.generation();
+        interpolationPreviewPhase = -1;// recolour the outline below
+    }
+    if (antsPhase != interpolationPreviewPhase) {
+        // only the outline changes from one step to the next; the inside was filled above
+        constexpr std::array<std::uint8_t, 4> antsGap{{16, 16, 16, 230}};
+        constexpr std::int64_t ANTS_DASH = 4;// voxels on, then as many off
+        constexpr auto period = 2 * ANTS_DASH;
+        for (const auto & edge : interpolationPreviewEdges) {
+            auto color = edge.key ? keySliceColor : interpolatedColor;
+            if (((edge.along - antsPhase) % period + period) % period < ANTS_DASH) {
+                color[3] = 255;
+            } else {
+                color = antsGap;
+            }
+            std::copy(std::begin(color), std::end(color), std::begin(interpolationPreviewRGBA) + 4 * static_cast<std::size_t>(edge.index));
+        }
+        interpolationPreviewTex->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, interpolationPreviewRGBA.data());
+        interpolationPreviewPhase = antsPhase;
     }
 
     // corners of the mask bounding box, in dataset coordinates then in nanometres

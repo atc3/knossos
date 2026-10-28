@@ -387,8 +387,11 @@ bool ShapeInterpolation::absorbStamp(const Coordinate & centerPos, const brush_t
         reason = QObject::tr("Shape interpolation is pinned to the segmentation layer it was started at. Press Esc to start over.");
         return false;
     } else if (stampSoid != soid) {
-        reason = QObject::tr("Shape interpolation is running on another object. Press Esc to start over.");
-        return false;
+        if (hasWork()) {
+            reason = QObject::tr("Shape interpolation is running on another object. Press Esc to start over.");
+            return false;
+        }
+        begin(brush, stampSoid);// nothing done on the old object yet: the chain follows the brush to the new one
     }
 
     const auto depth = depthOf(centerPos);

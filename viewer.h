@@ -221,6 +221,10 @@ public:
     void zoom(const float factor);
     void zoomReset();
     QTimer timer;
+    /* Repaints the ortho viewports while a shape-interpolation chain is running, so the
+     * marching ants around its slices crawl (ViewportOrtho::renderShapeInterpolationPreview). */
+    QTimer antsTimer;
+    static constexpr int ANTS_STEP_MS = 120;
 
     void arbCubes(ViewportArb & vp);
     void arbCubes(ViewportArb & vp, const Dataset & layer, TextureLayer & textureLayer);

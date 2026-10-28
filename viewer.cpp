@@ -29,6 +29,7 @@
 #include "segmentation/segmentation.h"
 #include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
+#include "segmentation/shapeinterpolation.h"
 #include "widgets/mainwindow.h"
 #include "widgets/viewports/viewportbase.h"
 #include "widgets/widgetcontainer.h"
@@ -60,6 +61,12 @@ Viewer::Viewer() : evilHack{[this](){ state->viewer = this; return true; }()} {
     recalcTextureOffsets();
 
     QObject::connect(&timer, &QTimer::timeout, this, &Viewer::run);// timer is started in main
+    QObject::connect(&antsTimer, &QTimer::timeout, this, [this](){
+        if (ShapeInterpolation::singleton().active() && ShapeInterpolation::singleton().previewEnabled()) {
+            window->forEachOrthoVPDo([](ViewportOrtho & vp){ vp.update(); });
+        }
+    });
+    antsTimer.start(ANTS_STEP_MS);
 
     QObject::connect(&Segmentation::singleton(), &Segmentation::appendedRow, this, &Viewer::segmentation_changed);
     QObject::connect(&Segmentation::singleton(), &Segmentation::changedRow, this, &Viewer::segmentation_changed);

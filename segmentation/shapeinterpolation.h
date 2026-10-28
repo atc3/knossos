@@ -71,6 +71,10 @@ public:
      * already painted. Adopting an existing outline is free to undo — click it again — so
      * a chain that has only ever adopted has nothing to confirm before it is discarded. */
     bool edited() const { return wasEdited; }
+    /* Whether ending the chain would lose any work: false while it has no key slice, or
+     * only one that was clicked in and never changed. The same test Esc uses to decide
+     * whether to ask, and what lets picking another object simply move the chain onto it. */
+    bool hasWork() const { return slices.size() > 1 || (slices.size() == 1 && wasEdited); }
     const std::map<int, SISlice> & sliceMap() const { return slices; }
     int normalAxis() const { return axis; }
     // ViewportType the session is pinned to; VIEWPORT_XY/XZ/ZY map onto brush_t::view_t
