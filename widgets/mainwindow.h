@@ -249,6 +249,7 @@ class MainWindow : public QMainWindow {
     void createMenus();
     void createToolbars();
     void resetWorkModes();
+    void chooseWorkMode(int index);
 
     bool placeComment(const int index);
     void toggleSegments();

@@ -425,14 +425,7 @@ void MainWindow::createToolbars() {
     modeCombo.setModel(&workModeModel);
     modeCombo.setCurrentIndex(static_cast<int>(AnnotationMode::Mode_Tracing));
     basicToolbar.addWidget(&modeCombo);
-    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), [this](int index) {
-        const auto target = workModeModel.at(index).first;
-        if (target != AnnotationMode::Mode_ShapeInterpolation && !confirmLeavingShapeInterpolation()) {
-            modeCombo.setCurrentIndex(workModeModel.indexOf(static_cast<AnnotationMode>(static_cast<int>(Annotation::singleton().annotationMode))));// put it back
-            return;
-        }
-        setWorkMode(target);
-    });
+    QObject::connect(&modeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), this, &MainWindow::chooseWorkMode);
     modeCombo.setToolTip("<b>Select a work mode:</b><br/>"
                          "<b>" + workModes[AnnotationMode::Mode_MergeTracing] + ":</b> Merge segmentation objects by tracing<br/>"
                          "<b>" + workModes[AnnotationMode::Mode_Selection] + ":</b> Skeleton manipulation and segmentation selection<br/>"
@@ -534,6 +527,17 @@ void MainWindow::createToolbars() {
     segJobModeToolbar.addWidget(splitBtn);
     segJobModeToolbar.addSeparator();
     segJobModeToolbar.addWidget(&todosLeftLabel);
+}
+
+/* A mode picked by the user, from the dropdown or a number key, as opposed to one set by
+ * the program: leaving shape interpolation with uncommitted work asks first. */
+void MainWindow::chooseWorkMode(const int index) {
+    const auto target = workModeModel.at(index).first;
+    if (target != AnnotationMode::Mode_ShapeInterpolation && !confirmLeavingShapeInterpolation()) {
+        modeCombo.setCurrentIndex(workModeModel.indexOf(static_cast<AnnotationMode>(static_cast<int>(Annotation::singleton().annotationMode))));// put it back
+        return;
+    }
+    setWorkMode(target);
 }
 
 void MainWindow::resetWorkModes() {
@@ -1216,7 +1220,7 @@ void MainWindow::createMenus() {
     for (int slot = 1; slot <= 9; ++slot) {
         createGlobalAction(this, Qt::Key_0 + slot, [this, slot]() {
             if (slot <= modeCombo.count()) {
-                modeCombo.setCurrentIndex(slot - 1);// the combo's handler does the rest
+                chooseWorkMode(slot - 1);// setCurrentIndex alone would only relabel the combo: activated() fires for clicks, not for programmatic changes
             } else {
                 statusBar()->showMessage(tr("There are only %n mode(s) for this dataset.", "", modeCombo.count()), 4000);
             }
