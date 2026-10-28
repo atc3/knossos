@@ -311,3 +311,21 @@ blocks take one move at M = 7 and four at M = 3.
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/blocktour_test blocktour_test.cpp && /tmp/blocktour_test
 ```
+
+## inventoryroute_test
+
+Exercises `segmentation/inventoryroute.h`, the order the Inventory tab's Route column
+sorts into: from the crosshair, each next object is the one whose supercube adds the fewest
+new blocks to the one loaded now, objects sharing a supercube go together, and when nothing
+left overlaps the nearest one is next. The bucketed search with its early stop and coarse
+grid has to give exactly what the plain rule gives, so 300 randomised lists (M from 2 to 5,
+dense and sparse) are checked against a brute-force implementation of it. Also measures
+the saving on a list shaped like a real inventory — scanned at 8×, so consecutive scan-order
+entries spread over a whole scan chunk, and walked at 1× — and that 300 000 objects order
+in well under five seconds, dense or sparse.
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/ir_test inventoryroute_test.cpp && /tmp/ir_test
+```
+
+Exits non-zero on failure.
