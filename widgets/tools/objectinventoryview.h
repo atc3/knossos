@@ -63,7 +63,7 @@ class ObjectInventoryModel : public QAbstractTableModel {
     Q_OBJECT
     friend class ObjectInventoryView;
 public:
-    enum Column { Ordinal, Id, Voxels, Mag1Voxels, Sphericity, Distance, Position, StateCol, ColumnCount };
+    enum Column { Ordinal, Id, Voxels, Mag1Voxels, Sphericity, Distance, Route, Position, StateCol, ColumnCount };
 
     explicit ObjectInventoryModel(QObject * parent = nullptr);
     int rowCount(const QModelIndex & = {}) const override;
@@ -100,6 +100,7 @@ private:
     // scan order, ascending: the order the sweep appends in, so new rows never fall out of it
     bool natural() const { return sortColumn == Ordinal && sortOrder == Qt::AscendingOrder; }
     double distanceOf(const objinv::Record &) const;
+    void sortByRoute();
 
     std::vector<std::uint32_t> rows;// view row -> record index; strictly increasing in natural order
     std::vector<bool> visited;
@@ -107,6 +108,7 @@ private:
     int sortColumn{Ordinal};
     Qt::SortOrder sortOrder{Qt::AscendingOrder};
     Coordinate distanceFrom;// the crosshair when the list was last sorted; see the Distance column
+    std::vector<std::uint32_t> routeStep;// record index -> 1-based stop on the last route; 0 for none
     bool staleUnderOrder{false};
 };
 

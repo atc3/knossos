@@ -23,6 +23,7 @@
 #include "widgets/tools/objectinventoryview.h"
 
 #include "dataset.h"
+#include "segmentation/inventoryroute.h"
 #include "segmentation/segmentation.h"
 #include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
@@ -107,6 +108,11 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
         case Mag1Voxels: return tr("Approximate size at magnification 1: the scanned voxel count times how many\n"
                                    "magnification-1 voxels one scanned voxel covers (8 per halving). An estimate —\n"
                                    "nothing at magnification 1 is read. The same as Voxels for a 1× scan.");
+        case Route: return tr("An order that keeps block loads down: from where the crosshair is, each next object is\n"
+                              "the one whose surrounding blocks are mostly already loaded, and objects sharing\n"
+                              "the same blocks come together. Sort by it to walk the list with . and , while\n"
+                              "loading as little as possible. Worked out for the magnification you are viewing\n"
+                              "at when you sort, from the crosshair then; sort again after changing either.");
         case Distance: return tr("Distance from where the crosshair was when the list was last sorted.\n"
                                  "Sort by it to list what is nearest; sort again after moving to update it.");
         default: return tr("Click to sort by this column; click again to reverse.");
@@ -122,6 +128,7 @@ QVariant ObjectInventoryModel::headerData(const int section, const Qt::Orientati
     case Mag1Voxels: return tr("≈ Voxels at 1×");
     case Sphericity: return tr("Sphericity");
     case Distance: return tr("Distance");
+    case Route: return tr("Route");
     case Position: return tr("Position");
     case StateCol: return tr("State");
     }
@@ -249,9 +256,15 @@ double ObjectInventoryModel::distanceOf(const objinv::Record & r) const {
 void ObjectInventoryModel::sortRows() {
     distanceFrom = state->viewerState->currentPosition;
     if (natural()) {
+        routeStep.clear();
         std::sort(std::begin(rows), std::end(rows));
         return;
     }
+    if (sortColumn == Route) {
+        sortByRoute();
+        return;
+    }
+    routeStep.clear();// the numbers only mean anything while the rows are in that order
     const auto & records = objinv::Inventory::singleton().records();
     double nm[3];
     scanVoxelNm(nm);
@@ -294,6 +307,45 @@ void ObjectInventoryModel::sortRows() {
     });
     for (std::size_t k = 0; k < keys.size(); ++k) {
         rows[k] = keys[k].row;
+    }
+}
+
+/* Orders `rows` along a route that loads few blocks — see segmentation/inventoryroute.h.
+ *
+ * Each object's window is the supercube of blocks the loader makes resident when the
+ * crosshair jumps to it, worked out the way Loader::Worker::DcoiFromPos does, at the
+ * magnification being viewed now: that, not the one the inventory was scanned at, is what
+ * walking the list loads. Descending walks the same route backwards. */
+void ObjectInventoryModel::sortByRoute() {
+    const auto & records = objinv::Inventory::singleton().records();
+    routeStep.assign(records.size(), 0);
+    if (Dataset::datasets.empty() || rows.empty()) {
+        return;
+    }
+    const auto & dataset = Dataset::datasets.front();
+    const auto halfFOV = dataset.cube2global({1, 1, 1}) * (state->M - 1) / 2;
+    const auto windowAround = [&dataset, &halfFOV](const Coordinate & position) {
+        const auto lo = dataset.global2cube(position - halfFOV);
+        const auto hi = dataset.global2cube(position + halfFOV);
+        return invroute::Window{{lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}};
+    };
+    std::vector<invroute::Window> windows;
+    windows.reserve(rows.size());
+    for (const auto i : rows) {
+        windows.push_back(windowAround(positionOf(records[i])));
+    }
+    const auto order = invroute::plan(windows, windowAround(state->viewerState->currentPosition), state->M);
+    std::vector<std::uint32_t> routed;
+    routed.reserve(rows.size());
+    for (const auto k : order) {
+        routed.push_back(rows[k]);
+    }
+    if (sortOrder == Qt::DescendingOrder) {
+        std::reverse(std::begin(routed), std::end(routed));
+    }
+    rows = std::move(routed);
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        routeStep[rows[sortOrder == Qt::DescendingOrder ? order.size() - 1 - k : k]] = static_cast<std::uint32_t>(k + 1);
     }
 }
 
@@ -411,6 +463,14 @@ QVariant ObjectInventoryModel::data(const QModelIndex & modelIndex, const int ro
         const auto psi = objinv::sphericity(*r, nm);
         return psi < 0 ? QVariant{QStringLiteral("—")} : QVariant{QString::number(psi, 'f', 2)};
     }
+    case Route: {
+        const auto recordIndex = recordIndexAt(modelIndex.row());
+        const auto step = recordIndex < routeStep.size() ? routeStep[recordIndex] : 0;
+        if (step == 0) {// not on the last route: never sorted by it, or found since
+            return role == Qt::UserRole ? QVariant{} : QVariant{QStringLiteral("—")};
+        }
+        return static_cast<qulonglong>(step);
+    }
     case Distance: {
         const auto nm = distanceOf(*r);
         return nm >= 1000 ? tr("%1 µm").arg(nm / 1000, 0, 'f', 1) : tr("%1 nm").arg(nm, 0, 'f', 0);
@@ -499,6 +559,7 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     table.setColumnWidth(ObjectInventoryModel::Mag1Voxels, 110);
     table.setColumnWidth(ObjectInventoryModel::Sphericity, 80);
     table.setColumnWidth(ObjectInventoryModel::Distance, 80);
+    table.setColumnWidth(ObjectInventoryModel::Route, 70);
     table.setColumnWidth(ObjectInventoryModel::Position, 150);
 
     layout.addLayout(&controlLayout);
@@ -861,7 +922,7 @@ void ObjectInventoryView::loadSettings() {
     hideVisitedCheck.setChecked(settings.value(INVENTORY_HIDE_VISITED, false).toBool());
     // the header state carries the sort column and direction; keyed afresh whenever a column
     // is added, since a saved state describes the table as it was
-    const auto header = settings.value(INVENTORY_HEADER_V3).toByteArray();
+    const auto header = settings.value(INVENTORY_HEADER_V4).toByteArray();
     if (!header.isEmpty()) {
         table.header()->restoreState(header);
     }
@@ -875,7 +936,7 @@ void ObjectInventoryView::saveSettings() {
     settings.setValue(INVENTORY_MIN_VOXELS, minVoxelsSpin.value());
     settings.setValue(INVENTORY_HIDE_KNOWN, hideKnownCheck.isChecked());
     settings.setValue(INVENTORY_HIDE_VISITED, hideVisitedCheck.isChecked());
-    settings.setValue(INVENTORY_HEADER_V3, table.header()->saveState());
+    settings.setValue(INVENTORY_HEADER_V4, table.header()->saveState());
     settings.endGroup();
 }
 
