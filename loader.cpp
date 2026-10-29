@@ -46,6 +46,7 @@
 #include <QMutexLocker>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QTimer>
 #include <QtConcurrent>
 
 #include <boost/range/combine.hpp>
@@ -617,6 +618,14 @@ void Loader::Worker::broadcastProgress(bool startup) {
     }
     isFinished = count == 0;
     emit progress(startup, count);
+    if (isFinished && !prefetchCentres.empty()) {
+        // after the caller returns: this is also reached at the start of a move, before it queues anything
+        QTimer::singleShot(0, this, [this](){
+            if (isFinished) {
+                startPrefetches();
+            }
+        });
+    }
 }
 
 const QByteArray * Loader::Worker::payloadFind(const std::size_t layerId, const CoordOfCube & cube) {
@@ -636,11 +645,14 @@ const QByteArray * Loader::Worker::payloadFind(const std::size_t layerId, const 
     return &it->second->second;
 }
 
-void Loader::Worker::payloadStore(const std::size_t layerId, const CoordOfCube & cube, QByteArray bytes) {
-    if (payloadFreshness != Dataset::freshness || static_cast<std::size_t>(bytes.size()) > PAYLOAD_BUDGET / 16) {
+std::atomic<std::size_t> Loader::Worker::payloadBudget{std::size_t{1024} * 1024 * 1024};
+
+void Loader::Worker::payloadStore(const std::size_t layerId, const std::size_t mag, const CoordOfCube & cube, QByteArray bytes) {
+    const auto budget = payloadBudget.load();
+    if (payloadFreshness != Dataset::freshness || static_cast<std::size_t>(bytes.size()) > budget / 16) {
         return;// fetched under another freshness generation, or too big to be worth holding
     }
-    const PayloadKey key{layerId, loaderMagnification, cube};
+    const PayloadKey key{layerId, mag, cube};
     const auto existing = payloadIndex.find(key);
     if (existing != std::end(payloadIndex)) {
         payloadBytes -= existing->second->second.size();
@@ -650,11 +662,12 @@ void Loader::Worker::payloadStore(const std::size_t layerId, const CoordOfCube &
     payloadBytes += bytes.size();
     payloadLru.emplace_front(key, std::move(bytes));
     payloadIndex.emplace(key, std::begin(payloadLru));
-    while (payloadBytes > PAYLOAD_BUDGET && !payloadLru.empty()) {
+    while (payloadBytes > budget && !payloadLru.empty()) {
         payloadBytes -= payloadLru.back().second.size();
         payloadIndex.erase(payloadLru.back().first);
         payloadLru.pop_back();
     }
+    payloadMeanBytes = payloadLru.empty() ? 0 : payloadBytes / payloadLru.size();
 }
 
 void Loader::Worker::payloadClear(const std::size_t layerId) {
@@ -669,6 +682,150 @@ void Loader::Worker::payloadClear(const std::size_t layerId) {
     }
 }
 
+auto Loader::Worker::dropPrefetch(decltype(prefetches)::iterator it) -> decltype(prefetches)::iterator {
+    const auto key = it->first;
+    auto * reply = it->second;
+    it = prefetches.erase(it);
+    reply->disconnect(this);
+    if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+        payloadStore(key.layerId, key.mag, key.cube, reply->read(reply->bytesAvailable()));// arrived, not yet handled
+        ++fromPrefetch;
+    } else {
+        reply->abort();
+    }
+    reply->deleteLater();
+    return it;
+}
+
+void Loader::Worker::abortPrefetches(const std::size_t layerId) {
+    for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
+        it = it->first.layerId == layerId ? dropPrefetch(it) : std::next(it);
+    }
+}
+
+void Loader::Worker::abortPrefetches() {
+    for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
+        it = dropPrefetch(it);
+    }
+}
+
+QNetworkReply * Loader::Worker::takePrefetch(const std::size_t layerId, const CoordOfCube & cube) {
+    const auto it = prefetches.find({layerId, loaderMagnification, cube});
+    if (it == std::end(prefetches) || it->second->isFinished()) {
+        return nullptr;// a finished one is about to land in the payload cache by itself
+    }
+    auto * reply = it->second;
+    prefetches.erase(it);
+    reply->disconnect(this);// the move's own handler takes over
+    return reply;
+}
+
+/* Fetches ahead of the user, for walks whose next stop is known — the inventory's list.
+ *
+ * Only the server payloads are fetched and only into the payload cache, which is bounded
+ * by its budget, so prefetching cannot grow memory past what the user set. The blocks are
+ * the same window a move to each centre makes resident (DcoiFromPos), at the magnification
+ * loaded now. Anything resident, held, being loaded or edited is skipped; so are layers
+ * read from disk or through a POST API, whose requests do not fit this path. */
+void Loader::Worker::prefetch(const std::vector<Coordinate> centres) {
+    prefetchCentres = centres;
+    startPrefetches();
+}
+
+/* Only while the loader has nothing of its own to fetch. Qt serves Normal- and Low-priority
+ * requests from one first-come queue over six connections per host, so a prefetch queued
+ * ahead of a move would hold up the blocks the user is looking at; a move therefore cancels
+ * every prefetch it does not take over, and they resume from broadcastProgress() once the
+ * move's downloads are done. What is no longer wanted at all is dropped straight away, so
+ * skipping quickly through the list never leaves stale requests queued. */
+void Loader::Worker::startPrefetches() {
+    if (datasets.empty()) {
+        return;
+    }
+    if (payloadFreshness != Dataset::freshness) {
+        static_cast<void>(payloadFind(0, {}));// drops everything from before a Reload From Server
+    }
+    std::unordered_set<PayloadKey, PayloadKeyHash> wanted;
+    const auto halfFOV = datasets[0].cube2global({1, 1, 1}) * (state->M - 1) / 2;
+    for (const auto & centre : prefetchCentres) {
+        const auto lo = datasets[0].global2cube(centre - halfFOV);
+        const auto hi = datasets[0].global2cube(centre + halfFOV);
+        for (int x = lo.x; x <= hi.x; ++x) {
+            for (int y = lo.y; y <= hi.y; ++y) {
+                for (int z = lo.z; z <= hi.z; ++z) {
+                    for (std::size_t layerId = 0; layerId < datasets.size(); ++layerId) {
+                        wanted.insert({layerId, loaderMagnification, {x, y, z}});
+                    }
+                }
+            }
+        }
+    }
+    // what an earlier prefetch was fetching and is no longer on the way is dropped
+    for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
+        it = wanted.count(it->first) == 0 ? dropPrefetch(it) : std::next(it);
+    }
+    if (!isFinished) {
+        return;// the move under way first; broadcastProgress() comes back here
+    }
+    constexpr std::size_t MAX_IN_FLIGHT = 128;
+    for (const auto & key : wanted) {
+        if (prefetches.size() >= MAX_IN_FLIGHT) {
+            break;
+        }
+        const auto & dataset = datasets[key.layerId];
+        if (dataset.url.scheme() == "file" || dataset.type == Dataset::CubeType::SNAPPY
+                || dataset.api == Dataset::API::WebKnossos || dataset.api == Dataset::API::GoogleBrainmaps
+                || prefetches.count(key) != 0 || payloadIndex.count(key) != 0
+                || (key.layerId < slotDownload.size() && slotDownload[key.layerId].count(key.cube) != 0)) {
+            continue;
+        }
+        if (dataset.api == Dataset::API::NeuroglancerPrecomputed) {
+            bool known = false;
+            static_cast<void>(dataset.precomputedRequest(key.cube, known));
+            if (!known) {
+                continue;// not stored: there is nothing to fetch
+            }
+        }
+        {
+            QMutexLocker locker(&state->protectCube2Pointer);
+            if (cubeQuery(state->cube2Pointer, key.layerId, key.mag, key.cube) != nullptr) {
+                continue;
+            }
+        }
+        {
+            QMutexLocker locker(&snappyCacheMutex);
+            if (key.layerId < snappyCache.size() && key.mag < snappyCache[key.layerId].size() && snappyCache[key.layerId][key.mag].count(key.cube) != 0) {
+                continue;// edited here: the server's copy is not what would be shown
+            }
+        }
+        auto request = dataset.apiSwitch(key.cube);
+        request.setPriority(QNetworkRequest::LowPriority);
+        auto * reply = qnam.get(request);
+        prefetches.emplace(key, reply);
+        QObject::connect(reply, &QNetworkReply::finished, this, [this, key, reply](){
+            prefetches.erase(key);
+            if (reply->error() == QNetworkReply::NoError) {
+                payloadStore(key.layerId, key.mag, key.cube, reply->read(reply->bytesAvailable()));
+                ++fromPrefetch;
+            }
+            reply->deleteLater();
+        });
+    }
+}
+
+void Loader::Controller::prefetch(const std::vector<Coordinate> & centres) {
+    if (worker) {
+        auto * w = worker.get();
+        QMetaObject::invokeMethod(w, [w, centres](){ w->prefetch(centres); }, Qt::QueuedConnection);
+    }
+}
+
+std::size_t Loader::Controller::payloadCapacityBlocks() const {
+    constexpr std::size_t TYPICAL = 150 * 1024;// until something has been held to measure
+    const auto mean = worker ? worker->payloadMeanBytes.load() : 0;
+    return Loader::Worker::payloadBudget.load() / std::max<std::size_t>(1024, mean != 0 ? mean : TYPICAL);
+}
+
 void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Coordinate center, const UserMoveType userMoveType, const floatCoordinate & direction, Dataset::list_t changedDatasets, const size_t cacheSize, const Loader::CubeFilter only) {
     cleanup(center);
     // a layer that now points somewhere else must not be served the old one's payloads;
@@ -677,6 +834,7 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
         if (layerId >= changedDatasets.size() || datasets[layerId].url.adjusted(QUrl::RemoveQuery) != changedDatasets[layerId].url.adjusted(QUrl::RemoveQuery)
                 || datasets[layerId].type != changedDatasets[layerId].type || datasets[layerId].cubeShape != changedDatasets[layerId].cubeShape) {
             payloadClear(layerId);
+            abortPrefetches(layerId);
         }
     }
     // freeSlots[] are lists of pointers to locations that
@@ -908,6 +1066,8 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                 }
                 if (dataset.api == Dataset::API::WebKnossos || dataset.api == Dataset::API::GoogleBrainmaps) {
                     return *qnam.post(request, payload);
+                } else if (auto * ahead = takePrefetch(layerId, cubeCoord)) {
+                    return *ahead;// already on its way: wait for it rather than ask twice
                 } else {
                     return *qnam.get(request);
                 }
@@ -929,7 +1089,7 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
                     auto * buffer = new QBuffer;
                     buffer->setData(bytes);
                     buffer->open(QIODevice::ReadOnly);
-                    payloadStore(layerId, cubeCoord, std::move(bytes));
+                    payloadStore(layerId, loaderMagnification, cubeCoord, std::move(bytes));
                     ++fromNetwork;
                     downloads.erase(cubeCoord);
                     io.deleteLater();
@@ -1060,4 +1220,6 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
             }
         }
     }
+    // the move has taken over what it wants; the rest would be queued ahead of it (see startPrefetches)
+    abortPrefetches();
 }

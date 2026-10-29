@@ -167,6 +167,8 @@ class DatasetLoadWidget : public DialogVisibilityNotify {
     QLabel cubeEdgeLabel{"Cubesize"};
     QSpinBox cubeEdgeSpin;
     QCheckBox segmentationOverlayCheckbox{"load segmentation overlay"};
+    QSpinBox payloadSpin;// MiB of downloaded blocks kept in memory (Loader::Worker::payloadBudget)
+    QLabel payloadLabel{tr("MiB of recently downloaded blocks kept in memory")};
     QLabel reloadRequiredLabel{tr("Reload dataset for changes to take effect.")};
     QHBoxLayout buttonHLayout;
     QPushButton processButton{"Load Dataset"};

@@ -87,6 +87,7 @@ const QString DATASET_MRU = "dataset_mru";
 const QString DATASET_OVERLAY = "overlay";
 const QString ANNOTATION_LAST_URL = "annotation_last_url";// the last URL given to File ▸ Open Annotation From URL
 const QString DATASET_SUPERCUBE_EDGE = "supercube_edge";
+const QString DATASET_PAYLOAD_MIB = "payload_cache_mib";
 
 // Zoom and Multires
 const QString LOCK_DATASET_TO_CURRENT_MAG = "lock_dataset_to_currentmag";

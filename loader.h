@@ -140,13 +140,36 @@ private:
     std::size_t payloadBytes{0};
     std::uint64_t payloadFreshness{0};// Dataset::freshness the cached payloads were fetched under
     const QByteArray * payloadFind(std::size_t layerId, const CoordOfCube & cube);
-    void payloadStore(std::size_t layerId, const CoordOfCube & cube, QByteArray bytes);
+    void payloadStore(std::size_t layerId, std::size_t mag, const CoordOfCube & cube, QByteArray bytes);
     void payloadClear(std::size_t layerId);
+
+    /* Downloads made ahead of need — see prefetch(). Their bytes only ever go into the
+     * payload cache; nothing is decompressed or made resident until a move asks for it. */
+    std::unordered_map<PayloadKey, QNetworkReply *, PayloadKeyHash> prefetches;
+    /* Where the last prefetch() asked to fetch for. Kept, not consumed: a move cancels what
+     * is in flight (see downloadAndLoadCubes), and the rest is asked for again once that
+     * move's own blocks are in. */
+    std::vector<Coordinate> prefetchCentres;
+    void startPrefetches();
+    // cancels one, keeping its bytes if it had already arrived
+    decltype(prefetches)::iterator dropPrefetch(decltype(prefetches)::iterator it);
+    void abortPrefetches(std::size_t layerId);
+    void abortPrefetches();
+    // a prefetch already under way for a block a move now wants, handed over to that move
+    QNetworkReply * takePrefetch(std::size_t layerId, const CoordOfCube & cube);
 public://matsch
-    static constexpr std::size_t PAYLOAD_BUDGET = 256 * 1024 * 1024;
+    /* Bytes of payload kept; set from the dataset dialog (DATASET_PAYLOAD_MIB). Read on the
+     * loader thread, written from the GUI one. */
+    static std::atomic<std::size_t> payloadBudget;
+    // mean payload size of what is held, for estimating how many blocks the budget covers
+    std::atomic<std::size_t> payloadMeanBytes{0};
+    /* Starts downloading the blocks the supercubes around `centres` would need, into the
+     * payload cache only, so that moving there later costs a decompression rather than a
+     * round trip. Supersedes any earlier prefetch that is no longer wanted. */
+    void prefetch(const std::vector<Coordinate> centres);
     /* Where blocks came from, for the shape-interpolation commit's log line: one count per
      * block made resident, by source. Only ever read as a difference across an operation. */
-    std::atomic<std::uint64_t> fromNetwork{0}, fromPayloadCache{0}, fromEdits{0};
+    std::atomic<std::uint64_t> fromNetwork{0}, fromPayloadCache{0}, fromEdits{0}, fromPrefetch{0};
     using CacheQueue = std::unordered_set<CoordOfCube>;
     std::vector<std::vector<CacheQueue>> modifiedCacheQueue;
     using SnappySet = std::unordered_map<CoordOfCube, std::string>;
@@ -195,6 +218,10 @@ public:
     void unloadCurrentMagnification();
 
     void startLoading(const Coordinate & center, const UserMoveType userMoveType, const floatCoordinate &direction, CubeFilter only = {});
+    // see Worker::prefetch; queued onto the loader thread
+    void prefetch(const std::vector<Coordinate> & centres);
+    // how many blocks the payload cache holds at the payloads' current mean size
+    std::size_t payloadCapacityBlocks() const;
     template<typename... Args>
     void snappyCacheSupplySnappy(Args&&... args) {
         emit snappyCacheSupplySnappySignal(std::forward<Args>(args)...);

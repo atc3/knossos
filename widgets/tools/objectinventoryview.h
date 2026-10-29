@@ -108,6 +108,7 @@ private:
     int sortColumn{Ordinal};
     Qt::SortOrder sortOrder{Qt::AscendingOrder};
     Coordinate distanceFrom;// the crosshair when the list was last sorted; see the Distance column
+    QString routeNote;// what the last route sort chose, and what it expects to cost
     std::vector<std::uint32_t> routeStep;// record index -> 1-based stop on the last route; 0 for none
     bool staleUnderOrder{false};
 };
@@ -172,4 +173,7 @@ private:
     void rebuildMagCombo();
     void showContextMenu(const QPoint &);
     int currentRow() const;
+    void prefetchAfter(int row);
+    static constexpr int PREFETCH_AHEAD = 2;
+    bool walkingForward{true};
 };
