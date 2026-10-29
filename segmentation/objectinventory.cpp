@@ -1442,7 +1442,7 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
      * fetching only those blocks (Loader::CubeFilter). Moving to each block in turn, as this
      * used to, made the loader fill the whole M³ supercube around every one: an object
      * lying across a block seam, two blocks per axis, cost hundreds of blocks of which it
-     * needed eight. The crosshair never moves; only the loader does, and LabelOnlyLoading sends it back. */
+     * needed eight. The crosshair never moves; only the loader does, and it is sent back at the end. */
     const int extentA[3]{static_cast<int>(cubeExtent.x), static_cast<int>(cubeExtent.y), static_cast<int>(cubeExtent.z)};
     std::vector<blocktour::Block> needed;
     for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
@@ -1489,10 +1489,11 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
     }
     /* The rest, a supercube at a time, each window slid as close to the view as it can go
      * while still holding its blocks, so that as little of the view as possible is evicted
-     * and fetched again when LabelOnlyLoading sends the loader back. */
+     * and fetched again when the loader is sent back. */
     const auto M = std::max(1, ::state->M);
     const auto here = layer.global2cube(::state->viewerState->currentPosition);
     auto tour = blocktour::plan(elsewhere, M, extentA);
+    bool moved = false;
     for (auto & window : tour) {
         blocktour::Block nearer;
         if (blocktour::centreNearest(window.blocks, {here.x, here.y, here.z}, M, extentA, nearer)) {
@@ -1513,6 +1514,7 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
             }
             const auto centre = layer.cube2global(CoordOfCube{window.centre[0], window.centre[1], window.centre[2]}) + cubeExtent / 2;
             Loader::Controller::singleton().startLoading(centre, USERMOVE_NEUTRAL, {}, std::move(only));
+            moved = true;
             if (!awaitMove()) {
                 cancelled = true;
                 break;
@@ -1529,6 +1531,10 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
         }
     }
     progress.setValue(blocks);
+    if (moved) {
+        // LabelOnlyLoading does this too, but only when it switched an image layer off
+        ::state->viewer->loader_notify();
+    }
 
     if (erased != 0) {
         setFlag(soid, Flag::Erased, true);
