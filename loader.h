@@ -146,7 +146,15 @@ private:
     /* Downloads made ahead of need — see prefetch(). Their bytes only ever go into the
      * payload cache; nothing is decompressed or made resident until a move asks for it. */
     std::unordered_map<PayloadKey, QNetworkReply *, PayloadKeyHash> prefetches;
+    /* Where the last prefetch() asked to fetch for. Kept, not consumed: a move cancels what
+     * is in flight (see downloadAndLoadCubes), and the rest is asked for again once that
+     * move's own blocks are in. */
+    std::vector<Coordinate> prefetchCentres;
+    void startPrefetches();
+    // cancels one, keeping its bytes if it had already arrived
+    decltype(prefetches)::iterator dropPrefetch(decltype(prefetches)::iterator it);
     void abortPrefetches(std::size_t layerId);
+    void abortPrefetches();
     // a prefetch already under way for a block a move now wants, handed over to that move
     QNetworkReply * takePrefetch(std::size_t layerId, const CoordOfCube & cube);
 public://matsch

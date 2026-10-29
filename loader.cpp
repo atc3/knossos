@@ -46,6 +46,7 @@
 #include <QMutexLocker>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QTimer>
 #include <QtConcurrent>
 
 #include <boost/range/combine.hpp>
@@ -617,6 +618,14 @@ void Loader::Worker::broadcastProgress(bool startup) {
     }
     isFinished = count == 0;
     emit progress(startup, count);
+    if (isFinished && !prefetchCentres.empty()) {
+        // after the caller returns: this is also reached at the start of a move, before it queues anything
+        QTimer::singleShot(0, this, [this](){
+            if (isFinished) {
+                startPrefetches();
+            }
+        });
+    }
 }
 
 const QByteArray * Loader::Worker::payloadFind(const std::size_t layerId, const CoordOfCube & cube) {
@@ -673,17 +682,30 @@ void Loader::Worker::payloadClear(const std::size_t layerId) {
     }
 }
 
+auto Loader::Worker::dropPrefetch(decltype(prefetches)::iterator it) -> decltype(prefetches)::iterator {
+    const auto key = it->first;
+    auto * reply = it->second;
+    it = prefetches.erase(it);
+    reply->disconnect(this);
+    if (reply->isFinished() && reply->error() == QNetworkReply::NoError) {
+        payloadStore(key.layerId, key.mag, key.cube, reply->read(reply->bytesAvailable()));// arrived, not yet handled
+        ++fromPrefetch;
+    } else {
+        reply->abort();
+    }
+    reply->deleteLater();
+    return it;
+}
+
 void Loader::Worker::abortPrefetches(const std::size_t layerId) {
     for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
-        if (it->first.layerId == layerId) {
-            auto * reply = it->second;
-            it = prefetches.erase(it);
-            reply->disconnect(this);
-            reply->abort();
-            reply->deleteLater();
-        } else {
-            ++it;
-        }
+        it = it->first.layerId == layerId ? dropPrefetch(it) : std::next(it);
+    }
+}
+
+void Loader::Worker::abortPrefetches() {
+    for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
+        it = dropPrefetch(it);
     }
 }
 
@@ -706,6 +728,17 @@ QNetworkReply * Loader::Worker::takePrefetch(const std::size_t layerId, const Co
  * loaded now. Anything resident, held, being loaded or edited is skipped; so are layers
  * read from disk or through a POST API, whose requests do not fit this path. */
 void Loader::Worker::prefetch(const std::vector<Coordinate> centres) {
+    prefetchCentres = centres;
+    startPrefetches();
+}
+
+/* Only while the loader has nothing of its own to fetch. Qt serves Normal- and Low-priority
+ * requests from one first-come queue over six connections per host, so a prefetch queued
+ * ahead of a move would hold up the blocks the user is looking at; a move therefore cancels
+ * every prefetch it does not take over, and they resume from broadcastProgress() once the
+ * move's downloads are done. What is no longer wanted at all is dropped straight away, so
+ * skipping quickly through the list never leaves stale requests queued. */
+void Loader::Worker::startPrefetches() {
     if (datasets.empty()) {
         return;
     }
@@ -714,7 +747,7 @@ void Loader::Worker::prefetch(const std::vector<Coordinate> centres) {
     }
     std::unordered_set<PayloadKey, PayloadKeyHash> wanted;
     const auto halfFOV = datasets[0].cube2global({1, 1, 1}) * (state->M - 1) / 2;
-    for (const auto & centre : centres) {
+    for (const auto & centre : prefetchCentres) {
         const auto lo = datasets[0].global2cube(centre - halfFOV);
         const auto hi = datasets[0].global2cube(centre + halfFOV);
         for (int x = lo.x; x <= hi.x; ++x) {
@@ -729,15 +762,10 @@ void Loader::Worker::prefetch(const std::vector<Coordinate> centres) {
     }
     // what an earlier prefetch was fetching and is no longer on the way is dropped
     for (auto it = std::begin(prefetches); it != std::end(prefetches);) {
-        if (wanted.count(it->first) == 0) {
-            auto * reply = it->second;
-            it = prefetches.erase(it);
-            reply->disconnect(this);
-            reply->abort();
-            reply->deleteLater();
-        } else {
-            ++it;
-        }
+        it = wanted.count(it->first) == 0 ? dropPrefetch(it) : std::next(it);
+    }
+    if (!isFinished) {
+        return;// the move under way first; broadcastProgress() comes back here
     }
     constexpr std::size_t MAX_IN_FLIGHT = 128;
     for (const auto & key : wanted) {
@@ -1192,4 +1220,6 @@ void Loader::Worker::downloadAndLoadCubes(const unsigned int loadingNr, const Co
             }
         }
     }
+    // the move has taken over what it wants; the rest would be queued ahead of it (see startPrefetches)
+    abortPrefetches();
 }
