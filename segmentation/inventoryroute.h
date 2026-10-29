@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <list>
 #include <unordered_map>
 #include <vector>
 
@@ -288,6 +289,186 @@ inline std::vector<std::uint32_t> plan(const std::vector<Window> & windows, cons
         buckets.erase(chosen);
     }
     return order;
+}
+
+
+/* --- Choosing an order for the cache the loader actually has -----------------------------
+ *
+ * plan() minimises blocks loaded per move, counting only the supercube that is resident.
+ * But the loader also keeps the payloads of blocks it downloaded recently (Loader::Worker's
+ * payload cache), so a block left behind costs no network if it is needed again before the
+ * cache forgets it. Measured that way the greedy route is not the best one: it leaves
+ * stragglers, and comes back for them after their blocks are gone. A sweep along a
+ * space-filling curve never comes back, at the price of more moves that load from memory.
+ * Which wins depends on how much of the dataset the cache holds, so both are worked out
+ * and the cheaper one, for the cache as it is, is used. */
+
+namespace detail {
+// Skilling's transpose algorithm: position along a 3D Hilbert curve of 2^bits per side
+inline std::uint64_t hilbertIndex(std::array<std::uint32_t, 3> x, const int bits) {
+    const std::uint32_t top = 1u << (bits - 1);
+    for (std::uint32_t q = top; q > 1; q >>= 1) {
+        const std::uint32_t p = q - 1;
+        for (int i = 0; i < 3; ++i) {
+            if (x[i] & q) {
+                x[0] ^= p;
+            } else {
+                const auto t = (x[0] ^ x[i]) & p;
+                x[0] ^= t;
+                x[i] ^= t;
+            }
+        }
+    }
+    for (int i = 1; i < 3; ++i) {
+        x[i] ^= x[i - 1];
+    }
+    std::uint32_t t = 0;
+    for (std::uint32_t q = top; q > 1; q >>= 1) {
+        if (x[2] & q) {
+            t ^= q - 1;
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        x[i] ^= t;
+    }
+    std::uint64_t h = 0;
+    for (int b = bits - 1; b >= 0; --b) {
+        for (int i = 0; i < 3; ++i) {
+            h = (h << 1) | ((x[i] >> b) & 1u);
+        }
+    }
+    return h;
+}
+}
+
+/* Windows in Hilbert-curve order of their low corners, then re-ordered greedily (plan())
+ * within consecutive runs of `run`: the curve sets the sweep, the greedy saves loads inside
+ * each stretch of it. Ties keep input order. */
+inline std::vector<std::uint32_t> sweep(const std::vector<Window> & windows, const Window & start, const int M, const std::size_t run = 16) {
+    if (windows.empty()) {
+        return {};
+    }
+    Int3 lo = windows.front().lo, hi = lo;
+    for (const auto & w : windows) {
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::min(lo[a], w.lo[a]);
+            hi[a] = std::max(hi[a], w.lo[a]);
+        }
+    }
+    int bits = 1;
+    while (bits < 21 && ((1 << bits) <= std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]}))) {
+        ++bits;
+    }
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> keyed;
+    keyed.reserve(windows.size());
+    for (std::uint32_t i = 0; i < windows.size(); ++i) {
+        std::array<std::uint32_t, 3> c;
+        for (int a = 0; a < 3; ++a) {
+            c[a] = static_cast<std::uint32_t>(std::min(windows[i].lo[a] - lo[a], (1 << bits) - 1));
+        }
+        keyed.emplace_back(detail::hilbertIndex(c, bits), i);
+    }
+    std::sort(std::begin(keyed), std::end(keyed));
+    // the curve is walked from whichever end is nearer where the viewer is now
+    const auto far = [&](const std::uint32_t i) { return detail::squaredDistance(start.lo, windows[i].lo); };
+    if (far(keyed.back().second) < far(keyed.front().second)) {
+        std::reverse(std::begin(keyed), std::end(keyed));
+    }
+    std::vector<std::uint32_t> order;
+    order.reserve(windows.size());
+    auto current = start;
+    std::vector<Window> sub;
+    for (std::size_t first = 0; first < keyed.size(); first += run) {
+        const auto last = std::min(keyed.size(), first + run);
+        sub.clear();
+        for (auto k = first; k < last; ++k) {
+            sub.push_back(windows[keyed[k].second]);
+        }
+        for (const auto j : plan(sub, current, M)) {
+            order.push_back(keyed[first + j].second);
+        }
+        current = windows[order.back()];
+    }
+    return order;
+}
+
+struct Cost {
+    std::int64_t moves{0};// jumps that changed the supercube
+    std::int64_t loads{0};// blocks made resident: from the network or from memory
+    std::int64_t downloads{0};// of those, the ones the cache no longer held
+};
+
+/* Walks an order through a model of the loader: the supercube of the current window is
+ * resident, and the last `cacheBlocks` blocks used are held in memory, least recently used
+ * forgotten first. */
+inline Cost simulate(const std::vector<Window> & windows, const std::vector<std::uint32_t> & order, Window current, const std::size_t cacheBlocks) {
+    Cost cost;
+    std::list<Int3> recent;// most recent first
+    std::unordered_map<Int3, std::list<Int3>::iterator, detail::KeyHash> where;
+    const auto touch = [&](const Int3 & block) {
+        const auto it = where.find(block);
+        const bool held = it != std::end(where);
+        if (held) {
+            recent.splice(std::begin(recent), recent, it->second);
+        } else {
+            recent.push_front(block);
+            where.emplace(block, std::begin(recent));
+            if (recent.size() > cacheBlocks) {
+                where.erase(recent.back());
+                recent.pop_back();
+            }
+        }
+        return held;
+    };
+    for (int x = current.lo[0]; x <= current.hi[0]; ++x) {
+        for (int y = current.lo[1]; y <= current.hi[1]; ++y) {
+            for (int z = current.lo[2]; z <= current.hi[2]; ++z) {
+                touch({x, y, z});// where the walk starts is already loaded
+            }
+        }
+    }
+    for (const auto i : order) {
+        const auto & next = windows[i];
+        if (next.lo == current.lo && next.hi == current.hi) {
+            continue;
+        }
+        ++cost.moves;
+        for (int x = next.lo[0]; x <= next.hi[0]; ++x) {
+            for (int y = next.lo[1]; y <= next.hi[1]; ++y) {
+                for (int z = next.lo[2]; z <= next.hi[2]; ++z) {
+                    const bool resident = x >= current.lo[0] && x <= current.hi[0] && y >= current.lo[1] && y <= current.hi[1] && z >= current.lo[2] && z <= current.hi[2];
+                    const bool held = touch({x, y, z});
+                    if (!resident) {
+                        ++cost.loads;
+                        cost.downloads += held ? 0 : 1;
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+    return cost;
+}
+
+/* A download is worth this many loads from memory: a round trip to a remote server
+ * against a decompression. Rough, and deliberately so — it only has to rank two orders
+ * whose costs are usually far apart on one count or the other. */
+constexpr std::int64_t DOWNLOAD_WEIGHT = 20;
+inline std::int64_t weighted(const Cost & c) { return c.downloads * DOWNLOAD_WEIGHT + c.loads; }
+
+struct Choice {
+    std::vector<std::uint32_t> order;
+    Cost cost;
+    bool swept{false};// the Hilbert sweep won over the greedy route
+};
+
+// The cheaper of plan() and sweep() for a cache of `cacheBlocks` blocks.
+inline Choice planForCache(const std::vector<Window> & windows, const Window & start, const int M, const std::size_t cacheBlocks) {
+    Choice greedy{plan(windows, start, M), {}, false};
+    greedy.cost = simulate(windows, greedy.order, start, cacheBlocks);
+    Choice swept{sweep(windows, start, M), {}, true};
+    swept.cost = simulate(windows, swept.order, start, cacheBlocks);
+    return weighted(swept.cost) < weighted(greedy.cost) ? swept : greedy;
 }
 
 }

@@ -161,6 +161,74 @@ int main() {
         CHECK(ms < 5000, "too slow: %.0f ms", ms);
     }
 
+    /* The cache-aware choice. A dense inventory over a volume much larger than the cache:
+     * the sweep has to win on downloads. The same inventory with a cache that holds all of
+     * it: every order downloads each block once, so the greedy route, with fewer loads,
+     * has to be chosen. */
+    {
+        const int M = 3;
+        std::uniform_int_distribution<int> a{0, 63}, z{0, 15};
+        std::vector<Window> w;
+        for (int i = 0; i < 20000; ++i) {
+            w.push_back(windowAt({a(rng) - 1, a(rng) - 1, z(rng) - 1}, M));
+        }
+        const auto start = w.front();
+        const auto swept = sweep(w, start, M);
+        std::set<std::uint32_t> seen(std::begin(swept), std::end(swept));
+        CHECK(swept.size() == w.size() && seen.size() == w.size(), "sweep is not a permutation");
+        const auto greedyOrder = plan(w, start, M);
+        for (const std::size_t cache : {1000ul, 1000000ul}) {
+            const auto g = simulate(w, greedyOrder, start, cache);
+            const auto s2 = simulate(w, swept, start, cache);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto choice = planForCache(w, start, M, cache);
+            const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::printf("cache %zu blocks: greedy %lld loads / %lld downloads, sweep %lld / %lld -> %s (%.0f ms)\n", cache,
+                        static_cast<long long>(g.loads), static_cast<long long>(g.downloads),
+                        static_cast<long long>(s2.loads), static_cast<long long>(s2.downloads),
+                        choice.swept ? "sweep" : "greedy", ms);
+            CHECK(choice.swept == (cache == 1000), "wrong choice for a %zu-block cache", cache);
+            CHECK(s2.downloads <= g.downloads, "the sweep should never download more here");
+        }
+        // with everything cached, downloads are exactly the distinct blocks, whatever the order
+        const auto all = simulate(w, swept, start, 1000000);
+        const auto all2 = simulate(w, greedyOrder, start, 1000000);
+        CHECK(all.downloads == all2.downloads, "unbounded cache: %lld vs %lld", static_cast<long long>(all.downloads), static_cast<long long>(all2.downloads));
+    }
+
+    // the curve itself: consecutive indices are adjacent cells, and every cell has one index
+    {
+        const int bits = 3;
+        std::vector<std::pair<std::uint64_t, Int3>> cells;
+        for (int x = 0; x < 8; ++x) for (int y = 0; y < 8; ++y) for (int z = 0; z < 8; ++z) {
+            cells.push_back({detail::hilbertIndex({std::uint32_t(x), std::uint32_t(y), std::uint32_t(z)}, bits), {x, y, z}});
+        }
+        std::sort(std::begin(cells), std::end(cells));
+        for (std::size_t k = 0; k < cells.size(); ++k) {
+            CHECK(cells[k].first == k, "index %zu missing", k);
+            if (k > 0) {
+                const auto d = detail::squaredDistance(cells[k].second, cells[k - 1].second);
+                CHECK(d == 1, "step %zu is not to a neighbour", k);
+            }
+        }
+    }
+
+    // and fast enough at the inventory's largest
+    {
+        const int M = 3;
+        std::uniform_int_distribution<int> coord{0, 200};
+        std::vector<Window> w;
+        for (int i = 0; i < 300000; ++i) {
+            w.push_back(windowAt({coord(rng), coord(rng), coord(rng) / 8}, M));
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto choice = planForCache(w, w.front(), M, 2000);
+        const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("planForCache, 300000 objects: %.0f ms (%s)\n", ms, choice.swept ? "sweep" : "greedy");
+        CHECK(choice.order.size() == w.size(), "size");
+        CHECK(ms < 8000, "too slow: %.0f ms", ms);
+    }
+
     std::printf(failures ? "%d failure(s)\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

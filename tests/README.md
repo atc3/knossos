@@ -324,6 +324,13 @@ the saving on a list shaped like a real inventory — scanned at 8×, so consecu
 entries spread over a whole scan chunk, and walked at 1× — and that 300 000 objects order
 in well under five seconds, dense or sparse.
 
+It also covers the cache-aware choice the Route column actually uses (`planForCache`):
+that the Hilbert curve visits every cell of a grid once, stepping only to neighbours; that
+`sweep` returns a permutation; that with a cache too small for the inventory the sweep is
+chosen and downloads fewer blocks than the greedy route, while with a cache that holds
+everything both download exactly the distinct blocks and the greedy route, with fewer
+loads, is chosen; and that choosing for 300 000 objects stays within a few seconds.
+
 ```bash
 c++ -std=c++17 -O2 -I .. -o /tmp/ir_test inventoryroute_test.cpp && /tmp/ir_test
 ```

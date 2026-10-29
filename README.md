@@ -38,6 +38,7 @@ A new **Segmentation Shape Interpolation** mode, natively and on the scale of wh
 An **Inventory** tab in the annotation window lists every object in the segmentation layer with a position, so existing annotations can be found rather than hunted for.
 - Built by a slow background scan at a coarse magnification, on its own thread, yielding to normal block loading. Progress and an ETA show in the tab and the status bar. Scans are cached on disk and resume where they stopped.
 - **. / ,** jump to the next / previous object from any mode. The list is in scan order and only ever grows, so repeated presses walk it once. Filter by size, hide objects already annotated or visited.
+- **Route** column: sort by it to walk the list loading as few blocks as possible — nearest-first, or a sweep along a Hilbert curve when the dataset is bigger than the memory cache, whichever is cheaper. While you look at one object the next two are downloaded in the background.
 - Tracks per object whether it has been visited, painted, erased or has a skeleton; this state is saved in the `.k.zip`.
 - **Erase** an object entirely: the Erase button, **Ctrl/Cmd+Backspace** from anywhere, or **Delete / Backspace** while the list has focus. Confirmed first, one undo step.
 - Works for KNOSSOS cube datasets and for Neuroglancer precomputed volumes.
@@ -51,6 +52,7 @@ An **Inventory** tab in the annotation window lists every object in the segmenta
 - **Neuroglancer precomputed segmentations** (`ServerFormat = 'precomputed'` in a `.k.toml`): sharded and unsharded, `compressed_segmentation` and raw, uint64. Volumes the reader cannot handle yet (other data types, gzip shards, a non-zero `voxel_offset`) are refused with the reason rather than shown wrong.
 - **Google Cloud Storage** datasets load (they were mistaken for Brainmaps volumes, and sent auth requests GCS does not answer).
 - **File ▸ Open Annotation From URL** downloads a `.k.zip` or `.nml` (https:// or gs://) into `annotationFiles/downloaded/` and opens it; dragging such a link onto the window does the same.
+- Downloaded blocks are kept in memory after you move away (1 GiB by default; set in the dataset dialog), so going back does not download them again.
 - **File ▸ Reload Dataset From Server** re-fetches blocks when files changed on the server, bypassing Google's edge cache for an hour. Blocks you painted keep your edits.
 - A `.k.toml` layer can declare `MaxId`, so new objects get ids above those already in the data.
 - An unreadable `ServerFormat` is reported instead of the layer silently loading empty.

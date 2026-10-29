@@ -259,6 +259,20 @@ DatasetLoadWidget::DatasetLoadWidget(QWidget *parent) : DialogVisibilityNotify(D
     fovSpin.setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     datasetSettingsLayout.addRow(&fovSpin, &superCubeSizeLabel);
+    /* Downloaded blocks are kept, compressed, after they leave the area around the cursor,
+     * so going back — or walking a list whose next stop was fetched ahead — costs no
+     * network. Bounded by this; it is not the decompressed data, which the FOV governs. */
+    payloadSpin.setRange(0, 64 * 1024);
+    payloadSpin.setSingleStep(256);
+    payloadSpin.setAlignment(Qt::AlignLeft);
+    payloadSpin.setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    const auto payloadHint = tr("<b>Memory for blocks already downloaded.</b><br/>"
+                                "Blocks are kept, as the server sent them, after you move away, so coming back or "
+                                "stepping to the next object in the Inventory does not download them again. More "
+                                "memory means fewer downloads on large datasets. 0 turns this off.");
+    payloadSpin.setToolTip(payloadHint);
+    payloadLabel.setToolTip(payloadHint);
+    datasetSettingsLayout.addRow(&payloadSpin, &payloadLabel);
     datasetSettingsLayout.addRow(&segmentationOverlayCheckbox);
     datasetSettingsLayout.addRow(&reloadRequiredLabel);
     datasetSettingsGroup.setLayout(&datasetSettingsLayout);
@@ -310,6 +324,9 @@ DatasetLoadWidget::DatasetLoadWidget(QWidget *parent) : DialogVisibilityNotify(D
     });
     QObject::connect(&fovSpin, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged), [this](){ adaptMemoryConsumption(); });
     QObject::connect(&segmentationOverlayCheckbox, &QCheckBox::stateChanged, [this](){ adaptMemoryConsumption(); });
+    QObject::connect(&payloadSpin, static_cast<void(QSpinBox::*)(int)>(&QSpinBox::valueChanged), [](const int mib){
+        Loader::Worker::payloadBudget = static_cast<std::size_t>(mib) * 1024 * 1024;
+    });
     QObject::connect(&processButton, &QPushButton::clicked, this, &DatasetLoadWidget::processButtonClicked);
     static auto resetSettings = [this]() {
         fovSpin.setValue(Dataset::current().cubeShape.x * (state->M - 1));
@@ -764,6 +781,7 @@ void DatasetLoadWidget::saveSettings() {
 
     settings.setValue(DATASET_CUBE_EDGE, Dataset::current().cubeShape.x);
     settings.setValue(DATASET_SUPERCUBE_EDGE, state->M);
+    settings.setValue(DATASET_PAYLOAD_MIB, payloadSpin.value());
     settings.setValue(DATASET_OVERLAY, Segmentation::singleton().enabled);
 
     settings.endGroup();
@@ -815,6 +833,8 @@ void DatasetLoadWidget::loadSettings() {
     }// QSignalBlocker
     const auto & cubeEdgeLen = settings.value(DATASET_CUBE_EDGE, 128).toInt();
     state->M = settings.value(DATASET_SUPERCUBE_EDGE, 3).toInt();
+    payloadSpin.setValue(settings.value(DATASET_PAYLOAD_MIB, 1024).toInt());
+    Loader::Worker::payloadBudget = static_cast<std::size_t>(payloadSpin.value()) * 1024 * 1024;
     segmentationOverlayCheckbox.setChecked(settings.value(DATASET_OVERLAY, false).toBool());
     state->viewer->resizeTexEdgeLength(cubeEdgeLen, state->M, Dataset::datasets.size());
 

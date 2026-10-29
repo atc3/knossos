@@ -23,6 +23,7 @@
 #include "widgets/tools/objectinventoryview.h"
 
 #include "dataset.h"
+#include "loader.h"
 #include "segmentation/inventoryroute.h"
 #include "segmentation/segmentation.h"
 #include "skeleton/skeletonizer.h"
@@ -334,7 +335,19 @@ void ObjectInventoryModel::sortByRoute() {
     for (const auto i : rows) {
         windows.push_back(windowAround(positionOf(records[i])));
     }
-    const auto order = invroute::plan(windows, windowAround(state->viewerState->currentPosition), state->M);
+    /* Greedy route or Hilbert sweep, whichever costs less for the payload cache as it is:
+     * its budget over the size payloads have been running at, shared by every layer, since
+     * each block position is fetched once per layer. */
+    const auto cacheBlocks = std::max<std::size_t>(1, Loader::Controller::singleton().payloadCapacityBlocks() / std::max<std::size_t>(1, Dataset::datasets.size()));
+    const auto choice = invroute::planForCache(windows, windowAround(state->viewerState->currentPosition), state->M, cacheBlocks);
+    const auto & order = choice.order;
+    routeNote = tr("Route: %1, about %2 block downloads and %3 loads from memory over %n stop(s) (cache ≈ %4 blocks).", "", static_cast<int>(choice.cost.moves))
+            .arg(choice.swept ? tr("a sweep along a space-filling curve, since the cache cannot hold all of it")
+                              : tr("nearest-first, since the cache holds what it passes"))
+            .arg(QLocale{}.toString(static_cast<qlonglong>(choice.cost.downloads)))
+            .arg(QLocale{}.toString(static_cast<qlonglong>(choice.cost.loads - choice.cost.downloads)))
+            .arg(QLocale{}.toString(static_cast<qulonglong>(cacheBlocks)));
+    qDebug().noquote() << routeNote;
     std::vector<std::uint32_t> routed;
     routed.reserve(rows.size());
     for (const auto k : order) {
@@ -625,7 +638,12 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     QObject::connect(&minVoxelsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { applyFilterFromControls(); });
     QObject::connect(&hideKnownCheck, &QCheckBox::toggled, this, [this]() { applyFilterFromControls(); });
     QObject::connect(&hideVisitedCheck, &QCheckBox::toggled, this, [this]() { applyFilterFromControls(); });
-    QObject::connect(table.header(), &QHeaderView::sortIndicatorChanged, this, [this]() { refreshStatus(); });
+    QObject::connect(table.header(), &QHeaderView::sortIndicatorChanged, this, [this](const int column) {
+        refreshStatus();
+        if (column == ObjectInventoryModel::Route && !model.routeNote.isEmpty()) {
+            emit message(model.routeNote);
+        }
+    });
 
     QObject::connect(&inv, &objinv::Inventory::recordsAppended, this, [this](const quint64 first, const quint64 count) {
         model.onAppended(first, count);
@@ -870,10 +888,31 @@ void ObjectInventoryView::jumpToNextEntry(const bool forward) {
     jumpToRow(to);
 }
 
+/* Starts downloading the blocks of the next stops while the user looks at this one, so
+ * the next . or , lands on data that is already in memory. Two ahead, in the direction the
+ * list is being walked: one is what the next keypress needs, the second covers a quick
+ * double press. Bounded by the payload cache's budget like everything else it holds. */
+void ObjectInventoryView::prefetchAfter(const int row) {
+    std::vector<Coordinate> ahead;
+    for (int k = 1; k <= PREFETCH_AHEAD; ++k) {
+        const auto * next = model.recordAt(walkingForward ? row + k : row - k);
+        if (next == nullptr) {
+            break;
+        }
+        ahead.push_back(Coordinate(next->rep[0], next->rep[1], next->rep[2]));
+    }
+    Loader::Controller::singleton().prefetch(ahead);
+}
+
 void ObjectInventoryView::jumpToRow(const int row) {
     const auto * found = model.recordAt(row);
     if (found == nullptr) {
         return;
+    }
+    // the way the list is being walked, for fetching ahead (see prefetchAfter)
+    const auto previous = currentRow();
+    if (previous >= 0 && previous != row) {
+        walkingForward = row > previous;
     }
     /* Taken by value. The sweep appends to that vector from the event loop, and what
      * follows moves the crosshair and loads blocks — holding a pointer into a container
@@ -906,6 +945,7 @@ void ObjectInventoryView::jumpToRow(const int row) {
     /* Marked, but the row is not re-filtered away underneath the cursor even when "hide
      * visited" is on — it disappears at the next rebuild instead. Having the row you are
      * looking at vanish as you arrive at it would be disorienting. */
+    prefetchAfter(row);
     model.markVisited(model.recordIndexAt(row), true);
     table.setCurrentIndex(model.index(row, ObjectInventoryModel::Id));
     table.scrollTo(model.index(row, 0), QAbstractItemView::PositionAtCenter);
