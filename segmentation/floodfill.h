@@ -60,6 +60,11 @@ struct FloodFillReport {
     std::size_t boundaryStops{0};
     std::size_t loadRounds{0};
     bool hitCap{false};
+    bool stoppedEarly{false};// paused, and the user kept what it had filled
+    /* Paused, and the user asked for it undone. The fill is still in the undo stack when
+     * this comes back — it is one step, closed when runFloodFill() returns — so the caller
+     * reverts it with UndoStack::undoDiscarding() once outside. */
+    bool revert{false};
     Coordinate filledMin, filledMax;
     QString message;
 };

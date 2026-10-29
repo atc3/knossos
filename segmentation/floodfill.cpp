@@ -35,6 +35,8 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QLocale>
+#include <QMessageBox>
 #include <QObject>
 #include <QProgressDialog>
 
@@ -43,6 +45,35 @@ namespace {
 // more block resident, so this bounds both the wall time and how far the view wanders.
 constexpr int MAX_LOAD_ROUNDS = 64;
 constexpr int LOAD_TIMEOUT_MS = 20000;
+/* How long a fill runs before it stops to ask. A fill that is going to finish usually does
+ * well inside this; one that is still going after it has almost always been seeded in the
+ * background or leaked through a gap. Once told to go on, it asks again less often. */
+constexpr int FILL_PAUSE_MS = 2000;
+constexpr int FILL_REPAUSE_MS = 10000;
+
+enum class LongFill { KeepFilling, KeepPartial, Undo };
+
+LongFill askAboutLongFill(QWidget * parent, const bool threeDimensional, const bool erasing, const bool seedInBackground,
+                          const std::size_t voxels, const Coordinate & min, const Coordinate & max, const qint64 ms) {
+    const auto what = erasing ? (threeDimensional ? QObject::tr("3D erase") : QObject::tr("2D erase"))
+                              : (threeDimensional ? QObject::tr("3D fill") : QObject::tr("2D fill"));
+    auto text = QObject::tr("This %1 has run for %2 s and is still growing: %3 voxels so far, across %4 × %5 × %6 voxels.")
+            .arg(what).arg(ms / 1000.0, 0, 'f', 1).arg(QLocale().toString(static_cast<qulonglong>(voxels)))
+            .arg(max.x - min.x + 1).arg(max.y - min.y + 1).arg(max.z - min.z + 1);
+    if (seedInBackground) {
+        text += "\n\n" + QObject::tr("It was started in unlabelled background, which is usually a mis-click.");
+    }
+    QMessageBox ask{QMessageBox::Warning, QObject::tr("Large %1").arg(what), text, QMessageBox::NoButton, parent};
+    ask.setInformativeText(QObject::tr("Undo puts everything back as it was before the fill. "
+                                       "Keep what's filled stops here and keeps it as one undo step."));
+    auto * undo = ask.addButton(QObject::tr("Undo fill"), QMessageBox::RejectRole);
+    auto * keep = ask.addButton(QObject::tr("Keep what's filled"), QMessageBox::DestructiveRole);
+    ask.addButton(QObject::tr("Keep filling"), QMessageBox::AcceptRole);
+    ask.setDefaultButton(undo);
+    ask.setEscapeButton(undo);
+    ask.exec();
+    return ask.clickedButton() == undo ? LongFill::Undo : ask.clickedButton() == keep ? LongFill::KeepPartial : LongFill::KeepFilling;
+}
 
 bool awaitLoader(QProgressDialog & progress) {
     QElapsedTimer timer;
@@ -108,6 +139,9 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
     FloodFillOptions options;
     options.threeDimensional = request.threeDimensional;
     options.view = request.view;
+    options.pauseAfterMs = FILL_PAUSE_MS;
+    QElapsedTimer running;
+    running.start();
 
     const auto targetSoid = readVoxel(request.seed);
     auto result = floodFill(request.seed, request.fillsoid, options, areaMin, areaMax);
@@ -122,7 +156,8 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
         return report;
     }
 
-    const auto accumulate = [&report](const FloodFillResult & r){
+    CubeCoordSet written;// over every round, so a cube written twice counts once
+    const auto accumulate = [&report, &written](const FloodFillResult & r){
         if (r.voxelsFilled != 0) {
             if (!report.didSomething) {
                 report.filledMin = r.filledMin;
@@ -134,15 +169,43 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
             report.didSomething = true;
         }
         report.voxelsFilled += r.voxelsFilled;
-        report.cubesWritten += r.cubes.size();
+        written.insert(std::begin(r.cubes), std::end(r.cubes));
+        report.cubesWritten = written.size();
         report.hitCap = report.hitCap || r.hitCap;
     };
     accumulate(result);
 
+    const auto background = Segmentation::singleton().getBackgroundId();
+    while (result.paused) {
+        const auto choice = askAboutLongFill(parent, request.threeDimensional, erasing, targetSoid == background && !erasing,
+                                             report.voxelsFilled, report.filledMin, report.filledMax, running.elapsed());
+        if (choice == LongFill::Undo) {
+            report.revert = true;
+            report.ok = true;
+            report.message = QObject::tr("Fill: undone after %1 voxels.").arg(report.voxelsFilled);
+            return report;
+        }
+        if (choice == LongFill::KeepPartial) {
+            report.stoppedEarly = true;
+            break;
+        }
+        options.pauseAfterMs = FILL_REPAUSE_MS;
+        // the safety cap is on the whole fill, not on each stretch of it
+        options.maxVoxels = FloodFillOptions{}.maxVoxels - std::min(FloodFillOptions{}.maxVoxels, report.voxelsFilled);
+        // what stopped at the loaded blocks so far still counts, and a 2D fill may chase it
+        auto deferred = std::move(result.deferred);
+        auto pendingCubes = std::move(result.pendingCubes);
+        result = floodFillContinue(std::move(result.pendingWork), targetSoid, request.fillsoid, options, areaMin, areaMax);
+        accumulate(result);
+        result.deferred.insert(std::begin(deferred), std::end(deferred));
+        result.pendingCubes.insert(std::begin(pendingCubes), std::end(pendingCubes));
+    }
+    options.pauseAfterMs = 0;// the load rounds below have their own Stop button
+
     // Optionally follow the fill into blocks that were not resident. Each round marks the
     // cubes it wrote before the view moves — eviction only preserves a cube's edits if it
     // is already queued as modified (loader.cpp), so the order matters.
-    const bool mayLoad = request.mayLoadCubes && !request.threeDimensional;
+    const bool mayLoad = request.mayLoadCubes && !request.threeDimensional && !report.stoppedEarly;
     if (mayLoad && !result.deferred.empty()) {
         const auto startPosition = state->viewerState->currentPosition;
         const auto & dataset = Dataset::datasets[Segmentation::singleton().layerId];
@@ -184,6 +247,8 @@ FloodFillReport runFloodFill(const FloodFillRequest & request, QWidget * const p
     if (!report.didSomething) {
         report.message = erasing ? QObject::tr("%1: nothing to erase here.").arg(what)
                                  : QObject::tr("%1: nothing to fill here.").arg(what);
+    } else if (report.stoppedEarly) {
+        report.message = QObject::tr("%1: stopped after %2 voxels in %3 block(s); what was filled is kept.").arg(what).arg(report.voxelsFilled).arg(report.cubesWritten);
     } else if (report.hitCap) {
         report.message = erasing
             ? QObject::tr("%1: stopped at the %2 voxel safety limit after removing %3 voxels — the label reaches further than expected.")

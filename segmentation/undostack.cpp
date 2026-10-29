@@ -405,6 +405,17 @@ void UndoStack::undo(QWidget * const parent) {
     state->viewer->run();
 }
 
+void UndoStack::undoDiscarding(QWidget * const parent) {
+    if (past.empty()) {
+        return;
+    }
+    undo(parent);
+    if (!future.empty()) {
+        future.pop_back();
+        emit changed();
+    }
+}
+
 void UndoStack::redo(QWidget * const parent) {
     if (future.empty()) {
         return;
