@@ -601,6 +601,14 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         return false;// clicking empty space still means "deselect", as everywhere else
     }
 
+    /* A chain nothing has been done on yet is not worth holding on to: clicking a different
+     * object moves it there, as if the first click had been on this one. Once there is work
+     * in the chain, a click elsewhere is only a selection, as below. */
+    const auto previous = si.subobjectId();
+    const bool switching = si.active() && !steal && clicked != previous && !si.hasWork();
+    if (switching) {
+        si.reset();
+    }
     if (!si.active()) {
         if (steal) {
             return false;// nothing to steal into yet
@@ -609,6 +617,9 @@ bool ViewportOrtho::shapeInterpolationAdopt(const QMouseEvent *event, const Coor
         seg.clearObjectSelection();
         seg.selectMergedObjectFromSubObject(clicked, clickPos);
         si.beginAt(static_cast<brush_t::view_t>(viewportType), clicked);
+        if (switching) {
+            state->viewer->mainWindow.warnShapeInterpolation(tr("Now interpolating id %1 instead of %2, which had no work in the chain yet.").arg(clicked).arg(previous));
+        }
     } else if (!steal && clicked != si.subobjectId()) {
         return false;// a plain click on someone else's object is still just a selection
     } else if (!steal && seg.currentPaintSubobjectId().value_or(seg.getBackgroundId()) != clicked) {
@@ -960,7 +971,7 @@ bool ViewportOrtho::handleShapeInterpolationKey(const QKeyEvent *event) {
          * clicked into the chain: one slice interpolates nothing, and re-adopting it is the
          * same one click that put it there. The prompt starts earning its place once
          * something has been painted, filled, baked or deleted. */
-        if (si.sliceCount() != 0 && !(si.sliceCount() == 1 && !si.edited())) {
+        if (si.hasWork()) {
             QMessageBox prompt{QApplication::activeWindow()};
             prompt.setIcon(QMessageBox::Question);
             prompt.setText(tr("End this shape interpolation chain?"));

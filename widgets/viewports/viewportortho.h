@@ -64,6 +64,9 @@ class ViewportOrtho : public ViewportBase {
     std::uint64_t interpolationPreviewGen{0};
     int interpolationPreviewUSize{0}, interpolationPreviewVSize{0};
     std::vector<std::uint8_t> interpolationPreviewRGBA;
+    std::int64_t interpolationPreviewPhase{-1};// marching-ants step the texture was built for
+    struct AntsEdge { std::uint32_t index; std::int64_t along; bool key; };
+    std::vector<AntsEdge> interpolationPreviewEdges;// outline pixels, and where each sits along the crawl
     virtual void renderViewportFrontFace() override;
 
     floatCoordinate arbNodeDragCache = {};

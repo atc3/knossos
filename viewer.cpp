@@ -29,6 +29,7 @@
 #include "segmentation/segmentation.h"
 #include "skeleton/skeletonizer.h"
 #include "stateInfo.h"
+#include "segmentation/shapeinterpolation.h"
 #include "widgets/mainwindow.h"
 #include "widgets/viewports/viewportbase.h"
 #include "widgets/widgetcontainer.h"
@@ -60,6 +61,13 @@ Viewer::Viewer() : evilHack{[this](){ state->viewer = this; return true; }()} {
     recalcTextureOffsets();
 
     QObject::connect(&timer, &QTimer::timeout, this, &Viewer::run);// timer is started in main
+    antsClock.start();
+    QObject::connect(&antsTimer, &QTimer::timeout, this, [this](){
+        if (antsVisible()) {
+            window->forEachOrthoVPDo([](ViewportOrtho & vp){ vp.update(); });
+        }
+    });
+    antsTimer.start(ANTS_STEP_MS);
 
     QObject::connect(&Segmentation::singleton(), &Segmentation::appendedRow, this, &Viewer::segmentation_changed);
     QObject::connect(&Segmentation::singleton(), &Segmentation::changedRow, this, &Viewer::segmentation_changed);
@@ -1109,6 +1117,12 @@ void Viewer::calculateMissingOrthoGPUCubes(const Dataset & dset, TextureLayer & 
             layer.pendingOrthoCubes.emplace_back(gpuCoord, offset);
         }
     }
+}
+
+bool Viewer::antsVisible() const {
+    const auto & si = ShapeInterpolation::singleton();
+    return Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)
+            || (si.active() && si.previewEnabled());
 }
 
 void Viewer::reslice_notify() {
