@@ -33,6 +33,7 @@
 
 #include <boost/multi_array.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <limits>
@@ -582,8 +583,10 @@ std::pair<CubeCoordSet, CubeCoordSet> regionCubeResidency(const Coordinate & glo
     return {resident, missing};
 }
 
-FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, const std::uint64_t targetSoid, const std::uint64_t fillsoid,
-                              const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
+namespace {
+// `seeds` are claimed first; `resumed` are voxels a paused fill already claimed
+FloodFillResult floodFillRun(const std::unordered_set<Coordinate> & seeds, std::vector<Coordinate> resumed, const std::uint64_t targetSoid, const std::uint64_t fillsoid,
+                             const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
     FloodFillResult result;
     if (targetSoid == fillsoid) {
         result.seedAlreadyFilled = true;
@@ -618,7 +621,8 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
         return getCubeRef<std::uint64_t>(cube, layerId)[inCube.z][inCube.y][inCube.x];
     };
 
-    std::vector<Coordinate> work;
+    std::vector<Coordinate> work = std::move(resumed);
+    const auto resuming = !work.empty();
     const auto claim = [&](const Coordinate & pos){
         auto * cube = cubeAt(pos);
         if (cube == nullptr) {
@@ -653,15 +657,23 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
         }
         claim(seed);
     }
-    if (work.empty() && result.voxelsFilled == 0 && result.blockedAtBoundary == 0) {
+    if (!resuming && work.empty() && result.voxelsFilled == 0 && result.blockedAtBoundary == 0) {
         result.seedNotLoaded = seeds.size() == 1 && cubeAt(*std::begin(seeds)) == nullptr;
         coordCubesMarkChanged(result.cubes);
         return result;
     }
 
+    const auto started = std::chrono::steady_clock::now();
+    std::size_t popped{0};
     while (!work.empty()) {
         if (result.voxelsFilled >= options.maxVoxels) {
             result.hitCap = true;
+            break;
+        }
+        if (options.pauseAfterMs > 0 && (++popped & 0x3FFF) == 0
+                && std::chrono::steady_clock::now() - started > std::chrono::milliseconds(options.pauseAfterMs)) {
+            result.paused = true;
+            result.pendingWork = std::move(work);
             break;
         }
         const auto pos = work.back();
@@ -696,6 +708,17 @@ FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, cons
         Segmentation::singleton().notePainted(fillsoid, {targetSoid});
     }
     return result;
+}
+}
+
+FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, const std::uint64_t targetSoid, const std::uint64_t fillsoid,
+                              const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
+    return floodFillRun(seeds, {}, targetSoid, fillsoid, options, areaMin, areaMax);
+}
+
+FloodFillResult floodFillContinue(std::vector<Coordinate> work, const std::uint64_t targetSoid, const std::uint64_t fillsoid,
+                                  const FloodFillOptions & options, const Coordinate & areaMin, const Coordinate & areaMax) {
+    return floodFillRun({}, std::move(work), targetSoid, fillsoid, options, areaMin, areaMax);
 }
 
 FloodFillResult floodFill(const Coordinate & seed, const std::uint64_t fillsoid,

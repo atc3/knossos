@@ -111,6 +111,11 @@ struct FloodFillOptions {
     bool threeDimensional{false};       // 6-connected 3D, else 2D within `view`'s plane
     brush_t::view_t view{brush_t::view_t::xy};
     std::size_t maxVoxels{20000000};    // safety cap; a runaway 3D fill can be enormous
+    /* Wall-clock budget in ms, 0 for none. Past it the fill stops where it is and hands
+     * back its unfinished work (FloodFillResult::paused, pendingWork), for the caller to
+     * ask whether to go on — a fill seeded in the background by mistake otherwise freezes
+     * the program for seconds and then stops at the cap having filled an arbitrary part. */
+    int pauseAfterMs{0};
 };
 
 struct FloodFillResult {
@@ -123,11 +128,16 @@ struct FloodFillResult {
     Coordinate filledMin, filledMax;    // bounding box of the filled voxels
     CubeCoordSet pendingCubes;          // non-resident cubes the fill wanted to enter
     std::unordered_set<Coordinate> deferred;// frontier voxels in those cubes, to resume from
+    bool paused{false};                 // ran past pauseAfterMs; pendingWork resumes it
+    std::vector<Coordinate> pendingWork;// filled voxels whose neighbours were not yet visited
 };
 
 // Fills from `seeds`, replacing `targetSoid` with `fillsoid`. Marks the written cubes.
 FloodFillResult floodFillFrom(const std::unordered_set<Coordinate> & seeds, std::uint64_t targetSoid, std::uint64_t fillsoid,
                               const FloodFillOptions &, const Coordinate & areaMin, const Coordinate & areaMax);
+// Resumes a paused fill from its pendingWork.
+FloodFillResult floodFillContinue(std::vector<Coordinate> work, std::uint64_t targetSoid, std::uint64_t fillsoid,
+                                  const FloodFillOptions &, const Coordinate & areaMin, const Coordinate & areaMax);
 // Convenience: takes the value to replace from the seed voxel itself.
 FloodFillResult floodFill(const Coordinate & seed, std::uint64_t fillsoid,
                           const FloodFillOptions &, const Coordinate & areaMin, const Coordinate & areaMax);

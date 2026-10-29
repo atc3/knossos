@@ -283,7 +283,12 @@ void segmentation_flood_fill(const Coordinate & coord, ViewportOrtho & vp, const
     request.view = static_cast<brush_t::view_t>(vp.viewportType);
     request.mayLoadCubes = Segmentation::singleton().floodFillMayLoadCubes;
 
-    const auto report = state->viewer->suspend([&]{ return runFloodFill(request, &state->viewer->mainWindow); });
+    auto report = state->viewer->suspend([&]{ return runFloodFill(request, &state->viewer->mainWindow); });
+    if (report.revert) {
+        // closed as one step when runFloodFill() returned, so the newest one is the fill
+        UndoStack::singleton().undoDiscarding(&state->viewer->mainWindow);
+        report.didSomething = false;
+    }
     auto message = report.message;
 
     if (report.didSomething && Annotation::singleton().annotationMode.testFlag(AnnotationMode::Mode_ShapeInterpolation)) {

@@ -92,6 +92,9 @@ public:
     bool droppedForSize() const { return droppedBecauseTooLarge; }
 
     void undo(QWidget * parent);
+    // Undoes the newest step and forgets it, leaving nothing to redo — for an edit
+    // abandoned as it happened, which nobody will want back.
+    void undoDiscarding(QWidget * parent);
     void redo(QWidget * parent);
     // Rewind or replay until `stepsBack` entries remain undone (0 = newest state).
     void moveTo(int stepsBack, QWidget * parent);
