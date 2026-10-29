@@ -23,7 +23,7 @@ A new **Segmentation Shape Interpolation** mode, natively and on the scale of wh
 - Writes only the blocks the shape reaches, and works above magnification 1.
 
 ### Painting and filling
-- **Flood fills** that respect what is loaded: **G** / **Shift+G** fill in 2D / 3D under the mouse pointer. A fill stops at the edge of the loaded blocks instead of silently writing into unloaded ones; 2D fills can optionally load more blocks and continue.
+- **Flood fills** that respect what is loaded: **G** / **Shift+G** fill in 2D / 3D under the mouse pointer. A fill stops at the edge of the loaded blocks instead of silently writing into unloaded ones; 2D fills can optionally load more blocks and continue. A fill still running after 2 s (usually one started in the background by mistake) pauses and asks whether to keep filling, keep what it has filled, or undo it.
 - **Fill enclosed areas (H):** close an outline and its inside joins the object when you release.
 - **Paint the background (0):** select background as the paint id, so the brush and fills erase.
 - **Overwrite control** (toolbar): paint over anything, only unlabelled voxels, or only unlabelled voxels not touching another label, which keeps a one-voxel gap around each object.
