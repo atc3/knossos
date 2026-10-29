@@ -99,6 +99,57 @@ int main() {
         check(blocktour::plan({{0, 0, 0}}, 1, ext).size() == 1, "M = 1");
     }
 
+    std::printf("5. centreNearest holds the blocks, as near the preferred centre as it can\n");
+    // centreNearest: holds the blocks, and is as close to the preferred centre as that allows
+    for (const int M : {2, 3, 4, 5, 7}) {
+        const int extent[3]{128, 128, 64};
+        for (int trial = 0; trial < 500; ++trial) {
+            const blocktour::Block base{trial % 11 - 5, (trial * 7) % 13 - 6, (trial * 3) % 5};
+            std::vector<blocktour::Block> blocks{base};
+            for (int k = 0; k < trial % 4; ++k) {
+                blocks.push_back({base[0] + (trial + k) % M, base[1] + (trial * k) % M, base[2] + k % M});
+            }
+            const blocktour::Block prefer{(trial * 5) % 17 - 8, (trial * 9) % 19 - 9, trial % 7 - 3};
+            blocktour::Block centre;
+            if (!blocktour::centreNearest(blocks, prefer, M, extent, centre)) {
+                ++failures;
+                std::printf("FAIL M=%d trial %d: no centre found\n", M, trial);
+                continue;
+            }
+            blocktour::Block lo, hi;
+            blocktour::windowAround(centre, M, extent, lo, hi);
+            for (const auto & b : blocks) {
+                for (int a = 0; a < 3; ++a) {
+                    if (b[a] < lo[a] || b[a] > hi[a]) {
+                        ++failures;
+                        std::printf("FAIL M=%d trial %d: block outside the window\n", M, trial);
+                    }
+                }
+            }
+            // no other holding centre is closer, by brute force per axis
+            for (int a = 0; a < 3; ++a) {
+                for (int c = -40; c <= 40; ++c) {
+                    blocktour::Block probe = centre, plo, phi;
+                    probe[a] = c;
+                    blocktour::windowAround(probe, M, extent, plo, phi);
+                    bool holds = true;
+                    for (const auto & b : blocks) {
+                        holds = holds && b[a] >= plo[a] && b[a] <= phi[a];
+                    }
+                    if (holds && std::abs(c - prefer[a]) < std::abs(centre[a] - prefer[a])) {
+                        ++failures;
+                        std::printf("FAIL M=%d trial %d axis %d: %d is closer than %d\n", M, trial, a, c, centre[a]);
+                    }
+                }
+            }
+        }
+    }
+    {
+        const int extent[3]{128, 128, 128};
+        blocktour::Block centre;
+        check(!blocktour::centreNearest({{0, 0, 0}, {5, 0, 0}}, {0, 0, 0}, 3, extent, centre), "too wide for one window");
+    }
+
     std::printf("\n%s\n", failures == 0 ? "ALL PASSED" : "THERE WERE FAILURES");
     return failures != 0;
 }

@@ -24,6 +24,7 @@
 
 #include "annotation/annotation.h"
 #include "loader.h"
+#include "segmentation/blocktour.h"
 #include "segmentation/cubeloader.h"
 #include "segmentation/labelonlyloading.h"
 #include "segmentation/precomputed.h"
@@ -1437,46 +1438,103 @@ bool Inventory::eraseObject(const quint64 soid, QWidget * const parent) {
     progress.setMinimumDuration(400);
     const LabelOnlyLoading labelOnly;// the image data is irrelevant here
 
-    const auto startPosition = ::state->viewerState->currentPosition;
+    /* The blocks the box touches, visited a supercube at a time (blocktour.h), each move
+     * fetching only those blocks (Loader::CubeFilter). Moving to each block in turn, as this
+     * used to, made the loader fill the whole M³ supercube around every one: an object
+     * lying across a block seam, two blocks per axis, cost hundreds of blocks of which it
+     * needed eight. The crosshair never moves; only the loader does, and it is sent back at the end. */
+    const int extentA[3]{static_cast<int>(cubeExtent.x), static_cast<int>(cubeExtent.y), static_cast<int>(cubeExtent.z)};
+    std::vector<blocktour::Block> needed;
+    for (int cz = cubeBegin.z; cz < cubeEnd.z; ++cz)
+    for (int cy = cubeBegin.y; cy < cubeEnd.y; ++cy)
+    for (int cx = cubeBegin.x; cx < cubeEnd.x; ++cx) {
+        needed.push_back({cx, cy, cz});
+    }
+    const auto regionOf = [&](const blocktour::Block & b){
+        const auto cubeFirst = layer.cube2global(CoordOfCube{b[0], b[1], b[2]});
+        const auto cubeLast = cubeFirst + cubeExtent - 1;
+        return std::make_pair(Coordinate{std::max(first.x, cubeFirst.x), std::max(first.y, cubeFirst.y), std::max(first.z, cubeFirst.z)},
+                              Coordinate{std::min(last.x, cubeLast.x), std::min(last.y, cubeLast.y), std::min(last.z, cubeLast.z)});
+    };
+    const auto resident = [&](const blocktour::Block & b){
+        const auto region = regionOf(b);
+        return regionCubeResidency(region.first, region.second).second.empty();
+    };
+    const auto awaitMove = [&](){
+        // the loader needs a moment; asked again afterwards rather than assumed
+        QElapsedTimer waited;
+        waited.start();
+        while (!Loader::Controller::singleton().isFinished() && waited.elapsed() < 30000) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+            if (progress.wasCanceled()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     std::size_t erased = 0, missing = 0;
     int visited = 0;
     bool cancelled = false;
-    for (int cz = cubeBegin.z; cz < cubeEnd.z && !cancelled; ++cz)
-    for (int cy = cubeBegin.y; cy < cubeEnd.y && !cancelled; ++cy)
-    for (int cx = cubeBegin.x; cx < cubeEnd.x && !cancelled; ++cx) {
-        progress.setValue(visited++);
+    // what is in memory already — usually all of it, since the list brings you to the object
+    std::vector<blocktour::Block> elsewhere;
+    for (const auto & b : needed) {
+        if (resident(b)) {
+            ++visited;
+            const auto region = regionOf(b);
+            erased += processRegionReplacing(region.first, region.second, soid, background);
+        } else {
+            elsewhere.push_back(b);
+        }
+    }
+    /* The rest, a supercube at a time, each window slid as close to the view as it can go
+     * while still holding its blocks, so that as little of the view as possible is evicted
+     * and fetched again when the loader is sent back. */
+    const auto M = std::max(1, ::state->M);
+    const auto here = layer.global2cube(::state->viewerState->currentPosition);
+    auto tour = blocktour::plan(elsewhere, M, extentA);
+    bool moved = false;
+    for (auto & window : tour) {
+        blocktour::Block nearer;
+        if (blocktour::centreNearest(window.blocks, {here.x, here.y, here.z}, M, extentA, nearer)) {
+            window.centre = nearer;
+        }
+    }
+    for (const auto & window : tour) {
+        progress.setValue(visited);
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
         if (progress.wasCanceled()) {
             cancelled = true;
             break;
         }
-        const CoordOfCube cube{cx, cy, cz};
-        const auto cubeFirst = layer.cube2global(cube);
-        const auto cubeLast = cubeFirst + cubeExtent - 1;
-        const Coordinate regionFirst{std::max(first.x, cubeFirst.x), std::max(first.y, cubeFirst.y), std::max(first.z, cubeFirst.z)};
-        const Coordinate regionLast{std::min(last.x, cubeLast.x), std::min(last.y, cubeLast.y), std::min(last.z, cubeLast.z)};
-
-        if (!regionCubeResidency(regionFirst, regionLast).second.empty()) {
-            ::state->viewer->setPosition(cubeFirst + cubeExtent / 2, USERMOVE_NEUTRAL);
-            // the loader needs a moment; asked again afterwards rather than assumed
-            QElapsedTimer waited;
-            waited.start();
-            while (!Loader::Controller::singleton().isFinished() && waited.elapsed() < 30000) {
-                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
-                if (progress.wasCanceled()) {
-                    cancelled = true;
-                    break;
-                }
+        if (!std::all_of(std::begin(window.blocks), std::end(window.blocks), resident)) {
+            auto only = std::make_shared<std::unordered_set<CoordOfCube>>();
+            for (const auto & b : window.blocks) {
+                only->insert(CoordOfCube{b[0], b[1], b[2]});
             }
-            if (!regionCubeResidency(regionFirst, regionLast).second.empty()) {
+            const auto centre = layer.cube2global(CoordOfCube{window.centre[0], window.centre[1], window.centre[2]}) + cubeExtent / 2;
+            Loader::Controller::singleton().startLoading(centre, USERMOVE_NEUTRAL, {}, std::move(only));
+            moved = true;
+            if (!awaitMove()) {
+                cancelled = true;
+                break;
+            }
+        }
+        for (const auto & b : window.blocks) {
+            ++visited;
+            if (!resident(b)) {
                 ++missing;
                 continue;
             }
+            const auto region = regionOf(b);
+            erased += processRegionReplacing(region.first, region.second, soid, background);
         }
-        erased += processRegionReplacing(regionFirst, regionLast, soid, background);
     }
     progress.setValue(blocks);
-    ::state->viewer->setPosition(startPosition, USERMOVE_NEUTRAL);
+    if (moved) {
+        // LabelOnlyLoading does this too, but only when it switched an image layer off
+        ::state->viewer->loader_notify();
+    }
 
     if (erased != 0) {
         setFlag(soid, Flag::Erased, true);

@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <vector>
 
@@ -144,6 +145,44 @@ inline std::vector<Window> plan(const std::vector<Block> & needed, const int M, 
         }
     }
     return tour;
+}
+
+
+/* Of the centres whose window holds every block in `blocks`, the one nearest `prefer`,
+ * axis by axis: the move that keeps the most of the window around `prefer` resident.
+ * For work near where the user is looking, so that making a few blocks resident does not
+ * evict the view the work is then sent back to. Returns false if no window holds them all. */
+inline bool centreNearest(const std::vector<Block> & blocks, const Block & prefer, const int M, const int extent[3], Block & centre) {
+    if (blocks.empty() || M <= 0) {
+        return false;
+    }
+    for (int a = 0; a < 3; ++a) {
+        int lo = blocks.front()[a], hi = lo;
+        for (const auto & b : blocks) {
+            lo = std::min(lo, b[a]);
+            hi = std::max(hi, b[a]);
+        }
+        bool found = false;
+        int bestDistance = 0;
+        for (int c = hi - M; c <= lo + M; ++c) {
+            Block probe{0, 0, 0}, wlo, whi;
+            probe[a] = c;
+            windowAround(probe, M, extent, wlo, whi);
+            if (wlo[a] > lo || whi[a] < hi) {
+                continue;
+            }
+            const int distance = std::abs(c - prefer[a]);
+            if (!found || distance < bestDistance) {
+                found = true;
+                bestDistance = distance;
+                centre[a] = c;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }
