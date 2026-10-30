@@ -38,7 +38,8 @@ A new **Segmentation Shape Interpolation** mode, natively and on the scale of wh
 An **Inventory** tab in the annotation window lists every object in the segmentation layer with a position, so existing annotations can be found rather than hunted for.
 - Built by a slow background scan at a coarse magnification, on its own thread, yielding to normal block loading. Progress and an ETA show in the tab and the status bar. Scans are cached on disk and resume where they stopped.
 - **. / ,** jump to the next / previous object from any mode. The list is in scan order and only ever grows, so repeated presses walk it once. Filter by size, hide objects already annotated or visited.
-- **Route** column: sort by it to walk the list loading as few blocks as possible — nearest-first, or a sweep along a Hilbert curve when the dataset is bigger than the memory cache, whichever is cheaper. While you look at one object the next two are downloaded in the background.
+- **Route** column: sort by it to walk the list loading as few blocks as possible — nearest-first, or a sweep along a Hilbert curve when the dataset is bigger than the memory cache, whichever is cheaper. While you look at one object the next two are downloaded in the background. **Re-route** plans it again over the objects shown now, from where you are — after narrowing the filter, or with “hide visited” on to pick up where you left off.
+- **ID range** filter: the two boxes after “hide visited” show only ids from A to B, inclusive; leave one empty for no bound on that side.
 - Tracks per object whether it has been visited, painted, erased or has a skeleton; this state is saved in the `.k.zip`.
 - **Erase** an object entirely: the Erase button, **Ctrl/Cmd+Backspace** from anywhere, or **Delete / Backspace** while the list has focus. Confirmed first, one undo step.
 - Works for KNOSSOS cube datasets and for Neuroglancer precomputed volumes.

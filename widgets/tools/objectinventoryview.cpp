@@ -33,6 +33,8 @@
 
 #include <QBrush>
 #include <QHeaderView>
+#include <QRegularExpressionValidator>
+#include <QSignalBlocker>
 #include <QKeySequence>
 #include <QShortcut>
 #include <QMessageBox>
@@ -231,6 +233,12 @@ void ObjectInventoryModel::repaintRows(const int first, const int last) {
         return;
     }
     emit dataChanged(index(first, Ordinal), index(last, StateCol));
+}
+
+void ObjectInventoryModel::reroute() {
+    sortColumn = Route;
+    sortOrder = Qt::AscendingOrder;
+    rebuild();
 }
 
 void ObjectInventoryModel::setFilter(const objinv::Filter & f) {
@@ -528,6 +536,18 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     minVoxelsSpin.setToolTip(tr("Hide anything smaller than this, so the walk is not mostly specks."));
     hideKnownCheck.setToolTip(tr("Hide objects the annotation already has, so the list drains as you work."));
     hideVisitedCheck.setToolTip(tr("Hide objects you have already stepped to."));
+    for (auto * edit : {&minIdEdit, &maxIdEdit}) {
+        // ids are 64-bit, past what a spin box holds; empty means no bound on that side
+        edit->setValidator(new QRegularExpressionValidator(QRegularExpression("\\d{0,20}"), edit));
+        edit->setPlaceholderText(tr("any"));
+        edit->setMaximumWidth(110);
+        edit->setClearButtonEnabled(true);
+    }
+    minIdEdit.setToolTip(tr("Show only ids from this one up, inclusive. Empty for no lower bound."));
+    maxIdEdit.setToolTip(tr("Show only ids up to this one, inclusive. Empty for no upper bound."));
+    rerouteButton.setToolTip(tr("Plan the Route again over the objects shown now, starting from where you are.\n"
+                                "Objects marked visited since the list was last rebuilt drop out first when\n"
+                                "“hide visited” is on, so this picks up where you left off."));
     progressBar.setTextVisible(false);
     progressBar.setMaximumWidth(140);
     progressBar.hide();
@@ -546,7 +566,12 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
     filterLayout.addWidget(&minVoxelsSpin);
     filterLayout.addWidget(&hideKnownCheck);
     filterLayout.addWidget(&hideVisitedCheck);
+    filterLayout.addWidget(&idRangeLabel);
+    filterLayout.addWidget(&minIdEdit);
+    filterLayout.addWidget(&idRangeDash);
+    filterLayout.addWidget(&maxIdEdit);
     filterLayout.addStretch();
+    filterLayout.addWidget(&rerouteButton);
 
     table.setModel(&model);
     table.setAllColumnsShowFocus(true);
@@ -644,6 +669,19 @@ ObjectInventoryView::ObjectInventoryView(QWidget * parent) : QWidget(parent) {
             emit message(model.routeNote);
         }
     });
+    /* editingFinished also fires on merely leaving the box, and the clear button empties it
+     * without finishing an edit at all; both apply only what actually changed, since a
+     * rebuild under the Route order re-plans the whole route. */
+    const auto idRangeEdited = [this]() {
+        if (qMakePair(minIdEdit.text(), maxIdEdit.text()) != appliedIdRange) {
+            applyFilterFromControls();
+        }
+    };
+    QObject::connect(&minIdEdit, &QLineEdit::editingFinished, this, idRangeEdited);
+    QObject::connect(&maxIdEdit, &QLineEdit::editingFinished, this, idRangeEdited);
+    QObject::connect(&minIdEdit, &QLineEdit::textChanged, this, [idRangeEdited](const QString & t) { if (t.isEmpty()) { idRangeEdited(); } });
+    QObject::connect(&maxIdEdit, &QLineEdit::textChanged, this, [idRangeEdited](const QString & t) { if (t.isEmpty()) { idRangeEdited(); } });
+    QObject::connect(&rerouteButton, &QPushButton::clicked, this, &ObjectInventoryView::rerouteShown);
 
     QObject::connect(&inv, &objinv::Inventory::recordsAppended, this, [this](const quint64 first, const quint64 count) {
         model.onAppended(first, count);
@@ -722,6 +760,14 @@ void ObjectInventoryView::applyFilterFromControls() {
     f.minVoxels = static_cast<std::uint64_t>(minVoxelsSpin.value());
     f.hideKnown = hideKnownCheck.isChecked();
     f.hideVisited = hideVisitedCheck.isChecked();
+    bool ok = false;
+    if (const auto lo = minIdEdit.text().toULongLong(&ok); ok) {
+        f.minId = lo;
+    }
+    if (const auto hi = maxIdEdit.text().toULongLong(&ok); ok) {
+        f.maxId = hi;
+    }
+    appliedIdRange = {minIdEdit.text(), maxIdEdit.text()};
     model.setFilter(f);
     if (anchor != objinv::Accumulator::npos) {
         const auto row = model.rowOfRecord(anchor);
@@ -731,6 +777,30 @@ void ObjectInventoryView::applyFilterFromControls() {
         }
     }
     refreshStatus();
+}
+
+void ObjectInventoryView::rerouteShown() {
+    const auto anchor = model.recordIndexAt(currentRow());
+    {
+        // the model sorts below; letting the header ask too would plan the route twice
+        const QSignalBlocker blocker(table.header());
+        table.header()->setSortIndicator(ObjectInventoryModel::Route, Qt::AscendingOrder);
+    }
+    table.header()->viewport()->update();
+    model.reroute();
+    // stay on the object you are on if it is still listed; otherwise . starts the new route
+    const auto row = anchor != objinv::Accumulator::npos ? model.rowOfRecord(anchor) : -1;
+    if (row >= 0) {
+        table.setCurrentIndex(model.index(row, ObjectInventoryModel::Id));
+        table.scrollTo(model.index(row, 0), QAbstractItemView::PositionAtCenter);
+    } else {
+        table.setCurrentIndex({});
+        table.scrollToTop();
+    }
+    refreshStatus();
+    if (!model.routeNote.isEmpty()) {
+        emit message(model.routeNote);
+    }
 }
 
 void ObjectInventoryView::rebuildMagCombo() {

@@ -52,6 +52,8 @@ namespace objinv {
 struct Filter {
     std::uint64_t minVoxels{0};
     std::uint64_t maxVoxels{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t minId{0};// inclusive, both ends
+    std::uint64_t maxId{std::numeric_limits<std::uint64_t>::max()};
     bool hideKnown{false};  // hide ids the annotation already has an object for
     bool hideVisited{false};// hide ids already stepped through this session
 };
@@ -62,6 +64,9 @@ struct Filter {
 template<typename Record, typename Known, typename Visited>
 bool accepts(const Record & r, const std::size_t i, const Filter & f, Known known, Visited visited) {
     if (r.voxels < f.minVoxels || r.voxels > f.maxVoxels) {
+        return false;
+    }
+    if (r.id < f.minId || r.id > f.maxId) {
         return false;
     }
     if (f.hideKnown && known(i)) {
