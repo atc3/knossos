@@ -16,11 +16,11 @@ void check(const bool ok, const std::string & what) {
     failures += ok ? 0 : 1;
 }
 
-struct Rec { std::uint64_t voxels{0}; };
+struct Rec { std::uint64_t voxels{0}; std::uint64_t id{0}; };
 
 std::vector<Rec> records(const std::vector<std::uint64_t> & sizes) {
     std::vector<Rec> out;
-    for (const auto s : sizes) { out.push_back(Rec{s}); }
+    for (const auto s : sizes) { out.push_back(Rec{s, 100 + out.size()}); }// ids 100, 101, …
     return out;
 }
 
@@ -61,6 +61,27 @@ int main() {
         Filter zero;
         check(objinv::buildRows(recs, zero, nothing, nothing).size() == recs.size(),
               "a minimum of zero excludes nothing, not even single voxels");
+    }
+
+    section("an id range");
+    {
+        const auto recs = records({500, 3, 1200, 7, 90, 40000, 1});// ids 100…106
+        Filter range;
+        range.minId = 101;
+        range.maxId = 104;
+        check((objinv::buildRows(recs, range, nothing, nothing) == std::vector<std::uint32_t>{1, 2, 3, 4}),
+              "both ends are inclusive");
+        range.minVoxels = 50;
+        check((objinv::buildRows(recs, range, nothing, nothing) == std::vector<std::uint32_t>{2, 4}),
+              "and combines with the size filter");
+        Filter above;
+        above.minId = 105;
+        check((objinv::buildRows(recs, above, nothing, nothing) == std::vector<std::uint32_t>{5, 6}),
+              "a lower bound alone leaves the top open");
+        Filter empty;
+        empty.minId = 104;
+        empty.maxId = 101;
+        check(objinv::buildRows(recs, empty, nothing, nothing).empty(), "a reversed range shows nothing");
     }
 
     section("hiding what is already dealt with");

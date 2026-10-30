@@ -44,6 +44,7 @@
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QProgressBar>
 #include <QPushButton>
@@ -89,6 +90,9 @@ public:
     bool orderIsStale() const { return staleUnderOrder; }
 
     void rebuild();
+    /* Re-plans the route over the rows the filter shows now, from where the view is now,
+     * re-filtering first so objects marked visited since the last rebuild drop out. */
+    void reroute();
     // repaint a row range, for values that go stale without the row set changing
     void repaintRows(int first, int last);
     void onAppended(std::size_t first, std::size_t count);
@@ -130,6 +134,11 @@ class ObjectInventoryView : public QWidget {
     QSpinBox minVoxelsSpin;
     QCheckBox hideKnownCheck{tr("hide annotated")};
     QCheckBox hideVisitedCheck{tr("hide visited")};
+    QLabel idRangeLabel{tr("ids")};
+    QLineEdit minIdEdit, maxIdEdit;
+    QLabel idRangeDash{tr("–")};
+    QPushButton rerouteButton{tr("Re-route")};
+    QPair<QString, QString> appliedIdRange;// what the id filter was last applied with
 
     QTreeView table;
     bool sawScanning{false};// was the inventory scanning at the last state change
@@ -167,6 +176,7 @@ protected:
 
 private:
     void applyFilterFromControls();
+    void rerouteShown();
     void refreshControls();
     void refreshStatus();
     void refreshVisibleRows();
