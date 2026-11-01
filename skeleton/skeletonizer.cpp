@@ -332,7 +332,9 @@ void Skeletonizer::saveXmlSkeleton(QXmlStreamWriter & xml, const bool onlySelect
     xml.writeAttribute("defaultMergeClass", Segmentation::singleton().getDefaultMergeClass());
     xml.writeAttribute("maxId", QString::number(Segmentation::singleton().getMaxId()));
     xml.writeAttribute("brushRadius", QString::number(Segmentation::singleton().brush.getRadius()));
-    xml.writeAttribute("interpolationAlignCentroids", QString::number(ShapeInterpolation::singleton().centroidAlignment()));
+    // the yes/no is still written for builds that know only centroid alignment
+    xml.writeAttribute("interpolationAlignCentroids", QString::number(ShapeInterpolation::singleton().alignment() != ShapeInterpolation::Alignment::None));
+    xml.writeAttribute("interpolationAlignment", QString::number(static_cast<int>(ShapeInterpolation::singleton().alignment())));
     xml.writeAttribute("fillEnclosedHoles", QString::number(Segmentation::singleton().fillEnclosedHoles));
     xml.writeEndElement();
 
@@ -560,8 +562,16 @@ std::unordered_map<decltype(treeListElement::treeID), std::reference_wrapper<tre
                     if (attributes.hasAttribute("brushRadius")) {
                         Segmentation::singleton().brush.setRadius(attributes.value("brushRadius").toDouble());
                     }
-                    if (attributes.hasAttribute("interpolationAlignCentroids")) {
-                        ShapeInterpolation::singleton().setCentroidAlignment(attributes.value("interpolationAlignCentroids").toInt() != 0);
+                    auto & si = ShapeInterpolation::singleton();
+                    if (attributes.hasAttribute("interpolationAlignment")) {
+                        si.setAlignment(static_cast<ShapeInterpolation::Alignment>(std::clamp(attributes.value("interpolationAlignment").toInt(), 0, 2)));
+                    } else if (attributes.hasAttribute("interpolationAlignCentroids")) {
+                        // from before there were three modes: "off" is kept, "on" leaves whichever alignment is chosen now
+                        if (attributes.value("interpolationAlignCentroids").toInt() == 0) {
+                            si.setAlignment(ShapeInterpolation::Alignment::None);
+                        } else if (si.alignment() == ShapeInterpolation::Alignment::None) {
+                            si.setAlignment(ShapeInterpolation::Alignment::Overlap);
+                        }
                     }
                     if (attributes.hasAttribute("fillEnclosedHoles")) {
                         Segmentation::singleton().setFillEnclosedHoles(attributes.value("fillEnclosedHoles").toInt() != 0);
