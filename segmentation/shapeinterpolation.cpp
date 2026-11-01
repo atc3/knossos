@@ -29,6 +29,7 @@
 #include "segmentation/labelonlyloading.h"
 #include "segmentation/planarwrite.h"
 #include "segmentation/segmentation.h"
+#include "segmentation/slicealign.h"
 #include "segmentation/undostack.h"
 #include "annotation/annotation.h"
 #include "loader.h"
@@ -659,8 +660,15 @@ const ShapeInterpolation::Interpolant * ShapeInterpolation::interpolantFor(const
     const auto su = axisGet(scale, uAxisIdx) * uStep;
     const auto sv = axisGet(scale, vAxisIdx) * vStep;
 
-    distance_transform::signedEdt(onCommonGrid(s1, in.c1u, in.c1v), in.d1, uSize, vSize, su, sv);
-    distance_transform::signedEdt(onCommonGrid(s2, in.c2u, in.c2v), in.d2, uSize, vSize, su, sv);
+    const auto bin1 = onCommonGrid(s1, in.c1u, in.c1v);
+    const auto bin2 = onCommonGrid(s2, in.c2u, in.c2v);
+    distance_transform::signedEdt(bin1, in.d1, uSize, vSize, su, sv);
+    distance_transform::signedEdt(bin2, in.d2, uSize, vSize, su, sv);
+    if (alignMode == Alignment::Overlap) {
+        const auto shift = slicealign::bestTranslation(bin1, bin2, uSize, vSize);
+        in.au = shift.du;
+        in.av = shift.dv;
+    }
 
     in.z1 = z1;
     in.z2 = z2;
@@ -737,20 +745,37 @@ const SISlice * ShapeInterpolation::previewAt(const int depth) {
     return maskAtDepth(depth);
 }
 
-void ShapeInterpolation::setCentroidAlignment(const bool enabled) {
-    if (alignCentroids != enabled) {
-        alignCentroids = enabled;
+void ShapeInterpolation::setAlignment(const Alignment mode) {
+    if (alignMode != mode) {
+        alignMode = mode;
         previewValid = false;
-        emit centroidAlignmentChanged(alignCentroids);
+        interpolants.clear();// the overlap offset is only searched for when it is the mode
+        emit alignmentChanged(alignMode);
         emit changed();
     }
+}
+
+void ShapeInterpolation::offsetOf(const Interpolant & in, float & du, float & dv) const {
+    switch (alignMode) {
+    case Alignment::Overlap:
+        du = static_cast<float>(in.au);
+        dv = static_cast<float>(in.av);
+        return;
+    case Alignment::Centroids:
+        du = in.c2u - in.c1u;
+        dv = in.c2v - in.c1v;
+        return;
+    case Alignment::None:
+        break;
+    }
+    du = dv = 0.f;
 }
 
 void ShapeInterpolation::blendInto(const Interpolant & in, const int depth, std::vector<std::uint8_t> & out) const {
     const auto span = static_cast<float>(in.z2 - in.z1);
     const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
-    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
-    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    float du, dv;
+    offsetOf(in, du, dv);
     distance_transform::blendSigned(in.d1, in.d2, in.uSize, in.vSize, t, du, dv, out);
 }
 
@@ -963,8 +988,8 @@ void ShapeInterpolation::writeMaskAt(const SISlice & mask, const int depth, cons
 void ShapeInterpolation::blendRect(const Interpolant & in, const int depth, int u0, int v0, int u1, int v1, SISlice & out) const {
     const auto span = static_cast<float>(in.z2 - in.z1);
     const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
-    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
-    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    float du, dv;
+    offsetOf(in, du, dv);
     u0 = std::max(0, u0); v0 = std::max(0, v0);
     u1 = std::min(in.uSize, u1); v1 = std::min(in.vSize, v1);
     std::vector<std::uint8_t> mask;
@@ -1230,8 +1255,8 @@ bool ShapeInterpolation::sampleInterpolant(const Interpolant & in, const int dep
     }
     const auto span = static_cast<float>(in.z2 - in.z1);
     const auto t = span != 0.f ? (depth - in.z1) / span : 0.f;
-    const auto du = alignCentroids ? (in.c2u - in.c1u) : 0.f;
-    const auto dv = alignCentroids ? (in.c2v - in.c1v) : 0.f;
+    float du, dv;
+    offsetOf(in, du, dv);
     constexpr float FAR = 1e20f;
     const auto sample = [&](const std::vector<float> & d, const int u, const int v){
         return (u < 0 || v < 0 || u >= in.uSize || v >= in.vSize) ? FAR : d[static_cast<std::size_t>(v) * in.uSize + u];

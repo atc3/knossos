@@ -48,6 +48,7 @@
 #include "widgets/coordinateimportwidget.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QDateTime>
@@ -1130,25 +1131,55 @@ void MainWindow::createMenus() {
     }, Qt::CTRL + Qt::Key_P);
     shapeInterpolationPreviewAction->setCheckable(true);
     shapeInterpolationPreviewAction->setChecked(true);
-    shapeInterpolationAlignAction = actionMenu.addAction(tr("Align Slices on Their Centroids"), [this]() {
-        auto & si = ShapeInterpolation::singleton();
-        si.setCentroidAlignment(shapeInterpolationAlignAction->isChecked());
-        state->viewer->run();
-    });
+    /* How key slices are lined up before blending — see ShapeInterpolation::Alignment. A
+     * submenu whose own action is what the mode switch shows and hides. */
+    auto * alignMenu = actionMenu.addMenu(tr("Align Slices"));
+    shapeInterpolationAlignAction = alignMenu->menuAction();
+    auto * alignGroup = new QActionGroup(alignMenu);
+    const std::array<std::pair<ShapeInterpolation::Alignment, QString>, 3> alignModes{{
+        {ShapeInterpolation::Alignment::Overlap, tr("By Best Overlap")},
+        {ShapeInterpolation::Alignment::Centroids, tr("On Their Centroids")},
+        {ShapeInterpolation::Alignment::None, tr("Don't Align")},
+    }};
+    for (const auto & [mode, name] : alignModes) {
+        auto * action = alignMenu->addAction(name, [mode = mode]() {
+            ShapeInterpolation::singleton().setAlignment(mode);
+            state->viewer->run();
+        });
+        action->setCheckable(true);
+        action->setData(static_cast<int>(mode));
+        alignGroup->addAction(action);
+    }
+    alignMenu->setToolTipsVisible(true);
+    alignGroup->actions()[0]->setToolTip(tr("Shift the second key slice by whatever translation makes the two outlines overlap the most. "
+                                            "Follows the bulk of an irregular shape, where a branch on one side would pull its centroid off."));
+    alignGroup->actions()[1]->setToolTip(tr("Shift the two key slices onto a common centre of mass before interpolating."));
+    alignGroup->actions()[2]->setToolTip(tr("Blend the slices where they are. A structure that drifts sideways between slices pinches, "
+                                            "and disappears entirely once the two outlines no longer overlap."));
     Segmentation::singleton().setFillEnclosedHoles(
         QSettings{}.value(SEGMENTATION_FILL_ENCLOSED, false).toBool());
-    shapeInterpolationAlignAction->setCheckable(true);
-    // last session's choice; an annotation carrying its own value overrides it on load
-    ShapeInterpolation::singleton().setCentroidAlignment(
-        QSettings{}.value(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment()).toBool());
-    shapeInterpolationAlignAction->setChecked(ShapeInterpolation::singleton().centroidAlignment());
-    shapeInterpolationAlignAction->setToolTip(tr("Shift the two key slices onto a common centre before interpolating. "
-                                                 "Without this a structure that drifts sideways between slices pinches, and "
-                                                 "disappears entirely once the two outlines no longer overlap."));
+    const auto showAlignment = [alignGroup](const ShapeInterpolation::Alignment mode) {
+        for (auto * action : alignGroup->actions()) {
+            action->setChecked(action->data().toInt() == static_cast<int>(mode));
+        }
+    };
+    /* Last session's choice; an annotation carrying its own value overrides it on load.
+     * Before there were three modes this was a yes/no for centroids, and a yes there is
+     * taken as wanting alignment at all — which is now best overlap. */
+    {
+        QSettings settings;
+        auto mode = ShapeInterpolation::Alignment::Overlap;
+        if (settings.contains(SEGMENTATION_ALIGNMENT)) {
+            mode = static_cast<ShapeInterpolation::Alignment>(std::clamp(settings.value(SEGMENTATION_ALIGNMENT).toInt(), 0, 2));
+        } else if (settings.contains(SEGMENTATION_ALIGN_CENTROIDS) && !settings.value(SEGMENTATION_ALIGN_CENTROIDS).toBool()) {
+            mode = ShapeInterpolation::Alignment::None;
+        }
+        ShapeInterpolation::singleton().setAlignment(mode);
+    }
+    showAlignment(ShapeInterpolation::singleton().alignment());
     // the setting is stored per annotation, so loading one moves the tick without going
-    // through this action
-    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::centroidAlignmentChanged,
-                     shapeInterpolationAlignAction, &QAction::setChecked);
+    // through these actions
+    QObject::connect(&ShapeInterpolation::singleton(), &ShapeInterpolation::alignmentChanged, alignMenu, showAlignment);
     /* Duplicate one slice's outline onto another.
      *
      * For the case where the run needs one more slice that is very nearly the same as the
@@ -2083,7 +2114,7 @@ void MainWindow::saveSettings() {
     widgetContainer.snapshotWidget.saveSettings();
     ViewportLayouts::singleton().saveSettings();
     settings.setValue(SEGMENTATION_BRUSH_RADIUS, Segmentation::singleton().brush.getRadius());
-    settings.setValue(SEGMENTATION_ALIGN_CENTROIDS, ShapeInterpolation::singleton().centroidAlignment());
+    settings.setValue(SEGMENTATION_ALIGNMENT, static_cast<int>(ShapeInterpolation::singleton().alignment()));
     settings.setValue(SEGMENTATION_FILL_ENCLOSED, Segmentation::singleton().fillEnclosedHoles);
     settings.setValue(VIEWPORT_LAYOUTS + '/' + "active", activeViewportLayout);
     widgetContainer.taskManagementWidget.saveSettings();

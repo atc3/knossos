@@ -37,9 +37,15 @@ ShapeInterpolationWidget::ShapeInterpolationWidget(QWidget * const parent) : Dia
     hintLabel.setFont(hintFont);
 
     sliceList.setToolTip(tr("Key slices in this chain. Double click one to jump to it."));
-    alignCheck.setToolTip(tr("Shift the two key slices onto a common centre before interpolating. "
-                             "Without this a structure that drifts sideways between slices pinches, and "
-                             "disappears entirely once the two outlines no longer overlap."));
+    alignCombo.addItem(tr("by best overlap"), static_cast<int>(ShapeInterpolation::Alignment::Overlap));
+    alignCombo.addItem(tr("on their centroids"), static_cast<int>(ShapeInterpolation::Alignment::Centroids));
+    alignCombo.addItem(tr("don't align"), static_cast<int>(ShapeInterpolation::Alignment::None));
+    alignCombo.setToolTip(tr("How each pair of key slices is lined up before interpolating, by translation only.\n"
+                             "Best overlap: whatever shift makes the two outlines overlap the most — follows the bulk\n"
+                             "of an irregular shape. Centroids: their centres of mass, which a branch on one side pulls\n"
+                             "off the body. Without either, a structure drifting sideways between slices pinches."));
+    alignLayout.addWidget(&alignLabel);
+    alignLayout.addWidget(&alignCombo, 1);
 
     buttonLayout.addWidget(&acceptButton);
     buttonLayout.addWidget(&discardButton);
@@ -48,16 +54,18 @@ ShapeInterpolationWidget::ShapeInterpolationWidget(QWidget * const parent) : Dia
     mainLayout.addWidget(&statusLabel);
     mainLayout.addWidget(&sliceList);
     mainLayout.addWidget(&previewCheck);
-    mainLayout.addWidget(&alignCheck);
+    mainLayout.addLayout(&alignLayout);
     mainLayout.addLayout(&buttonLayout);
     setLayout(&mainLayout);
 
     auto & si = ShapeInterpolation::singleton();
     previewCheck.setChecked(si.previewEnabled());
-    alignCheck.setChecked(si.centroidAlignment());
+    alignCombo.setCurrentIndex(alignCombo.findData(static_cast<int>(si.alignment())));
 
     QObject::connect(&previewCheck, &QCheckBox::toggled, [](const bool on){ ShapeInterpolation::singleton().setPreviewEnabled(on); });
-    QObject::connect(&alignCheck, &QCheckBox::toggled, [](const bool on){ ShapeInterpolation::singleton().setCentroidAlignment(on); });
+    QObject::connect(&alignCombo, QOverload<int>::of(&QComboBox::activated), [this](const int index){
+        ShapeInterpolation::singleton().setAlignment(static_cast<ShapeInterpolation::Alignment>(alignCombo.itemData(index).toInt()));
+    });
     QObject::connect(&acceptButton, &QPushButton::clicked, this, &ShapeInterpolationWidget::acceptRequested);
     QObject::connect(&discardButton, &QPushButton::clicked, this, &ShapeInterpolationWidget::discardRequested);
     QObject::connect(&sliceList, &QListWidget::itemDoubleClicked, [this](QListWidgetItem * item){
@@ -86,7 +94,7 @@ void ShapeInterpolationWidget::updateFromController() {
     }
 
     previewCheck.setChecked(si.previewEnabled());
-    alignCheck.setChecked(si.centroidAlignment());
+    alignCombo.setCurrentIndex(alignCombo.findData(static_cast<int>(si.alignment())));
     acceptButton.setEnabled(count >= 2);
     discardButton.setEnabled(count >= 1);
 }

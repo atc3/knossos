@@ -172,13 +172,19 @@ public:
     QString planeName() const;
     QString magName() const;
 
-    // When two key slices don't overlap, a plain distance-transform blend collapses to
-    // nothing — and it visibly pinches the shape well before that. Aligning the two
-    // signed distance fields on their centroids before blending removes both artefacts,
-    // which matters because a structure drifting laterally between slices is the normal
-    // case in EM. Off means bit-for-bit Paintera behaviour.
-    bool centroidAlignment() const { return alignCentroids; }
-    void setCentroidAlignment(bool enabled);
+    /* How the two key slices of a pair are lined up before blending.
+     *
+     * When two key slices don't overlap, a plain distance-transform blend collapses to
+     * nothing — and it visibly pinches the shape well before that. Shifting the two signed
+     * distance fields into line before blending removes both artefacts, which matters
+     * because a structure drifting laterally between slices is the normal case in EM.
+     * None is bit-for-bit Paintera behaviour. Centroids lines up the centres of mass, which
+     * an irregular shape — a branch appearing on one side — pulls off the body. Overlap
+     * searches for the translation that makes the two masks overlap most (slicealign.h):
+     * translation only, never rotation or warping. */
+    enum class Alignment { None = 0, Centroids = 1, Overlap = 2 };
+    Alignment alignment() const { return alignMode; }
+    void setAlignment(Alignment mode);
     bool removeSliceAt(int depth);
 
     struct WriteResult {
@@ -241,7 +247,7 @@ public:
 
 signals:
     void changed();
-    void centroidAlignmentChanged(bool enabled);
+    void alignmentChanged(ShapeInterpolation::Alignment mode);
 
 private:
     ShapeInterpolation();
@@ -271,7 +277,10 @@ private:
         int uMin{0}, vMin{0}, uStep{1}, vStep{1}, uSize{0}, vSize{0};
         std::vector<float> d1, d2;
         float c1u{0}, c1v{0}, c2u{0}, c2v{0};// mask-index centroids of the two slices
+        int au{0}, av{0};// best-overlap offset of slice 2 from slice 1, under Alignment::Overlap
     };
+    // the offset of slice 2 from slice 1 that the active alignment blends with
+    void offsetOf(const Interpolant &, float & du, float & dv) const;
     /* Cached per adjacent slice pair, keyed by the lower depth. Computing a signed distance
      * transform is the expensive part of all this; sampling one is not. A cross-section
      * walks every pair at once, so keeping only the most recent one would recompute the
@@ -351,7 +360,7 @@ private:
     // the interpolated mask at `depth` over grid indices [u0, u1) × [v0, v1) of `in` only
     void blendRect(const Interpolant & in, int depth, int u0, int v0, int u1, int v1, SISlice & out) const;
 
-    bool alignCentroids{true};
+    Alignment alignMode{Alignment::Overlap};
 
     SISlice clipboard;// see copySliceAt(); outlives the chain it was taken from
     SISlice previewSlice;

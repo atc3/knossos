@@ -27,6 +27,7 @@
 #include <QCheckBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QComboBox>
 #include <QListWidget>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -41,7 +42,9 @@ class ShapeInterpolationWidget : public DialogVisibilityNotify {
     QLabel statusLabel;
     QListWidget sliceList;
     QCheckBox previewCheck{tr("Preview interpolation")};
-    QCheckBox alignCheck{tr("Align slices on their centroids")};
+    QHBoxLayout alignLayout;
+    QLabel alignLabel{tr("Align slices")};
+    QComboBox alignCombo;
     QHBoxLayout buttonLayout;
     QPushButton acceptButton{tr("Accept (Enter)")};
     QPushButton discardButton{tr("Discard slices")};
