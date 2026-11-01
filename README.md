@@ -19,7 +19,7 @@ A new **Segmentation Shape Interpolation** mode, natively and on the scale of wh
 - The axis follows the viewport you start in; the other two viewports show a cross-section through the chain.
 - Adopt an existing label as a key slice by clicking it (left replaces, right adds a piece), with the whole outline picked up across blocks, not just what is on screen. Paint or erase on an interpolated slice to correct only the part you touch.
 - **← / →** jump between key slices, **Delete** removes one, **Ctrl+Shift+C / V** copies a slice's outline onto another, **Esc** ends the chain, **S** toggles with paint mode.
-- Optional centroid alignment, so a structure drifting sideways does not pinch.
+- Slice alignment, so a structure drifting sideways does not pinch: by best overlap (the translation that lines the two outlines up most, which follows an irregular shape where a branch would pull its centroid off), on centroids, or none — Action ▸ Align Slices, or the Shape interpolation panel.
 - Writes only the blocks the shape reaches, and works above magnification 1.
 
 ### Painting and filling

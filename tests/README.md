@@ -336,3 +336,19 @@ c++ -std=c++17 -O2 -I .. -o /tmp/ir_test inventoryroute_test.cpp && /tmp/ir_test
 ```
 
 Exits non-zero on failure.
+
+## slicealign_test
+
+Exercises `segmentation/slicealign.h`, the best-overlap translation that shape interpolation
+lines key slices up with.
+- **Pure shift:** an irregular shape shifted by (17, −9) is recovered exactly.
+- **Branch on one side:** when the body moves (5, 3) and a long arm appears on one side, the
+  result follows the body, while the centroid offset is pulled to (38, 5).
+- **Large move:** a shape that moved further than its own width is still found.
+- **Ties:** shifts that overlap equally well fall back to the centroid offset.
+- **Empty masks:** an empty mask finds nothing.
+- **Speed:** 512², 1500² and 4096² slices finish well under a second (about 7, 50 and 330 ms).
+
+```bash
+c++ -std=c++17 -O2 -I .. -o /tmp/slicealign_test slicealign_test.cpp && /tmp/slicealign_test
+```
